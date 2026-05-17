@@ -3,13 +3,14 @@ import QuartzCore
 
 final class CCHStatusBarView: NSView {
     static let visibleProviderCharacters = 16
+    static let fixedWidth: CGFloat = 164
 
     enum Payload {
-        case idle(text: String)
+        case idle(primary: String, detail: String)
         case running(provider: String, detail: String, elapsed: String, isRetrying: Bool, sessionCount: Int)
     }
 
-    var payload: Payload = .idle(text: "CCH $0.00")
+    var payload: Payload = .idle(primary: "TTL $0.00", detail: "0 req")
     var onClick: (() -> Void)?
     private var runningPulsePhase: CGFloat = 0
     private var animationTimer: Timer?
@@ -19,16 +20,7 @@ final class CCHStatusBarView: NSView {
     private let pulseDuration: CFTimeInterval = 1.15
 
     var preferredWidth: CGFloat {
-        switch payload {
-        case .idle(let text):
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 12, weight: .semibold)
-            ]
-            let textWidth = ceil((text as NSString).size(withAttributes: attrs).width)
-            return max(76, textWidth + 24)
-        case .running:
-            return 164
-        }
+        Self.fixedWidth
     }
 
     override var isFlipped: Bool { true }
@@ -46,7 +38,7 @@ final class CCHStatusBarView: NSView {
         dirtyRect.fill()
 
         switch payload {
-        case .idle(let text):
+        case .idle(let primary, let detail):
             if wasRunning || idleTransitionProgress < 1 {
                 beginIdleTransition()
             }
@@ -61,10 +53,16 @@ final class CCHStatusBarView: NSView {
             }
             drawLogoTriangle(color: idleColor, center: NSPoint(x: 6, y: 11))
             drawText(
-                text,
-                at: NSPoint(x: 17, y: 4),
-                font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                fixedPrefix(primary, maxCharacters: Self.visibleProviderCharacters),
+                at: NSPoint(x: 18, y: 1),
+                font: NSFont.systemFont(ofSize: 8.8, weight: .semibold),
                 color: .labelColor
+            )
+            drawText(
+                detail,
+                at: NSPoint(x: 18, y: 11),
+                font: NSFont.monospacedSystemFont(ofSize: 8, weight: .medium),
+                color: NSColor.labelColor.withAlphaComponent(0.58)
             )
         case .running(let provider, let detail, let elapsed, let isRetrying, let sessionCount):
             wasRunning = true

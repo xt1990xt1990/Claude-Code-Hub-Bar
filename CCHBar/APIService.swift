@@ -37,8 +37,25 @@ struct CCHActiveSession: Identifiable {
     let status: String
 }
 
+struct CCHLeaderboardModelStat: Identifiable {
+    let id: String
+    let model: String
+    let requests: Int
+    let cost: Double
+    let tokens: Int
+    let inputTokens: Int
+    let cacheReadTokens: Int
+    let cacheHitRateOverride: Double?
+
+    var cacheHitRate: Double? {
+        if let cacheHitRateOverride { return cacheHitRateOverride }
+        guard inputTokens > 0 else { return nil }
+        return Double(cacheReadTokens) / Double(inputTokens)
+    }
+}
+
 struct CCHLeaderboardEntry: Identifiable {
-    let id = UUID()
+    let id: String
     let title: String
     let subtitle: String
     let requests: Int
@@ -46,11 +63,30 @@ struct CCHLeaderboardEntry: Identifiable {
     let tokens: Int
     let inputTokens: Int
     let cacheReadTokens: Int
+    let cacheHitRateOverride: Double?
     let successRate: Double?
+    let modelStats: [CCHLeaderboardModelStat]
 
     var cacheHitRate: Double? {
+        if let cacheHitRateOverride { return cacheHitRateOverride }
         guard inputTokens > 0 else { return nil }
         return Double(cacheReadTokens) / Double(inputTokens)
+    }
+
+    func mergingCacheData(from cache: CCHLeaderboardEntry) -> CCHLeaderboardEntry {
+        CCHLeaderboardEntry(
+            id: id,
+            title: title,
+            subtitle: subtitle,
+            requests: requests,
+            cost: cost,
+            tokens: tokens,
+            inputTokens: cache.inputTokens > 0 ? cache.inputTokens : inputTokens,
+            cacheReadTokens: cache.inputTokens > 0 || cache.cacheHitRateOverride != nil ? cache.cacheReadTokens : cacheReadTokens,
+            cacheHitRateOverride: cache.cacheHitRate ?? cacheHitRateOverride,
+            successRate: successRate,
+            modelStats: mergeLeaderboardModelStats(primary: modelStats, cache: cache.modelStats)
+        )
     }
 }
 
@@ -100,6 +136,7 @@ struct CCHLogEntry: Identifiable {
     let durationMs: Int?
     let ttfbMs: Int?
     let tokensPerSecond: Double?
+    let isFastTier: Bool
     let errorMessage: String
     let providerChain: [CCHProviderChainItem]
 }
@@ -232,16 +269,64 @@ actor APIService {
         }
     }
 
-    func fetchLeaderboard(config: CCHConfig, period: String, scope: String) async throws -> [CCHLeaderboardEntry] {
+    func fetchLeaderboard(
+        config: CCHConfig,
+        period: String,
+        scope: String,
+        cacheHitMode: Bool = false
+    ) async throws -> [CCHLeaderboardEntry] {
+        if !cacheHitMode {
+            return try await fetchLeaderboardWithCacheAnnotations(config: config, period: period, scope: scope)
+        }
+        return try await fetchLeaderboardRows(config: config, period: period, scope: scope, cacheHitMode: true)
+    }
+
+    private func fetchLeaderboardWithCacheAnnotations(
+        config: CCHConfig,
+        period: String,
+        scope: String
+    ) async throws -> [CCHLeaderboardEntry] {
+        async let costRows = fetchLeaderboardRows(config: config, period: period, scope: scope, cacheHitMode: false)
+        async let cacheRows = fetchLeaderboardRows(config: config, period: period, scope: scope, cacheHitMode: true)
+
+        let primary = try await costRows
+        let cache = (try? await cacheRows) ?? []
+        guard !cache.isEmpty else { return primary }
+
+        let cacheByTitle = Dictionary(cache.map { ($0.title.lowercased(), $0) }, uniquingKeysWith: mergeLeaderboardEntries)
+        return primary.map { entry in
+            guard let cacheEntry = cacheByTitle[entry.title.lowercased()] else { return entry }
+            return entry.mergingCacheData(from: cacheEntry)
+        }
+    }
+
+    private func fetchLeaderboardRows(
+        config: CCHConfig,
+        period: String,
+        scope: String,
+        cacheHitMode: Bool
+    ) async throws -> [CCHLeaderboardEntry] {
         let base = try normalizedBaseURL(config)
         guard var components = URLComponents(string: base + "/api/leaderboard") else {
             throw APIError.invalidURL
         }
+        let apiScope: String
+        if cacheHitMode {
+            switch scope {
+            case "user":
+                apiScope = "userCacheHitRate"
+            case "provider":
+                apiScope = "providerCacheHitRate"
+            default:
+                apiScope = scope
+            }
+        } else {
+            apiScope = scope
+        }
         components.queryItems = [
             URLQueryItem(name: "period", value: period),
-            URLQueryItem(name: "scope", value: scope),
-            URLQueryItem(name: "includeModelStats", value: "1")
-        ]
+            URLQueryItem(name: "scope", value: apiScope)
+        ] + leaderboardExtraQueryItems(scope: apiScope)
         guard let url = components.url else { throw APIError.invalidURL }
         let value = try await requestJSON(config: config, url: url, method: "GET", body: nil)
         guard let rows = value as? [[String: Any]] else { throw APIError.parseError }
@@ -249,7 +334,13 @@ actor APIService {
         return rows.map { row in
             let title: String
             let subtitle: String
-            switch scope {
+            switch apiScope {
+            case "providerCacheHitRate":
+                title = stringValue(row["providerName"], fallback: "Provider")
+                subtitle = "缓存命中榜"
+            case "userCacheHitRate":
+                title = stringValue(row["userName"], fallback: "User")
+                subtitle = "缓存命中榜"
             case "provider":
                 title = stringValue(row["providerName"], fallback: "Provider")
                 subtitle = String(format: "success %.1f%%", doubleValue(row["successRate"]) * 100)
@@ -261,19 +352,27 @@ actor APIService {
                 subtitle = "user"
             }
 
+            let cacheHitRate = optionalCacheHitRate(row)
+            let totalInputTokens = intValue(row["totalInputTokens"])
+                + intValue(row["inputTokens"])
+                + intValue(row["promptTokens"])
+            let cacheReadTokens = intValue(row["cacheReadTokens"])
+                + intValue(row["totalCacheReadTokens"])
+                + intValue(row["cacheReadInputTokens"])
+
+            let stableId = leaderboardStableId(row, scope: apiScope, title: title)
             return CCHLeaderboardEntry(
+                id: stableId,
                 title: title,
                 subtitle: subtitle,
                 requests: intValue(row["totalRequests"]),
                 cost: doubleValue(row["totalCost"]),
                 tokens: intValue(row["totalTokens"]),
-                inputTokens: intValue(row["totalInputTokens"])
-                    + intValue(row["inputTokens"])
-                    + intValue(row["promptTokens"]),
-                cacheReadTokens: intValue(row["totalCacheReadTokens"])
-                    + intValue(row["cacheReadTokens"])
-                    + intValue(row["cacheReadInputTokens"]),
-                successRate: row["successRate"] == nil ? nil : doubleValue(row["successRate"])
+                inputTokens: totalInputTokens,
+                cacheReadTokens: cacheReadTokens,
+                cacheHitRateOverride: cacheHitRate,
+                successRate: row["successRate"] == nil ? nil : doubleValue(row["successRate"]),
+                modelStats: parseLeaderboardModelStats(row["modelStats"], parentId: stableId)
             )
         }
     }
@@ -453,6 +552,7 @@ actor APIService {
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(token, forHTTPHeaderField: "X-Api-Key")
         request.setValue("auth-token=\(token)", forHTTPHeaderField: "Cookie")
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -526,6 +626,7 @@ actor APIService {
             durationMs: optionalInt(row["durationMs"]),
             ttfbMs: optionalInt(row["ttfbMs"]),
             tokensPerSecond: optionalDouble(row["tokensPerSecond"]) ?? optionalDouble(row["tokensPerSecondTokens"]) ?? optionalDouble(row["outputTokensPerSecond"]),
+            isFastTier: isFastTierLog(row),
             errorMessage: stringValue(row["errorMessage"]),
             providerChain: chainRows.map {
                 CCHProviderChainItem(
@@ -604,6 +705,220 @@ private func boolValue(_ value: Any?, fallback: Bool = false) -> Bool {
     case let s as String: return ["true", "1", "yes"].contains(s.lowercased())
     default: return fallback
     }
+}
+
+private func isFastTierLog(_ row: [String: Any]) -> Bool {
+    let boolKeys = [
+        "isFastTier",
+        "fastTier",
+        "isPriorityTier",
+        "priorityServiceTier"
+    ]
+    if boolKeys.contains(where: { boolValue(row[$0]) }) {
+        return true
+    }
+
+    let tierKeys = [
+        "serviceTier",
+        "service_tier",
+        "requestedServiceTier",
+        "resolvedServiceTier",
+        "codexServiceTier",
+        "codexServiceTierPreference",
+        "openaiServiceTier"
+    ]
+    if tierKeys.contains(where: { isFastTierText(stringValue(row[$0])) }) {
+        return true
+    }
+
+    return hasPriorityServiceTierSpecialSetting(row["specialSettings"])
+}
+
+private func hasPriorityServiceTierSpecialSetting(_ value: Any?) -> Bool {
+    switch value {
+    case let settings as [[String: Any]]:
+        return settings.contains(where: hasPriorityServiceTierSpecialSetting)
+    case let setting as [String: Any]:
+        let type = stringValue(setting["type"]).lowercased()
+        if type == "codex_service_tier_result" || type.contains("service_tier") || type.contains("service-tier") {
+            let tierValues = [
+                stringValue(setting["requestedServiceTier"]),
+                stringValue(setting["serviceTier"]),
+                stringValue(setting["resolvedServiceTier"]),
+                stringValue(setting["service_tier"]),
+                stringValue(setting["value"]),
+                stringValue(setting["after"])
+            ]
+            if tierValues.contains(where: isFastTierText) {
+                return true
+            }
+        }
+
+        if let changes = setting["changes"] as? [[String: Any]],
+           changes.contains(where: isFastTierChange) {
+            return true
+        }
+
+        return setting.values.contains(where: hasPriorityServiceTierSpecialSetting)
+    case let values as [Any]:
+        return values.contains(where: hasPriorityServiceTierSpecialSetting)
+    case let raw as String:
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if let data = trimmed.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) {
+            return hasPriorityServiceTierSpecialSetting(json)
+        }
+        let lower = trimmed.lowercased()
+        return (lower.contains("service_tier") || lower.contains("service-tier") || lower.contains("servicetier"))
+            && (lower.contains("priority") || lower.contains("fast"))
+    default:
+        return false
+    }
+}
+
+private func isFastTierChange(_ change: [String: Any]) -> Bool {
+    let path = stringValue(change["path"]).lowercased()
+    guard path == "service_tier" || path == "service-tier" || path == "servicetier" else {
+        return false
+    }
+    return isFastTierText(stringValue(change["after"]))
+        || isFastTierText(stringValue(change["value"]))
+}
+
+private func isFastTierText(_ value: String) -> Bool {
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized == "priority"
+        || normalized == "fast"
+        || normalized == "service_tier:priority"
+        || normalized == "service-tier:priority"
+}
+
+private func optionalCacheHitRate(_ row: [String: Any]) -> Double? {
+    let keys = [
+        "cacheHitRate",
+        "cacheHitRatio",
+        "cacheReadRate",
+        "cacheRate",
+        "cacheHitPercentage"
+    ]
+    for key in keys {
+        guard let raw = optionalDouble(row[key]) else { continue }
+        return raw > 1 ? raw / 100 : raw
+    }
+    return nil
+}
+
+private func leaderboardExtraQueryItems(scope: String) -> [URLQueryItem] {
+    switch scope {
+    case "user":
+        return [URLQueryItem(name: "includeUserModelStats", value: "1")]
+    case "provider":
+        return [URLQueryItem(name: "includeModelStats", value: "1")]
+    case "userCacheHitRate":
+        return [URLQueryItem(name: "includeUserModelStats", value: "1")]
+    default:
+        return []
+    }
+}
+
+private func leaderboardStableId(_ row: [String: Any], scope: String, title: String) -> String {
+    switch scope {
+    case "provider", "providerCacheHitRate":
+        let providerId = intValue(row["providerId"])
+        return providerId > 0 ? "provider-\(providerId)" : "provider-\(title.lowercased())"
+    case "user", "userCacheHitRate":
+        let userId = intValue(row["userId"])
+        return userId > 0 ? "user-\(userId)" : "user-\(title.lowercased())"
+    case "model":
+        return "model-\(title.lowercased())"
+    default:
+        return title.lowercased()
+    }
+}
+
+private func parseLeaderboardModelStats(_ value: Any?, parentId: String) -> [CCHLeaderboardModelStat] {
+    guard let rows = value as? [[String: Any]] else { return [] }
+    let parsed: [CCHLeaderboardModelStat] = rows.compactMap { row -> CCHLeaderboardModelStat? in
+        let model = stringValue(row["model"], fallback: "Model")
+        guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let totalInputTokens = intValue(row["totalInputTokens"])
+            + intValue(row["inputTokens"])
+            + intValue(row["promptTokens"])
+        let cacheReadTokens = intValue(row["cacheReadTokens"])
+            + intValue(row["totalCacheReadTokens"])
+            + intValue(row["cacheReadInputTokens"])
+        return CCHLeaderboardModelStat(
+            id: "\(parentId)-model-\(model.lowercased())",
+            model: model,
+            requests: intValue(row["totalRequests"]),
+            cost: doubleValue(row["totalCost"]),
+            tokens: intValue(row["totalTokens"]),
+            inputTokens: totalInputTokens,
+            cacheReadTokens: cacheReadTokens,
+            cacheHitRateOverride: optionalCacheHitRate(row)
+        )
+    }
+    return Dictionary<String, CCHLeaderboardModelStat>(
+        parsed.map { ($0.model.lowercased(), $0) },
+        uniquingKeysWith: mergeLeaderboardModelStat
+    )
+        .values
+        .sorted { lhs, rhs in
+            if lhs.cost != rhs.cost { return lhs.cost > rhs.cost }
+            return lhs.requests > rhs.requests
+        }
+}
+
+private func mergeLeaderboardModelStats(
+    primary: [CCHLeaderboardModelStat],
+    cache: [CCHLeaderboardModelStat]
+) -> [CCHLeaderboardModelStat] {
+    guard !cache.isEmpty else { return primary }
+    let cacheByModel = Dictionary(cache.map { ($0.model.lowercased(), $0) }, uniquingKeysWith: mergeLeaderboardModelStat)
+    if primary.isEmpty { return cache }
+    return primary.map { stat in
+        guard let cacheStat = cacheByModel[stat.model.lowercased()] else { return stat }
+        return CCHLeaderboardModelStat(
+            id: stat.id,
+            model: stat.model,
+            requests: stat.requests,
+            cost: stat.cost,
+            tokens: stat.tokens,
+            inputTokens: cacheStat.inputTokens > 0 ? cacheStat.inputTokens : stat.inputTokens,
+            cacheReadTokens: cacheStat.inputTokens > 0 || cacheStat.cacheHitRateOverride != nil ? cacheStat.cacheReadTokens : stat.cacheReadTokens,
+            cacheHitRateOverride: cacheStat.cacheHitRate ?? stat.cacheHitRate
+        )
+    }
+}
+
+private func mergeLeaderboardEntries(_ lhs: CCHLeaderboardEntry, _ rhs: CCHLeaderboardEntry) -> CCHLeaderboardEntry {
+    CCHLeaderboardEntry(
+        id: lhs.id,
+        title: lhs.title,
+        subtitle: lhs.subtitle,
+        requests: lhs.requests + rhs.requests,
+        cost: lhs.cost + rhs.cost,
+        tokens: lhs.tokens + rhs.tokens,
+        inputTokens: lhs.inputTokens + rhs.inputTokens,
+        cacheReadTokens: lhs.cacheReadTokens + rhs.cacheReadTokens,
+        cacheHitRateOverride: rhs.cacheHitRate ?? lhs.cacheHitRate,
+        successRate: lhs.successRate ?? rhs.successRate,
+        modelStats: mergeLeaderboardModelStats(primary: lhs.modelStats, cache: rhs.modelStats)
+    )
+}
+
+private func mergeLeaderboardModelStat(_ lhs: CCHLeaderboardModelStat, _ rhs: CCHLeaderboardModelStat) -> CCHLeaderboardModelStat {
+    CCHLeaderboardModelStat(
+        id: lhs.id,
+        model: lhs.model,
+        requests: lhs.requests + rhs.requests,
+        cost: lhs.cost + rhs.cost,
+        tokens: lhs.tokens + rhs.tokens,
+        inputTokens: lhs.inputTokens + rhs.inputTokens,
+        cacheReadTokens: lhs.cacheReadTokens + rhs.cacheReadTokens,
+        cacheHitRateOverride: rhs.cacheHitRate ?? lhs.cacheHitRate
+    )
 }
 
 private func compactArrayDescription(_ value: Any?) -> String {

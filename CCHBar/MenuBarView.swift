@@ -2,8 +2,18 @@ import SwiftUI
 
 private enum CCHPanelLayout {
     static let width: CGFloat = 760
+    static let height: CGFloat = 630
     static let contentWidth: CGFloat = 732
-    static let scrollHeight: CGFloat = 525
+    static let scrollHeight: CGFloat = 476
+}
+
+private extension Color {
+    static let cchPanelBackgroundTop = Color(red: 0.075, green: 0.082, blue: 0.105)
+    static let cchPanelBackgroundBottom = Color(red: 0.040, green: 0.045, blue: 0.060)
+    static let cchGlassPanel = Color.white.opacity(0.105)
+    static let cchGlassPanelSoft = Color.white.opacity(0.070)
+    static let cchGlassRow = Color.white.opacity(0.082)
+    static let cchUserAccent = Color.orange.opacity(0.95)
 }
 
 struct CCHLogoMark: View {
@@ -86,18 +96,21 @@ struct MenuBarView: View {
             Divider().opacity(0.25)
             FooterView(state: state)
         }
-        .frame(width: CCHPanelLayout.width)
-        .background(
-            LinearGradient(
-                colors: [
-                    Color(nsColor: .windowBackgroundColor),
-                    Color.orange.opacity(0.06),
-                    Color.purple.opacity(0.05)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
+        .frame(width: CCHPanelLayout.width, height: CCHPanelLayout.height, alignment: .top)
+        .background {
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                LinearGradient(
+                    colors: [
+                        .cchPanelBackgroundTop.opacity(0.78),
+                        .cchPanelBackgroundBottom.opacity(0.86)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+        }
+        .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.18), value: state.isLoading)
         .animation(.spring(response: 0.34, dampingFraction: 0.9), value: state.recentLogs.map(\.id))
         .animation(.spring(response: 0.34, dampingFraction: 0.9), value: state.logs.map(\.id))
@@ -274,7 +287,7 @@ private struct DashboardTabView: View {
 
             HStack(alignment: .top, spacing: 12) {
                 RecentRequestsPanel(state: state)
-                ProviderHealthPanel(state: state)
+                DashboardLeaderboardPanel(state: state)
             }
         }
     }
@@ -304,7 +317,7 @@ private struct RunningRequestsPanel: View {
                     Spacer()
                 }
                 .padding(11)
-                .background(.thinMaterial)
+                .background(Color.cchGlassRow)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else {
                 ForEach(state.menuBarRunningLogs.prefix(4)) { log in
@@ -314,7 +327,7 @@ private struct RunningRequestsPanel: View {
             }
         }
         .padding(11)
-        .background(.regularMaterial)
+        .background(Color.cchGlassPanel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.green.opacity(0.22), lineWidth: 1))
     }
@@ -341,8 +354,7 @@ private struct RunningRequestRow: View {
                     .frame(width: 18, height: 18)
                 CCHTriangleMark()
                     .fill(Color.green)
-                    .frame(width: 8, height: 8)
-                    .offset(x: 0.5)
+                    .frame(width: 8.8, height: 8.8)
             }
 
             VStack(alignment: .leading, spacing: 3) {
@@ -353,9 +365,19 @@ private struct RunningRequestRow: View {
                     MultiplierBadge(value: state.providerMultiplier(for: log.providerName))
                 }
                 Text("\(model.isEmpty ? "模型" : model) · \(log.userName.isEmpty ? "-" : log.userName) · 序号 \(log.requestSequence) · 已运行 \(runningDurationText(log))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .hidden()
+                    .overlay(alignment: .leading) {
+                        HStack(spacing: 0) {
+                            Text(model.isEmpty ? "模型" : model)
+                            Text(" · ")
+                            Text(log.userName.isEmpty ? "-" : log.userName)
+                                .foregroundStyle(Color.cchUserAccent)
+                            Text(" · 序号 \(log.requestSequence) · 已运行 \(runningDurationText(log))")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    }
             }
 
             Spacer()
@@ -392,61 +414,176 @@ private struct RecentRequestsPanel: View {
         }
         .padding(11)
         .frame(maxWidth: .infinity)
-        .background(.regularMaterial)
+        .background(Color.cchGlassPanel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
-private struct ProviderHealthPanel: View {
+private struct DashboardLeaderboardPanel: View {
     @ObservedObject var state: MonitorState
 
-    var attentionProviders: [CCHProvider] {
-        state.providers
-            .filter { $0.health.circuitState.lowercased() != "closed" || $0.health.failureCount > 0 || !$0.isEnabled }
-            .sorted {
-                if $0.health.failureCount != $1.health.failureCount {
-                    return $0.health.failureCount > $1.health.failureCount
-                }
-                return $0.name < $1.name
-            }
+    var accent: Color {
+        switch state.leaderboardScope {
+        case .user: return .orange
+        case .provider: return .purple
+        case .model: return .blue
+        }
+    }
+
+    var title: String {
+        "\(state.leaderboardScope.title)排行"
+    }
+
+    var maxCost: Double {
+        max(state.leaderboard.prefix(12).map(\.cost).max() ?? 0, 0.01)
+    }
+
+    private var scopes: [CCHLeaderboardScope] {
+        [.user, .provider, .model]
+    }
+
+    private func setScope(_ scope: CCHLeaderboardScope) {
+        guard state.leaderboardScope != scope else { return }
+        state.setLeaderboardScope(scope)
+        Task { await state.refreshLeaderboardOnly() }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            SectionHeader(title: "渠道健康", actionTitle: "打开", action: { state.openCCH("/zh-CN/dashboard/providers") })
-
-            HStack(spacing: 8) {
-                MiniStat(title: "启用", value: "\(state.enabledProviderCount)")
-                MiniStat(title: "总数", value: "\(state.providers.count)")
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                HStack(spacing: 4) {
+                    ForEach(scopes) { scope in
+                        let selected = state.leaderboardScope == scope
+                        let scopeColor = leaderboardScopeColor(scope)
+                        Button {
+                            setScope(scope)
+                        } label: {
+                            Text(scope.title)
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(selected ? scopeColor : Color.secondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(selected ? scopeColor.opacity(0.16) : Color.white.opacity(0.045))
+                                .clipShape(Capsule())
+                                .overlay(Capsule().stroke(scopeColor.opacity(selected ? 0.38 : 0.12), lineWidth: 0.8))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .fixedSize(horizontal: true, vertical: false)
             }
 
-            if attentionProviders.isEmpty {
-                HStack(spacing: 8) {
-                    StatusDot(color: .green)
-                    Text("已启用渠道状态正常")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .padding(9)
-                .background(.thinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            if state.leaderboard.isEmpty {
+                EmptyStateView(text: "暂无排行数据")
             } else {
-                ForEach(attentionProviders.prefix(5)) { provider in
-                    CompactProviderRow(provider: provider)
-                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(Array(state.leaderboard.prefix(12).enumerated()), id: \.element.id) { index, entry in
+                            DashboardLeaderboardRow(
+                                rank: index + 1,
+                                entry: entry,
+                                accent: accent,
+                                maxCost: maxCost,
+                                cacheHitRate: state.leaderboardCacheHitRate(for: entry)
+                            )
+                        }
+                    }
+                    .padding(.trailing, 3)
                 }
+                .frame(height: 272)
             }
         }
-        .padding(11)
-        .frame(width: 260)
-        .background(.regularMaterial)
+        .padding(14)
+        .frame(width: 292)
+        .background(Color.cchGlassPanel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(accent.opacity(0.18), lineWidth: 1))
+    }
+}
+
+private func leaderboardScopeColor(_ scope: CCHLeaderboardScope) -> Color {
+    switch scope {
+    case .user: return .orange
+    case .provider: return .purple
+    case .model: return .blue
+    }
+}
+
+private struct DashboardLeaderboardRow: View {
+    let rank: Int
+    let entry: CCHLeaderboardEntry
+    let accent: Color
+    let maxCost: Double
+    let cacheHitRate: Double?
+
+    var rankColor: Color {
+        switch rank {
+        case 1: return .orange
+        case 2: return .secondary
+        default: return .red
+        }
+    }
+
+    var progress: Double {
+        min(1, max(0.035, entry.cost / maxCost))
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(rankColor.opacity(0.18))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(rankColor.opacity(0.35), lineWidth: 1))
+                Image(systemName: rank == 1 ? "trophy.fill" : "medal.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(rankColor)
+            }
+            .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(entry.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text(formatMoney(entry.cost))
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                }
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.12))
+                        Capsule()
+                            .fill(accent)
+                            .frame(width: proxy.size.width * progress)
+                    }
+                }
+                .frame(height: 5)
+                HStack {
+                    Text("\(compactNumber(entry.requests)) 请求")
+                    Text("\(compactNumber(entry.tokens)) Token")
+                    Spacer()
+                    Text("缓存 \(cacheHitRate.map(formatPercent) ?? "-")")
+                        .foregroundStyle(cacheRateColor(cacheHitRate))
+                }
+                .font(.system(size: 9, weight: .medium))
+                .monospacedDigit()
+            }
+        }
     }
 }
 
 private struct LeaderboardTabView: View {
     @ObservedObject var state: MonitorState
+
+    var accent: Color {
+        leaderboardScopeColor(state.leaderboardScope)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -494,15 +631,28 @@ private struct LeaderboardTabView: View {
 
             if state.leaderboard.isEmpty {
                 EmptyStateView(text: "暂无排行数据")
+                    .frame(width: CCHPanelLayout.contentWidth, alignment: .leading)
             } else {
                 VStack(spacing: 8) {
                     ForEach(Array(state.leaderboard.prefix(12).enumerated()), id: \.element.id) { index, entry in
-                        LeaderboardRow(rank: index + 1, entry: entry)
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                        LeaderboardRow(
+                            state: state,
+                            rank: index + 1,
+                            entry: entry,
+                            cacheHitRate: state.leaderboardCacheHitRate(for: entry),
+                            accent: accent
+                        )
                     }
+                }
+                .frame(width: CCHPanelLayout.contentWidth, alignment: .topLeading)
+                .transaction { transaction in
+                    transaction.animation = nil
                 }
             }
         }
+        .frame(width: CCHPanelLayout.contentWidth, alignment: .topLeading)
+        .animation(nil, value: state.leaderboard.map(\.id))
+        .animation(nil, value: state.leaderboardScope)
     }
 }
 
@@ -549,20 +699,49 @@ private struct LogsTabView: View {
             }
 
             HStack(alignment: .top, spacing: 12) {
-                VStack(spacing: 7) {
-                    if state.logs.isEmpty {
-                        EmptyStateView(text: "暂无日志")
-                    } else {
-                        ForEach(state.logs.prefix(18)) { log in
-                            LogRow(log: log, isSelected: state.selectedLog?.id == log.id)
-                                .onTapGesture {
-                                    state.selectedLog = log
+                ScrollView {
+                    LazyVStack(spacing: 7) {
+                        if state.logs.isEmpty {
+                            EmptyStateView(text: "暂无日志")
+                        } else {
+                            ForEach(state.logs) { log in
+                                LogRow(log: log, isSelected: state.selectedLog?.id == log.id)
+                                    .onTapGesture {
+                                        state.selectedLog = log
+                                    }
+                                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                            }
+
+                            if state.logs.count < state.logTotal {
+                                Button {
+                                    Task { await state.loadMoreLogs() }
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if state.isLoadingMoreLogs {
+                                            ProgressView()
+                                                .scaleEffect(0.62)
+                                        }
+                                        Text(state.isLoadingMoreLogs ? "加载中" : "加载更多")
+                                            .font(.system(size: 11, weight: .semibold))
+                                        Text("\(state.logs.count)/\(state.logTotal)")
+                                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                                            .foregroundStyle(.secondary)
+                                            .monospacedDigit()
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 7)
+                                    .background(Color.cchGlassPanelSoft)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 }
-                                .transition(.opacity.combined(with: .move(edge: .trailing)))
+                                .buttonStyle(.plain)
+                                .disabled(state.isLoadingMoreLogs)
+                            }
                         }
                     }
+                    .padding(.trailing, 3)
                 }
                 .frame(maxWidth: .infinity)
+                .frame(height: 346)
 
                 LogDetailView(log: state.selectedLog ?? state.logs.first)
                     .frame(width: 250)
@@ -616,14 +795,16 @@ private struct ProviderGroupChips: View {
                             state.toggleProviderGroup(group)
                         } label: {
                             let selected = state.isProviderGroupSelected(group)
+                            let color = providerGroupColor(group)
                             Text(group)
                                 .font(.system(size: 10.5, weight: .semibold))
                                 .lineLimit(1)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
-                                .background(selected ? Color.orange.opacity(0.22) : Color(nsColor: .controlBackgroundColor).opacity(0.55))
-                                .foregroundStyle(selected ? .orange : .primary)
+                                .background(selected ? color.opacity(0.28) : color.opacity(0.14))
+                                .foregroundStyle(selected ? color : color.opacity(0.90))
                                 .clipShape(Capsule())
+                                .overlay(Capsule().stroke(color.opacity(selected ? 0.52 : 0.26), lineWidth: 1))
                         }
                         .buttonStyle(.plain)
                     }
@@ -659,7 +840,7 @@ private struct MetricCard: View {
                 .foregroundStyle(.secondary)
         }
         .padding(12)
-        .background(.regularMaterial)
+        .background(Color.cchGlassPanel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.22), lineWidth: 1))
     }
@@ -680,7 +861,7 @@ private struct MiniStat: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(.regularMaterial)
+        .background(Color.cchGlassPanel)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -724,6 +905,19 @@ private struct StatusCapsule: View {
     }
 }
 
+private struct FastTierBadge: View {
+    var body: some View {
+        Text("FAST")
+            .font(.system(size: 8.5, weight: .bold, design: .rounded))
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Color.orange.opacity(0.14))
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(Color.orange.opacity(0.24), lineWidth: 0.7))
+    }
+}
+
 private struct ProviderTag: View {
     let text: String
     let color: Color
@@ -739,7 +933,8 @@ private struct ProviderTag: View {
             .foregroundStyle(color)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
-            .background(color.opacity(0.12))
+            .background(color.opacity(0.18))
+            .overlay(Capsule().stroke(color.opacity(0.26), lineWidth: 1))
             .clipShape(Capsule())
             .lineLimit(1)
     }
@@ -830,56 +1025,162 @@ private struct ActiveSessionRow: View {
                 .frame(width: 62, alignment: .trailing)
         }
         .padding(9)
-        .background(.thinMaterial)
+        .background(Color.cchGlassRow)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
 private struct LeaderboardRow: View {
+    @ObservedObject var state: MonitorState
     let rank: Int
     let entry: CCHLeaderboardEntry
+    let cacheHitRate: Double?
+    let accent: Color
 
-    var cacheColor: Color {
-        entry.cacheHitRate == nil ? Color.secondary : Color.mint
+    var isExpanded: Bool {
+        state.expandedLeaderboardEntryId == entry.id
+    }
+
+    var canExpand: Bool {
+        !entry.modelStats.isEmpty
     }
 
     var body: some View {
-        HStack(spacing: 10) {
-            Text("\(rank)")
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .foregroundStyle(rank <= 3 ? .orange : .secondary)
-                .frame(width: 24)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Text(entry.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        VStack(spacing: 0) {
+            Button {
+                guard canExpand else { return }
+                state.expandedLeaderboardEntryId = isExpanded ? nil : entry.id
+            } label: {
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(accent.opacity(rank <= 3 ? 0.24 : 0.15))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(accent.opacity(rank <= 3 ? 0.42 : 0.24), lineWidth: 1))
+                        Text("\(rank)")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(rank <= 3 ? accent : accent.opacity(0.82))
+                    }
+                    .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 5) {
+                            Text(entry.title)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            if canExpand {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 8.5, weight: .bold))
+                                    .foregroundStyle(.secondary)
+                                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            }
+                        }
+                        Text(entry.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    Spacer()
+                    Text("\(compactNumber(entry.requests)) 次")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 64, alignment: .trailing)
+                    Text(compactNumber(entry.tokens))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 70, alignment: .trailing)
+                    Text(cacheHitRate.map(formatPercent) ?? "-")
+                        .font(.caption)
+                        .foregroundStyle(cacheRateColor(cacheHitRate))
+                        .monospacedDigit()
+                        .frame(width: 58, alignment: .trailing)
+                    Text(formatMoney(entry.cost))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .frame(width: 70, alignment: .trailing)
+                }
+                .padding(9)
+                .background(
+                    LinearGradient(
+                        colors: [
+                            accent.opacity(0.16),
+                            Color.white.opacity(0.050)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .contentShape(Rectangle())
             }
-            Spacer()
-            Text("\(compactNumber(entry.requests)) 次")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-            Text(compactNumber(entry.tokens))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-            Text(entry.cacheHitRate.map(formatPercent) ?? "-")
-                .font(.caption)
-                .foregroundStyle(cacheColor)
-                .monospacedDigit()
-                .frame(width: 58, alignment: .trailing)
-            Text(formatMoney(entry.cost))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 70, alignment: .trailing)
+            .buttonStyle(.plain)
+            .disabled(!canExpand)
+
+            if isExpanded {
+                VStack(spacing: 5) {
+                    ForEach(entry.modelStats.prefix(8)) { stat in
+                        LeaderboardModelStatRow(stat: stat)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 9)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
-        .padding(9)
-        .background(.thinMaterial)
+        .frame(width: CCHPanelLayout.contentWidth, alignment: .leading)
+        .background(Color.cchGlassRow)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.16), lineWidth: 1))
+        .animation(.easeInOut(duration: 0.16), value: isExpanded)
+    }
+}
+
+private struct LeaderboardModelStatRow: View {
+    let stat: CCHLeaderboardModelStat
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(stat.model)
+                .font(.system(size: 10.5, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Text("\(compactNumber(stat.requests)) 次")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 56, alignment: .trailing)
+            Text(compactNumber(stat.tokens))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 62, alignment: .trailing)
+            Text(stat.cacheHitRate.map(formatPercent) ?? "-")
+                .font(.caption2)
+                .foregroundStyle(cacheRateColor(stat.cacheHitRate))
+                .monospacedDigit()
+                .frame(width: 52, alignment: .trailing)
+            Text(formatMoney(stat.cost))
+                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(width: 62, alignment: .trailing)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.08),
+                    Color.white.opacity(0.04)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -895,7 +1196,12 @@ private struct LogRow: View {
     }
 
     var throughput: Double? {
-        log.tokensPerSecond ?? computedTokensPerSecond(outputTokens: log.outputTokens, durationMs: log.durationMs, ttfbMs: log.ttfbMs)
+        normalizedTokensPerSecond(
+            raw: log.tokensPerSecond,
+            outputTokens: log.outputTokens,
+            durationMs: log.durationMs,
+            ttfbMs: log.ttfbMs
+        )
     }
 
     var body: some View {
@@ -906,12 +1212,24 @@ private struct LogRow: View {
                     Text(log.model.isEmpty ? log.originalModel : log.model)
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
+                    if log.isFastTier {
+                        FastTierBadge()
+                    }
+                    MultiplierBadge(value: logProviderMultiplier(log), compact: true)
                     StatusCapsule(text: log.statusCode.map(String.init) ?? "请求中", color: statusColor)
                 }
-                Text("\(shortTime(log.createdAt)) · \(log.userName) · \(log.providerName)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                Text("\(log.userName.isEmpty ? "-" : log.userName) · \(log.providerName.isEmpty ? "渠道" : log.providerName) · \(shortTime(log.createdAt))")
+                    .hidden()
+                    .overlay(alignment: .leading) {
+                        HStack(spacing: 0) {
+                            Text(log.userName.isEmpty ? "-" : log.userName)
+                                .foregroundStyle(Color.cchUserAccent)
+                            Text(" · \(log.providerName.isEmpty ? "渠道" : log.providerName) · \(shortTime(log.createdAt))")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    }
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 1) {
@@ -959,7 +1277,12 @@ private struct CompactLogRow: View {
     }
 
     var throughput: Double? {
-        log.tokensPerSecond ?? computedTokensPerSecond(outputTokens: log.outputTokens, durationMs: log.durationMs, ttfbMs: log.ttfbMs)
+        normalizedTokensPerSecond(
+            raw: log.tokensPerSecond,
+            outputTokens: log.outputTokens,
+            durationMs: log.durationMs,
+            ttfbMs: log.ttfbMs
+        )
     }
 
     var body: some View {
@@ -971,11 +1294,22 @@ private struct CompactLogRow: View {
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
                     MultiplierBadge(value: logProviderMultiplier(log), compact: true)
+                    if log.isFastTier {
+                        FastTierBadge()
+                    }
                 }
-                Text("\(model.isEmpty ? "模型" : model) · \(shortTime(log.createdAt))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                Text("\(log.userName.isEmpty ? "-" : log.userName) · \(model.isEmpty ? "模型" : model) · \(shortTime(log.createdAt))")
+                    .hidden()
+                    .overlay(alignment: .leading) {
+                        HStack(spacing: 0) {
+                            Text(log.userName.isEmpty ? "-" : log.userName)
+                                .foregroundStyle(Color.cchUserAccent)
+                            Text(" · \(model.isEmpty ? "模型" : model) · \(shortTime(log.createdAt))")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    }
             }
             Spacer()
             StatusCapsule(text: statusText, color: statusColor)
@@ -1030,7 +1364,12 @@ private struct LogDetailView: View {
     let log: CCHLogEntry?
 
     func throughput(_ log: CCHLogEntry) -> Double? {
-        log.tokensPerSecond ?? computedTokensPerSecond(outputTokens: log.outputTokens, durationMs: log.durationMs, ttfbMs: log.ttfbMs)
+        normalizedTokensPerSecond(
+            raw: log.tokensPerSecond,
+            outputTokens: log.outputTokens,
+            durationMs: log.durationMs,
+            ttfbMs: log.ttfbMs
+        )
     }
 
     var body: some View {
@@ -1040,6 +1379,7 @@ private struct LogDetailView: View {
             if let log {
                 DetailLine("Session ID", value: log.sessionId.isEmpty ? "-" : log.sessionId)
                 DetailLine("端点", value: log.endpoint.isEmpty ? "-" : log.endpoint)
+                DetailLine("倍率", value: formatMultiplier(logProviderMultiplier(log)))
                 DetailLine("Tokens", value: "\(compactNumber(log.totalTokens))  in \(compactNumber(log.inputTokens)) / out \(compactNumber(log.outputTokens))")
                 DetailLine("缓存", value: "\(compactNumber(log.cacheCreationTokens)) 写 / \(compactNumber(log.cacheReadTokens)) 读")
                 DetailLine("性能", value: "\(formatMillisecondsAsSeconds(log.durationMs)) · TTFB \(formatMillisecondsAsSeconds(log.ttfbMs)) · \(formatTokensPerSecond(throughput(log)))")
@@ -1060,7 +1400,7 @@ private struct LogDetailView: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
-                        .background(.thinMaterial)
+                        .background(Color.cchGlassRow)
                         .clipShape(Capsule())
                 }
                 if log.providerChain.isEmpty {
@@ -1078,7 +1418,7 @@ private struct LogDetailView: View {
             Spacer()
         }
         .padding(10)
-        .background(.regularMaterial)
+        .background(Color.cchGlassPanel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
@@ -1171,7 +1511,7 @@ private struct ProviderRow: View {
                             .font(.system(size: 12, weight: .semibold))
                             .lineLimit(1)
                         ForEach(providerGroupTitles(provider.groupTag).prefix(2), id: \.self) { group in
-                            ProviderTag(group, color: .purple)
+                            ProviderTag(group, color: providerGroupColor(group))
                         }
                     }
                     HStack(spacing: 6) {
@@ -1231,7 +1571,7 @@ private struct ProviderRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
-        .background(.thinMaterial)
+        .background(Color.cchGlassRow)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -1283,10 +1623,10 @@ private struct LogStatusIndicator: View {
             if isRunning {
                 Circle()
                     .stroke(runningColor.opacity(pulse ? 0 : 0.55), lineWidth: 1.4)
-                    .frame(width: pulse ? 20 : 10, height: pulse ? 20 : 10)
+                    .frame(width: 18, height: 18)
                 CCHTriangleMark()
                     .fill(runningColor)
-                    .frame(width: 7, height: 8)
+                    .frame(width: 8, height: 8)
                     .offset(x: 0.5)
             } else {
                 Circle()
@@ -1318,7 +1658,7 @@ private struct EmptyStateView: View {
                 .padding(.vertical, 18)
             Spacer()
         }
-        .background(.thinMaterial)
+        .background(Color.cchGlassRow)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }

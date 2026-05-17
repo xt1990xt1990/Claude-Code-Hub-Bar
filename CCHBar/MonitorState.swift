@@ -24,6 +24,7 @@ enum CCHLeaderboardPeriod: String, CaseIterable, Identifiable {
     case daily
     case weekly
     case monthly
+    case allTime
 
     var id: String { rawValue }
     var title: String {
@@ -31,6 +32,7 @@ enum CCHLeaderboardPeriod: String, CaseIterable, Identifiable {
         case .daily: return "今天"
         case .weekly: return "本周"
         case .monthly: return "本月"
+        case .allTime: return "全部"
         }
     }
 }
@@ -90,6 +92,7 @@ final class MonitorState: ObservableObject {
     @Published var selectedTab: CCHPanelTab = .dashboard
     @Published var leaderboardPeriod: CCHLeaderboardPeriod = .daily
     @Published var leaderboardScope: CCHLeaderboardScope = .user
+    @Published var expandedLeaderboardEntryId: String?
     @Published var logRange: CCHLogRange = .day1
     @Published var logModelFilter = ""
     @Published var logStatusFilter = ""
@@ -104,6 +107,8 @@ final class MonitorState: ObservableObject {
     @Published var logs: [CCHLogEntry] = []
     @Published var logSummary = CCHLogSummary()
     @Published var logTotal = 0
+    @Published var logPage = 1
+    @Published var isLoadingMoreLogs = false
     @Published var providers: [CCHProvider] = []
 
     @Published var lastRefresh: Date?
@@ -129,8 +134,12 @@ final class MonitorState: ObservableObject {
         "TTL \(formatMoney(overview.todayCost))"
     }
 
+    var menuBarIdleDetail: String {
+        "\(compactNumber(overview.todayRequests)) req"
+    }
+
     var providerMultiplierById: [Int: Double] {
-        Dictionary(uniqueKeysWithValues: providers.map { ($0.id, $0.costMultiplier) })
+        Dictionary(providers.map { ($0.id, $0.costMultiplier) }, uniquingKeysWith: { current, _ in current })
     }
 
     var filteredActiveSessions: [CCHActiveSession] {
@@ -206,6 +215,15 @@ final class MonitorState: ObservableObject {
 
     var filteredUnhealthyProviderCount: Int {
         filteredProviders.filter { $0.health.circuitState.lowercased() != "closed" || $0.health.failureCount > 0 }.count
+    }
+
+    func leaderboardCacheHitRate(for entry: CCHLeaderboardEntry) -> Double? {
+        entry.cacheHitRate
+    }
+
+    func setLeaderboardScope(_ scope: CCHLeaderboardScope) {
+        leaderboardScope = scope
+        expandedLeaderboardEntryId = nil
     }
 
     init() {
@@ -335,9 +353,17 @@ final class MonitorState: ObservableObject {
 
     func refreshLogsOnly() async {
         isLoading = true
-        errorMessage = await loadLogs()
+        errorMessage = await loadLogs(reset: true)
         lastRefresh = Date()
         isLoading = false
+    }
+
+    func loadMoreLogs() async {
+        guard !isLoadingMoreLogs, logs.count < logTotal || logTotal == 0 else { return }
+        isLoadingMoreLogs = true
+        errorMessage = await loadLogs(reset: false)
+        lastRefresh = Date()
+        isLoadingMoreLogs = false
     }
 
     func refreshLeaderboardOnly() async {
@@ -357,7 +383,7 @@ final class MonitorState: ObservableObject {
         case .dashboard:
             error = await loadOverview()
         case .logs:
-            error = await loadLogs()
+            error = await loadLogs(reset: true)
         case .leaderboard:
             error = await loadLeaderboard()
         case .providers:
@@ -492,22 +518,29 @@ final class MonitorState: ObservableObject {
         }
     }
 
-    private func loadLogs() async -> String? {
+    private func loadLogs(reset: Bool = true) async -> String? {
         do {
+            let nextPage = reset ? 1 : logPage + 1
             let page = try await api.fetchLogs(
                 config: config,
-                page: 1,
+                page: nextPage,
                 pageSize: 50,
                 startDate: logRange.startDate,
                 model: logModelFilter,
                 statusCode: logStatusFilter,
                 sessionId: logSessionFilter
             )
-            logs = page.logs
+            logPage = nextPage
+            if reset {
+                logs = page.logs
+            } else {
+                let existingIds = Set(logs.map(\.id))
+                logs.append(contentsOf: page.logs.filter { !existingIds.contains($0.id) })
+            }
             if logModelFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                logStatusFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                logSessionFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                recentLogs = page.logs
+                recentLogs = Array(logs.prefix(50))
             }
             logTotal = page.total
             logSummary = page.summary
@@ -601,6 +634,21 @@ func formatTokensPerSecond(_ value: Double?) -> String {
     return String(format: "%.0f tok/s", value)
 }
 
+func shouldHideOutputRate(outputRate: Double?, durationMs: Int?, ttfbMs: Int?) -> Bool {
+    guard
+        let outputRate,
+        outputRate.isFinite,
+        let durationMs,
+        durationMs > 0,
+        let ttfbMs
+    else { return false }
+
+    let generationTimeMs = durationMs - ttfbMs
+    guard generationTimeMs > 0 else { return false }
+    let ratio = Double(generationTimeMs) / Double(durationMs)
+    return ratio < 0.1 && outputRate > 5000
+}
+
 func computedTokensPerSecond(outputTokens: Int, durationMs: Int?, ttfbMs: Int?) -> Double? {
     guard
         outputTokens > 0,
@@ -608,12 +656,40 @@ func computedTokensPerSecond(outputTokens: Int, durationMs: Int?, ttfbMs: Int?) 
         durationMs > 0
     else { return nil }
     let generationMs = max(1, durationMs - (ttfbMs ?? 0))
-    return Double(outputTokens) / (Double(generationMs) / 1000)
+    let outputRate = Double(outputTokens) / (Double(generationMs) / 1000)
+    return shouldHideOutputRate(outputRate: outputRate, durationMs: durationMs, ttfbMs: ttfbMs) ? nil : outputRate
+}
+
+func normalizedTokensPerSecond(
+    raw: Double?,
+    outputTokens: Int,
+    durationMs: Int?,
+    ttfbMs: Int?
+) -> Double? {
+    if let raw, shouldHideOutputRate(outputRate: raw, durationMs: durationMs, ttfbMs: ttfbMs) {
+        return nil
+    }
+    if let raw, raw > 0 {
+        return raw
+    }
+    return computedTokensPerSecond(outputTokens: outputTokens, durationMs: durationMs, ttfbMs: ttfbMs)
 }
 
 func cacheHitRate(cacheReadTokens: Int, inputTokens: Int) -> Double {
     guard inputTokens > 0 else { return 0 }
     return min(1, max(0, Double(cacheReadTokens) / Double(inputTokens)))
+}
+
+func cacheRateColor(_ rate: Double?) -> Color {
+    guard let rate else { return .secondary }
+    switch rate {
+    case let value where value >= 0.85:
+        return .green
+    case let value where value >= 0.6:
+        return .yellow
+    default:
+        return .orange
+    }
 }
 
 func formatMultiplier(_ value: Double) -> String {
@@ -662,6 +738,23 @@ func providerGroupTitles(_ value: String) -> [String] {
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
     return groups.isEmpty ? ["默认"] : groups
+}
+
+func providerGroupColor(_ group: String) -> Color {
+    let normalized = group.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if normalized.isEmpty || normalized == "全部" || normalized == "默认" || normalized == "default" {
+        return .secondary
+    }
+
+    let hash = normalized.unicodeScalars.reduce(5381) { partial, scalar in
+        ((partial << 5) &+ partial) &+ Int(scalar.value)
+    }
+    let hue = Double(abs(hash % 360)) / 360.0
+    return Color(
+        hue: hue,
+        saturation: 0.82,
+        brightness: 0.92
+    )
 }
 
 func parseCCHDate(_ raw: String) -> Date? {

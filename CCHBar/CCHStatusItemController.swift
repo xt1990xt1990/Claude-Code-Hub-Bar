@@ -15,7 +15,7 @@ private struct CCHMenuBarRunningItem {
 final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private let state = MonitorState()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    private let statusView = CCHStatusBarView(frame: NSRect(x: 0, y: 0, width: 112, height: 22))
+    private let statusView = CCHStatusBarView(frame: NSRect(x: 0, y: 0, width: CCHStatusBarView.fixedWidth, height: 22))
     private let popover = NSPopover()
     private var stateCancellable: AnyCancellable?
     private var rotationTimer: AnyCancellable?
@@ -59,7 +59,11 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         popover.behavior = .transient
         popover.delegate = self
         popover.contentSize = NSSize(width: 760, height: 630)
-        popover.contentViewController = NSHostingController(rootView: MenuBarView(state: state))
+        let host = NSHostingController(rootView: MenuBarView(state: state))
+        host.view.wantsLayer = true
+        host.view.layer?.backgroundColor = NSColor.clear.cgColor
+        host.view.layer?.masksToBounds = false
+        popover.contentViewController = host
     }
 
     private func observeState() {
@@ -106,7 +110,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             statusItem.button?.toolTip = "\(provider) · \(billingText) · \(formatMultiplier(item.multiplier))"
         } else {
             runningItemIndex = 0
-            statusView.payload = .idle(text: state.menuBarText)
+            statusView.payload = .idle(primary: state.menuBarText, detail: state.menuBarIdleDetail)
             statusItem.button?.toolTip = "Claude Code Hub idle"
         }
 
@@ -287,6 +291,12 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         } else {
             state.setPanelVisible(true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            if let window = popover.contentViewController?.view.window {
+                window.appearance = NSAppearance(named: .darkAqua)
+                window.backgroundColor = .clear
+                window.isOpaque = false
+                window.hasShadow = true
+            }
             Task { await state.refreshFocusedView() }
         }
     }
