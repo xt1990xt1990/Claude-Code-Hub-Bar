@@ -7,6 +7,10 @@ struct SettingsView: View {
     @State private var refreshStatus: SettingsRefreshStatus = .idle
     @State private var revealToken = false
     @State private var showAdvancedConnection = false
+    @State private var draftCCHBaseURL = ""
+    @State private var draftCCHToken = ""
+    @State private var draftCCHEnvPath = ""
+    @State private var isApplyingConnection = false
     @State private var launchError: String?
 
     var body: some View {
@@ -26,7 +30,14 @@ struct SettingsView: View {
         .background(SettingsBackground())
         .onAppear {
             launchAtLogin = SMAppService.mainApp.status == .enabled
+            loadConnectionDrafts()
         }
+    }
+
+    private var hasConnectionChanges: Bool {
+        draftCCHBaseURL != state.cchBaseURL
+            || draftCCHToken != state.cchToken
+            || draftCCHEnvPath != state.cchEnvPath
     }
 
     private var connectionCard: some View {
@@ -37,16 +48,16 @@ struct SettingsView: View {
             accent: .blue
         ) {
             SettingsControlRow(title: "服务地址", subtitle: "用于打开页面和请求 API。") {
-                SettingsInputField(text: $state.cchBaseURL, placeholder: "https://cch.example.com/", isURL: true)
+                SettingsInputField(text: $draftCCHBaseURL, placeholder: "https://cch.example.com/", isURL: true)
             }
 
             SettingsControlRow(title: "API Key", subtitle: revealToken ? "当前处于明文显示，确认后建议关闭。" : "默认隐藏，点击右侧按钮可完整显示。") {
-            TokenInputField(text: $state.cchToken, revealToken: $revealToken)
+                TokenInputField(text: $draftCCHToken, revealToken: $revealToken)
             }
 
             DisclosureGroup(isExpanded: $showAdvancedConnection) {
                 SettingsControlRow(title: "Env 文件", subtitle: "只作为备用读取来源；应用不会自动写入。") {
-                    SettingsInputField(text: $state.cchEnvPath, placeholder: "/path/to/local.env")
+                    SettingsInputField(text: $draftCCHEnvPath, placeholder: "/path/to/local.env")
                 }
                 .padding(.top, 8)
             } label: {
@@ -60,14 +71,34 @@ struct SettingsView: View {
                 Button {
                     runConnectionCheck()
                 } label: {
-                    Label(refreshStatus == .checking ? "验证中" : "测试连接", systemImage: "antenna.radiowaves.left.and.right")
+                    Label(isApplyingConnection ? "验证中" : "测试连接", systemImage: "antenna.radiowaves.left.and.right")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .disabled(refreshStatus == .checking)
+                .disabled(isApplyingConnection)
 
                 SettingsStatusPill(status: refreshStatus, errorMessage: state.errorMessage)
                 Spacer()
+
+                if hasConnectionChanges {
+                    Text("未应用")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.orange.opacity(0.12))
+                        .clipShape(Capsule())
+                }
+
+                Button {
+                    applyConnectionSettings()
+                } label: {
+                    Label(isApplyingConnection ? "应用中" : "应用", systemImage: "checkmark.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.blue)
+                .disabled(!hasConnectionChanges || isApplyingConnection)
             }
         }
     }
@@ -157,12 +188,30 @@ struct SettingsView: View {
         }
     }
 
-    private func runConnectionCheck() {
+    private func loadConnectionDrafts() {
+        draftCCHBaseURL = state.cchBaseURL
+        draftCCHToken = state.cchToken
+        draftCCHEnvPath = state.cchEnvPath
+    }
+
+    private func applyConnectionSettings() {
         refreshStatus = .checking
+        isApplyingConnection = true
+
+        state.cchBaseURL = draftCCHBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        state.cchToken = draftCCHToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        state.cchEnvPath = draftCCHEnvPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        loadConnectionDrafts()
+
         Task {
             await state.refresh()
             refreshStatus = state.errorMessage == nil ? .success : .failed
+            isApplyingConnection = false
         }
+    }
+
+    private func runConnectionCheck() {
+        applyConnectionSettings()
     }
 
     private func runFullRefresh() {

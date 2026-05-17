@@ -126,7 +126,7 @@ final class MonitorState: ObservableObject {
     }
 
     var menuBarText: String {
-        "CCH \(formatMoney(overview.todayCost))"
+        "TTL \(formatMoney(overview.todayCost))"
     }
 
     var providerMultiplierById: [Int: Double] {

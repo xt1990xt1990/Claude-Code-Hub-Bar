@@ -57,9 +57,9 @@ final class CCHStatusBarView: NSView {
                 progress: idleTransitionProgress
             )
             if blueAlpha > 0.02 {
-                drawRunningRing(color: NSColor.systemBlue.withAlphaComponent(blueAlpha), x: 0, y: 4)
+                drawRunningRing(color: NSColor.systemBlue.withAlphaComponent(blueAlpha), center: NSPoint(x: 6, y: 11))
             }
-            drawLogoTriangle(color: idleColor, x: 1, y: 5)
+            drawLogoTriangle(color: idleColor, center: NSPoint(x: 6, y: 11))
             drawText(
                 text,
                 at: NSPoint(x: 17, y: 4),
@@ -71,7 +71,7 @@ final class CCHStatusBarView: NSView {
             idleTransitionProgress = 0
             startRunningAnimation()
             let accent = isRetrying ? NSColor.systemOrange : NSColor.systemBlue
-            drawRunningIcon(color: accent, x: -2, y: 4)
+            drawRunningIcon(color: accent, center: NSPoint(x: 6, y: 11))
             if sessionCount > 1 {
                 drawMultiSessionBadge(count: sessionCount, color: accent, x: 5, y: 2)
             }
@@ -83,7 +83,7 @@ final class CCHStatusBarView: NSView {
             )
             drawText(
                 elapsed,
-                at: NSPoint(x: 123, y: 0),
+                at: NSPoint(x: 123, y: 3),
                 font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .bold),
                 color: accent
             )
@@ -112,28 +112,32 @@ final class CCHStatusBarView: NSView {
         return String(trimmed.prefix(maxCharacters))
     }
 
-    private func drawLogoTriangle(color: NSColor, x: CGFloat, y: CGFloat) {
+    private func drawLogoTriangle(color: NSColor, center: NSPoint) {
         color.setFill()
+        let width: CGFloat = 10
+        let height: CGFloat = 9
+        let x = center.x - width / 2
+        let y = center.y - height * 2 / 3
         let path = NSBezierPath()
-        path.move(to: NSPoint(x: x + 5, y: y))
-        path.line(to: NSPoint(x: x + 10, y: y + 9))
-        path.line(to: NSPoint(x: x, y: y + 9))
+        path.move(to: NSPoint(x: x + width / 2, y: y))
+        path.line(to: NSPoint(x: x + width, y: y + height))
+        path.line(to: NSPoint(x: x, y: y + height))
         path.close()
         path.fill()
     }
 
-    private func drawRunningIcon(color: NSColor, x: CGFloat, y: CGFloat) {
-        drawRunningRing(color: color, x: x, y: y)
-        drawLogoTriangle(color: color, x: x + 1, y: y + 1)
+    private func drawRunningIcon(color: NSColor, center: NSPoint) {
+        drawRunningRing(color: color, center: center)
+        drawLogoTriangle(color: color, center: center)
     }
 
-    private func drawRunningRing(color: NSColor, x: CGFloat, y: CGFloat) {
+    private func drawRunningRing(color: NSColor, center: NSPoint) {
         let easedPhase = 1 - pow(1 - runningPulsePhase, 1.8)
         let size = 10 + easedPhase * 13
         let alpha = max(0, color.alphaComponent * 0.58 * (1 - runningPulsePhase))
         let ringRect = NSRect(
-            x: x + 6 - size / 2,
-            y: y + 7 - size / 2,
+            x: center.x - size / 2,
+            y: center.y - size / 2,
             width: size,
             height: size
         )
