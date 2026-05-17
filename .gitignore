@@ -1,0 +1,29 @@
+# Xcode
+build/
+DerivedData/
+*.app
+*.dSYM
+*.xcuserstate
+*.xcuserdatad
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
+*.swp
+*.lock
+
+# Archives
+*.xcarchive
+*.ipa
+*.app.dSYM.zip
+release/
+
+# Secrets / credentials
+.env
+*.env
+.env.*
+.cchbar.env
+env.txt
+*.key
+*.pem
