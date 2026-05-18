@@ -89,6 +89,85 @@ private struct CCHTriangleMark: Shape {
     }
 }
 
+private enum ModelBrand: String {
+    case openai
+    case claude
+    case deepseek
+    case gemini
+
+    var assetName: String {
+        switch self {
+        case .openai: return "model-openai"
+        case .claude: return "model-claude"
+        case .deepseek: return "model-deepseek"
+        case .gemini: return "model-gemini"
+        }
+    }
+
+    static func resolve(model: String, provider: String = "") -> ModelBrand? {
+        let text = "\(model) \(provider)".lowercased()
+        if text.contains("deepseek") { return .deepseek }
+        if text.contains("gemini") || text.contains("google") { return .gemini }
+        if text.contains("claude") || text.contains("anthropic") { return .claude }
+        if text.contains("openai")
+            || text.contains("codex")
+            || text.contains("gpt")
+            || text.contains("o1")
+            || text.contains("o3")
+            || text.contains("o4")
+            || text.contains("o5") {
+            return .openai
+        }
+        return nil
+    }
+}
+
+private struct ModelBrandIcon: View {
+    let model: String
+    var provider: String = ""
+    var size: CGFloat = 13
+
+    var body: some View {
+        if let brand = ModelBrand.resolve(model: model, provider: provider) {
+            Image(brand.assetName)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
+        }
+    }
+}
+
+private struct NewLogEdgeFlash: View {
+    let active: Bool
+    @State private var visible = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+            .fill(Color.blue.opacity(visible ? 0.95 : 0))
+            .frame(width: 2)
+            .padding(.vertical, 6)
+            .onAppear {
+                guard active else { return }
+                visible = true
+                withAnimation(.easeOut(duration: 0.55)) {
+                    visible = false
+                }
+            }
+            .onChange(of: active) { _, newValue in
+                guard newValue else {
+                    visible = false
+                    return
+                }
+                visible = true
+                withAnimation(.easeOut(duration: 0.55)) {
+                    visible = false
+                }
+            }
+    }
+}
+
 struct MenuBarView: View {
     @ObservedObject var state: MonitorState
 
@@ -153,8 +232,6 @@ struct MenuBarView: View {
         }
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.18), value: state.isLoading)
-        .animation(.spring(response: 0.34, dampingFraction: 0.9), value: state.recentLogs.map(\.id))
-        .animation(.spring(response: 0.34, dampingFraction: 0.9), value: state.logs.map(\.id))
         .onAppear {
             state.setPanelVisible(true)
         }
@@ -373,7 +450,7 @@ private struct RunningRequestsPanel: View {
             } else {
                 ForEach(state.menuBarRunningLogs.prefix(4)) { log in
                     RunningRequestRow(state: state, log: log)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .transition(.opacity)
                 }
             }
         }
@@ -418,12 +495,13 @@ private struct RunningRequestRow: View {
                 Text("\(model.isEmpty ? "模型" : model) · \(log.userName.isEmpty ? "-" : log.userName) · 序号 \(log.requestSequence) · 已运行 \(runningDurationText(log))")
                     .hidden()
                     .overlay(alignment: .leading) {
-                        HStack(spacing: 0) {
+                        HStack(spacing: 4) {
+                            ModelBrandIcon(model: model, provider: log.providerName, size: 12)
                             Text(model.isEmpty ? "模型" : model)
-                            Text(" · ")
+                            Text("·")
                             Text(log.userName.isEmpty ? "-" : log.userName)
                                 .foregroundStyle(Color.cchUserAccent)
-                            Text(" · 序号 \(log.requestSequence) · 已运行 \(runningDurationText(log))")
+                            Text("· 序号 \(log.requestSequence) · 已运行 \(runningDurationText(log))")
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -458,8 +536,12 @@ private struct RecentRequestsPanel: View {
                 EmptyStateView(text: "暂无最近日志")
             } else {
                 ForEach(state.recentLogs.prefix(5)) { log in
-                    CompactLogRow(log: log, cacheStatus: state.cacheStatus(for: log))
-                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    CompactLogRow(
+                        log: log,
+                        cacheStatus: state.cacheStatus(for: log),
+                        isNew: state.highlightedLogIds.contains(log.id)
+                    )
+                    .transition(.opacity)
                 }
             }
         }
@@ -760,11 +842,16 @@ private struct LogsTabView: View {
                             EmptyStateView(text: "暂无日志")
                         } else {
                             ForEach(state.logs) { log in
-                                LogRow(log: log, isSelected: state.selectedLog?.id == log.id, cacheStatus: state.cacheStatus(for: log))
+                                LogRow(
+                                    log: log,
+                                    isSelected: state.selectedLog?.id == log.id,
+                                    cacheStatus: state.cacheStatus(for: log),
+                                    isNew: state.highlightedLogIds.contains(log.id)
+                                )
                                     .onTapGesture {
                                         state.selectedLog = log
                                     }
-                                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                                    .transition(.opacity)
                             }
 
                             if state.logs.count < state.logTotal {
@@ -1166,9 +1253,12 @@ private struct ActiveSessionRow: View {
         HStack(spacing: 10) {
             StatusDot(color: session.concurrentCount > 0 ? .green : .secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.model.isEmpty ? session.apiType : session.model)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    ModelBrandIcon(model: session.model.isEmpty ? session.apiType : session.model, provider: session.providerName, size: 13)
+                    Text(session.model.isEmpty ? session.apiType : session.model)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                }
                 Text("\(session.userName) · \(session.keyName) · \(session.providerName)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1222,6 +1312,9 @@ private struct LeaderboardRow: View {
                     .frame(width: 28, height: 28)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 5) {
+                            if state.leaderboardScope == .model {
+                                ModelBrandIcon(model: entry.title, provider: entry.subtitle, size: 13)
+                            }
                             Text(entry.title)
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.primary)
@@ -1301,10 +1394,13 @@ private struct LeaderboardModelStatRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(stat.model)
-                .font(.system(size: 10.5, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.middle)
+            HStack(spacing: 5) {
+                ModelBrandIcon(model: stat.model, size: 12)
+                Text(stat.model)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             Spacer()
             Text("\(compactNumber(stat.requests)) 次")
                 .font(.caption2)
@@ -1346,6 +1442,7 @@ private struct LogRow: View {
     let log: CCHLogEntry
     let isSelected: Bool
     let cacheStatus: CCHCacheStatusContext
+    let isNew: Bool
 
     var statusColor: Color {
         guard let code = log.statusCode else { return .secondary }
@@ -1363,12 +1460,17 @@ private struct LogRow: View {
         )
     }
 
+    var model: String {
+        log.model.isEmpty ? log.originalModel : log.model
+    }
+
     var body: some View {
         HStack(spacing: 9) {
             LogStatusIndicator(color: statusColor, isRunning: log.statusCode == nil)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
-                    Text(log.model.isEmpty ? log.originalModel : log.model)
+                    ModelBrandIcon(model: model, provider: log.providerName, size: 13)
+                    Text(model)
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
                     if log.isFastTier {
@@ -1426,6 +1528,9 @@ private struct LogRow: View {
         }
         .padding(8)
         .background(isSelected ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .overlay(alignment: .leading) {
+            NewLogEdgeFlash(active: isNew)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -1433,6 +1538,7 @@ private struct LogRow: View {
 private struct CompactLogRow: View {
     let log: CCHLogEntry
     let cacheStatus: CCHCacheStatusContext
+    let isNew: Bool
 
     var statusColor: Color {
         guard let code = log.statusCode else { return .green }
@@ -1474,10 +1580,13 @@ private struct CompactLogRow: View {
                 Text("\(log.userName.isEmpty ? "-" : log.userName) · \(model.isEmpty ? "模型" : model) · \(shortTime(log.createdAt))")
                     .hidden()
                     .overlay(alignment: .leading) {
-                        HStack(spacing: 0) {
+                        HStack(spacing: 4) {
                             Text(log.userName.isEmpty ? "-" : log.userName)
                                 .foregroundStyle(Color.cchUserAccent)
-                            Text(" · \(model.isEmpty ? "模型" : model) · \(shortTime(log.createdAt))")
+                            Text("·")
+                            ModelBrandIcon(model: model, provider: log.providerName, size: 11)
+                            Text(model.isEmpty ? "模型" : model)
+                            Text("· \(shortTime(log.createdAt))")
                         }
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -1513,6 +1622,9 @@ private struct CompactLogRow: View {
         }
         .padding(8)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .overlay(alignment: .leading) {
+            NewLogEdgeFlash(active: isNew)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -1530,9 +1642,16 @@ private struct CompactProviderRow: View {
         HStack(spacing: 8) {
             StatusDot(color: healthColor)
             VStack(alignment: .leading, spacing: 2) {
-                Text(provider.name)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    ModelBrandIcon(
+                        model: "\(provider.lastCallModel) \(provider.allowedModels)",
+                        provider: "\(provider.providerType) \(provider.name)",
+                        size: 12
+                    )
+                    Text(provider.name)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .lineLimit(1)
+                }
                 Text(provider.isEnabled ? "\(provider.health.circuitState) · 失败 \(provider.health.failureCount)" : "已停用")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -1637,6 +1756,7 @@ private struct ProviderChainRow: View {
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
+                    ModelBrandIcon(model: item.providerType, provider: item.name, size: 12)
                     Text(item.name)
                         .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
@@ -1696,6 +1816,11 @@ private struct ProviderRow: View {
                 HStack(alignment: .center, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
+                            ModelBrandIcon(
+                                model: "\(provider.lastCallModel) \(provider.allowedModels)",
+                                provider: "\(provider.providerType) \(provider.name)",
+                                size: 13
+                            )
                             Text(provider.name)
                                 .font(.system(size: 12, weight: .semibold))
                                 .lineLimit(1)

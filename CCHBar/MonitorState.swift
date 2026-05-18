@@ -111,6 +111,7 @@ final class MonitorState: ObservableObject {
     @Published var logPage = 1
     @Published var isLoadingMoreLogs = false
     @Published var providers: [CCHProvider] = []
+    @Published private(set) var highlightedLogIds: Set<Int> = []
 
     @Published var lastRefresh: Date?
     @Published var isLoading = false
@@ -133,6 +134,8 @@ final class MonitorState: ObservableObject {
     private var lastAnnouncedCacheAlertLogId: Int?
     private var cacheAlertDismissTask: Task<Void, Never>?
     private var simulatedCacheAlertDismissTask: Task<Void, Never>?
+    private var highlightedLogDismissTasks: [Int: Task<Void, Never>] = [:]
+    private var knownLogIds = Set<Int>()
     private var recentLogHistory: [CCHLogEntry] = []
 
     var config: CCHConfig {
@@ -268,6 +271,7 @@ final class MonitorState: ObservableObject {
         refreshTask?.cancel()
         cacheAlertDismissTask?.cancel()
         simulatedCacheAlertDismissTask?.cancel()
+        highlightedLogDismissTasks.values.forEach { $0.cancel() }
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
@@ -502,6 +506,7 @@ final class MonitorState: ObservableObject {
 
         do {
             let page = try await recentLogsResult
+            registerIncomingLogs(page.logs, isReset: true)
             recentLogs = page.logs
             mergeRecentLogHistory(page.logs)
             rebuildCacheStatus()
@@ -603,6 +608,7 @@ final class MonitorState: ObservableObject {
                 statusCode: logStatusFilter,
                 sessionId: logSessionFilter
             )
+            registerIncomingLogs(page.logs, isReset: reset)
             logPage = nextPage
             if reset {
                 logs = page.logs
@@ -635,6 +641,27 @@ final class MonitorState: ObservableObject {
             return nil
         } catch {
             return "渠道: \(error.localizedDescription)"
+        }
+    }
+
+    private func registerIncomingLogs(_ values: [CCHLogEntry], isReset: Bool) {
+        let ids = Set(values.map(\.id))
+        defer {
+            knownLogIds.formUnion(ids)
+        }
+
+        guard isReset, !knownLogIds.isEmpty else { return }
+        let newIds = ids.subtracting(knownLogIds)
+        guard !newIds.isEmpty else { return }
+
+        highlightedLogIds.formUnion(newIds)
+        for id in newIds {
+            highlightedLogDismissTasks[id]?.cancel()
+            highlightedLogDismissTasks[id] = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                self.highlightedLogIds.remove(id)
+                self.highlightedLogDismissTasks[id] = nil
+            }
         }
     }
 

@@ -37,6 +37,7 @@ xcodebuild -project CCHBar.xcodeproj -scheme CCHBar -configuration Release build
 
 - 致敬 [Claude Code Hub](https://github.com/ding113/claude-code-hub) 作者。
 - 感谢 `mbot6183` 提供的 Codex 相关支持。
+- 模型图标来自 [LobeHub Icons](https://github.com/lobehub/lobe-icons)。
 
 ## 许可证
 
