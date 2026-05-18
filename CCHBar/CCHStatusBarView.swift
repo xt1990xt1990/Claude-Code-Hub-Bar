@@ -289,23 +289,58 @@ final class CCHStatusBarView: NSView {
 
     private func updateCacheIndicator(state: CCHCacheVisibilityState, isRunning: Bool) {
         guard showsDetails else {
+            cacheIndicatorLayer.removeAnimation(forKey: "breath")
             cacheIndicatorLayer.opacity = 0
             return
         }
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.18)
         switch state {
         case .normal:
-            let color = isRunning
-                ? NSColor.systemGreen.withAlphaComponent(0.82)
+            let target = isRunning
+                ? NSColor.systemGreen.withAlphaComponent(0.95)
                 : NSColor.labelColor.withAlphaComponent(0.30)
-            cacheIndicatorLayer.backgroundColor = color.cgColor
-            cacheIndicatorLayer.opacity = 0.82
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.8)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
+            cacheIndicatorLayer.backgroundColor = target.cgColor
+            CATransaction.commit()
+            if isRunning {
+                applyBreathingAnimation(period: 2.8, minOpacity: 0.45, maxOpacity: 1.0)
+            } else {
+                cacheIndicatorLayer.removeAnimation(forKey: "breath")
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(0.4)
+                cacheIndicatorLayer.opacity = 0.55
+                CATransaction.commit()
+            }
         case .rebuilding:
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             cacheIndicatorLayer.backgroundColor = NSColor.systemRed.withAlphaComponent(0.95).cgColor
-            cacheIndicatorLayer.opacity = 1
+            CATransaction.commit()
+            applyBreathingAnimation(period: 0.55, minOpacity: 0.55, maxOpacity: 1.0)
         }
-        CATransaction.commit()
+    }
+
+    private func applyBreathingAnimation(period: CFTimeInterval, minOpacity: Float, maxOpacity: Float) {
+        let presented = cacheIndicatorLayer.presentation()?.opacity ?? cacheIndicatorLayer.opacity
+        cacheIndicatorLayer.removeAnimation(forKey: "breath")
+
+        let breath = CABasicAnimation(keyPath: "opacity")
+        breath.fromValue = minOpacity
+        breath.toValue = maxOpacity
+        breath.duration = period / 2
+        breath.autoreverses = true
+        breath.repeatCount = .infinity
+        breath.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        breath.timeOffset = breathPhaseOffset(currentOpacity: presented, minOpacity: minOpacity, maxOpacity: maxOpacity, halfPeriod: period / 2)
+        cacheIndicatorLayer.add(breath, forKey: "breath")
+        cacheIndicatorLayer.opacity = maxOpacity
+    }
+
+    private func breathPhaseOffset(currentOpacity: Float, minOpacity: Float, maxOpacity: Float, halfPeriod: CFTimeInterval) -> CFTimeInterval {
+        let span = max(0.0001, maxOpacity - minOpacity)
+        let normalized = max(0, min(1, (currentOpacity - minOpacity) / span))
+        return CFTimeInterval(normalized) * halfPeriod
     }
 
     private func drawLogoTriangle(color: NSColor, center: NSPoint) {

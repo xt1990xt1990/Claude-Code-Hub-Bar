@@ -26,6 +26,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private var lastRunningItems: [CCHMenuBarRunningItem] = []
     private var lastRunningItemsSeenAt: Date?
     private let runningSessionHoldDuration: TimeInterval = 5
+    private var outsideClickMonitor: Any?
 
     override init() {
         super.init()
@@ -58,8 +59,9 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private func configurePopover() {
-        popover.behavior = .transient
+        popover.behavior = .applicationDefined
         popover.delegate = self
+        popover.animates = true
         popover.contentSize = NSSize(width: 760, height: 630)
         let host = NSHostingController(rootView: MenuBarView(state: state))
         host.view.wantsLayer = true
@@ -304,12 +306,47 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
                 window.backgroundColor = .clear
                 window.isOpaque = false
                 window.hasShadow = true
+                window.makeKey()
             }
-            Task { await state.refreshFocusedView() }
+            if let contentView = popover.contentViewController?.view {
+                forceActiveMaterial(in: contentView)
+            }
+            startOutsideClickMonitor()
+            Task {
+                try? await Task.sleep(nanoseconds: 220_000_000)
+                await state.refreshFocusedView()
+            }
+        }
+    }
+
+    private func forceActiveMaterial(in view: NSView) {
+        if let effect = view as? NSVisualEffectView {
+            effect.state = .active
+        }
+        for sub in view.subviews {
+            forceActiveMaterial(in: sub)
+        }
+    }
+
+    private func startOutsideClickMonitor() {
+        stopOutsideClickMonitor()
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            guard let self = self, self.popover.isShown else { return }
+            self.popover.performClose(nil)
+        }
+    }
+
+    private func stopOutsideClickMonitor() {
+        if let monitor = outsideClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            outsideClickMonitor = nil
         }
     }
 
     func popoverDidClose(_ notification: Notification) {
+        stopOutsideClickMonitor()
         state.setPanelVisible(false)
     }
 }

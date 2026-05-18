@@ -8,11 +8,11 @@ private enum CCHPanelLayout {
 }
 
 private extension Color {
-    static let cchPanelBackgroundTop = Color(red: 0.075, green: 0.082, blue: 0.105)
-    static let cchPanelBackgroundBottom = Color(red: 0.040, green: 0.045, blue: 0.060)
-    static let cchGlassPanel = Color.white.opacity(0.105)
-    static let cchGlassPanelSoft = Color.white.opacity(0.070)
-    static let cchGlassRow = Color.white.opacity(0.082)
+    static let cchPanelBackgroundTop = Color(red: 0.135, green: 0.142, blue: 0.170)
+    static let cchPanelBackgroundBottom = Color(red: 0.085, green: 0.090, blue: 0.115)
+    static let cchGlassPanel = Color.white.opacity(0.085)
+    static let cchGlassPanelSoft = Color.white.opacity(0.055)
+    static let cchGlassRow = Color.white.opacity(0.065)
     static let cchUserAccent = Color.orange.opacity(0.95)
 }
 
@@ -168,68 +168,168 @@ private struct NewLogEdgeFlash: View {
     }
 }
 
+private struct CCHSegmentedTabBar: View {
+    @Binding var selection: CCHPanelTab
+    @Namespace private var indicatorNamespace
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(CCHPanelTab.allCases) { tab in
+                let isActive = selection == tab
+                Button {
+                    guard selection != tab else { return }
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                        selection = tab
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: tab.icon)
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(tab.rawValue)
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                    .background {
+                        if isActive {
+                            if #available(macOS 26.0, *) {
+                                Color.clear
+                                    .glassEffect(
+                                        .regular.interactive(),
+                                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    )
+                                    .matchedGeometryEffect(id: "cchTabIndicator", in: indicatorNamespace)
+                            } else {
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Color.white.opacity(0.16))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .stroke(Color.white.opacity(0.14), lineWidth: 0.5)
+                                    )
+                                    .shadow(color: Color.black.opacity(0.18), radius: 3, x: 0, y: 1)
+                                    .matchedGeometryEffect(id: "cchTabIndicator", in: indicatorNamespace)
+                            }
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+                )
+        )
+    }
+}
+
 struct MenuBarView: View {
     @ObservedObject var state: MonitorState
+    @State private var builtTabs: Set<CCHPanelTab> = [.dashboard]
 
     var body: some View {
         VStack(spacing: 0) {
             HeaderView(state: state)
             Divider().opacity(0.35)
-            Picker("", selection: $state.selectedTab) {
-                ForEach(CCHPanelTab.allCases) { tab in
-                    Label(tab.rawValue, systemImage: tab.icon).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            CCHSegmentedTabBar(selection: $state.selectedTab)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
 
             Divider().opacity(0.25)
 
-            ScrollView {
-                Group {
-                    switch state.selectedTab {
-                    case .dashboard:
-                        DashboardTabView(state: state)
-                    case .leaderboard:
-                        LeaderboardTabView(state: state)
-                    case .logs:
-                        LogsTabView(state: state)
-                    case .providers:
-                        ProvidersTabView(state: state)
+            ZStack(alignment: .topLeading) {
+                ForEach(CCHPanelTab.allCases) { tab in
+                    Group {
+                        if builtTabs.contains(tab) {
+                            ScrollView {
+                                Group {
+                                    switch tab {
+                                    case .dashboard:
+                                        DashboardTabView(state: state)
+                                    case .leaderboard:
+                                        LeaderboardTabView(state: state)
+                                    case .logs:
+                                        LogsTabView(state: state)
+                                    case .providers:
+                                        ProvidersTabView(state: state)
+                                    }
+                                }
+                                .frame(width: CCHPanelLayout.contentWidth, alignment: .topLeading)
+                                .padding(14)
+                            }
+                        } else {
+                            Color.clear
+                        }
                     }
+                    .frame(width: CCHPanelLayout.width, height: CCHPanelLayout.scrollHeight)
+                    .opacity(state.selectedTab == tab ? 1 : 0)
+                    .offset(x: tabSlideOffset(for: tab))
+                    .allowsHitTesting(state.selectedTab == tab)
                 }
-                .frame(width: CCHPanelLayout.contentWidth, alignment: .topLeading)
-                .padding(14)
-                .id(state.selectedTab)
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .move(edge: .trailing)),
-                    removal: .opacity.combined(with: .move(edge: .leading))
-                ))
             }
             .frame(width: CCHPanelLayout.width, height: CCHPanelLayout.scrollHeight)
-            .onChange(of: state.selectedTab) { _, _ in
-                Task { await state.refreshFocusedView() }
+            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: state.selectedTab)
+            .onChange(of: state.selectedTab) { _, newTab in
+                builtTabs.insert(newTab)
+                Task {
+                    try? await Task.sleep(nanoseconds: 220_000_000)
+                    await state.refreshFocusedView()
+                }
             }
-            .animation(.spring(response: 0.34, dampingFraction: 0.88), value: state.selectedTab)
 
             Divider().opacity(0.25)
             FooterView(state: state)
         }
         .frame(width: CCHPanelLayout.width, height: CCHPanelLayout.height, alignment: .top)
         .background {
-            ZStack {
-                Rectangle().fill(.ultraThinMaterial)
-                LinearGradient(
-                    colors: [
-                        .cchPanelBackgroundTop.opacity(0.78),
-                        .cchPanelBackgroundBottom.opacity(0.86)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+            if #available(macOS 26.0, *) {
+                Rectangle()
+                    .fill(Color.clear)
+                    .glassEffect(.clear, in: Rectangle())
+                    .overlay {
+                        VStack(spacing: 0) {
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.22), Color.white.opacity(0)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 1.2)
+                            Spacer(minLength: 0)
+                        }
+                    }
+            } else {
+                ZStack {
+                    Rectangle().fill(.ultraThinMaterial)
+                    LinearGradient(
+                        colors: [
+                            .cchPanelBackgroundTop.opacity(0.16),
+                            .cchPanelBackgroundBottom.opacity(0.28)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    VStack(spacing: 0) {
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.18), Color.white.opacity(0)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 1.2)
+                        Spacer(minLength: 0)
+                    }
+                }
             }
         }
+        .overlay(
+            Rectangle()
+                .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
+        )
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.18), value: state.isLoading)
         .onAppear {
@@ -238,6 +338,14 @@ struct MenuBarView: View {
         .onDisappear {
             state.setPanelVisible(false)
         }
+    }
+
+    private func tabSlideOffset(for tab: CCHPanelTab) -> CGFloat {
+        let order = CCHPanelTab.allCases
+        guard let current = order.firstIndex(of: state.selectedTab),
+              let target = order.firstIndex(of: tab) else { return 0 }
+        if target == current { return 0 }
+        return target < current ? -8 : 8
     }
 }
 
