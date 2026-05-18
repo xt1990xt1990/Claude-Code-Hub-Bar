@@ -28,8 +28,8 @@ final class CCHStatusBarView: NSView {
     private let textLeading: CGFloat = 21
     private let primaryLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
+    private let countLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")
-    private let badgeLabel = NSTextField(labelWithString: "")
     private let cacheIndicatorLayer = CALayer()
 
     var preferredWidth: CGFloat {
@@ -50,7 +50,11 @@ final class CCHStatusBarView: NSView {
         elapsedLabel.frame = NSRect(x: elapsedX, y: 0.8, width: elapsedWidth, height: 14)
         elapsedLabel.alignment = .center
 
-        badgeLabel.frame = NSRect(x: 6.8, y: 1.1, width: 8, height: 8)
+        let countWidth: CGFloat = 18
+        let countX = max(textLeading + 48, elapsedX - countWidth - 2)
+        countLabel.frame = NSRect(x: countX, y: 1.0, width: countWidth, height: 13)
+        countLabel.alignment = .right
+
         cacheIndicatorLayer.frame = CGRect(
             x: elapsedLabel.frame.midX - 7,
             y: elapsedLabel.frame.maxY + 0.8,
@@ -98,15 +102,12 @@ final class CCHStatusBarView: NSView {
                 drawRunningRing(color: NSColor.systemBlue.withAlphaComponent(blueAlpha), center: iconCenter)
             }
             drawLogoTriangle(color: idleColor, center: iconCenter)
-        case .running(let provider, let detail, let elapsed, let isRetrying, let sessionCount, _):
+        case .running(let provider, let detail, let elapsed, let isRetrying, _, _):
             wasRunning = true
             idleTransitionProgress = 0
             startRunningAnimation()
             let accent = isRetrying ? NSColor.systemOrange : NSColor.systemBlue
             drawRunningIcon(color: accent, center: iconCenter)
-            if sessionCount > 1 {
-                drawMultiSessionBadge(color: accent, x: 7, y: 2)
-            }
             _ = provider
             _ = detail
             _ = elapsed
@@ -116,7 +117,7 @@ final class CCHStatusBarView: NSView {
     private func configureLabels() {
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
-        for label in [primaryLabel, detailLabel, elapsedLabel, badgeLabel] {
+        for label in [primaryLabel, detailLabel, countLabel, elapsedLabel] {
             label.isBezeled = false
             label.drawsBackground = false
             label.isEditable = false
@@ -127,10 +128,9 @@ final class CCHStatusBarView: NSView {
         }
         primaryLabel.frame = NSRect(x: textLeading, y: 0, width: 98, height: 11)
         detailLabel.frame = NSRect(x: textLeading, y: 10, width: 106, height: 11)
+        countLabel.frame = NSRect(x: 104, y: 1.0, width: 18, height: 13)
         elapsedLabel.frame = NSRect(x: 119, y: 1.2, width: 42, height: 14)
         elapsedLabel.alignment = .center
-        badgeLabel.frame = NSRect(x: 6.6, y: 0.8, width: 8, height: 8)
-        badgeLabel.alignment = .center
         cacheIndicatorLayer.cornerRadius = 1.5
         cacheIndicatorLayer.frame = CGRect(x: 133, y: 16.8, width: 14, height: 2)
         cacheIndicatorLayer.opacity = 0
@@ -150,8 +150,8 @@ final class CCHStatusBarView: NSView {
             detailLabel.textColor = NSColor.labelColor.withAlphaComponent(0.58)
             detailLabel.frame = NSRect(x: textLeading, y: 10, width: 112, height: 11)
 
+            countLabel.isHidden = true
             elapsedLabel.isHidden = true
-            badgeLabel.isHidden = true
             updateCacheIndicator(state: cacheState)
         case .running(let provider, let detail, let elapsed, let isRetrying, let sessionCount, let cacheState):
             let accent = isRetrying ? NSColor.systemOrange : NSColor.systemBlue
@@ -170,10 +170,11 @@ final class CCHStatusBarView: NSView {
             elapsedLabel.textColor = accent
             elapsedLabel.isHidden = false
 
-            badgeLabel.stringValue = min(sessionCount, 9).description
-            badgeLabel.font = NSFont.monospacedSystemFont(ofSize: 6, weight: .bold)
-            badgeLabel.textColor = accent
-            badgeLabel.isHidden = sessionCount <= 1
+            countLabel.stringValue = "×\(sessionCount)"
+            countLabel.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .bold)
+            countLabel.textColor = accent
+            countLabel.isHidden = sessionCount <= 1
+
             updateCacheIndicator(state: cacheState)
         }
     }
@@ -278,13 +279,5 @@ final class CCHStatusBarView: NSView {
             blue: from.blueComponent + (to.blueComponent - from.blueComponent) * p,
             alpha: from.alphaComponent + (to.alphaComponent - from.alphaComponent) * p
         )
-    }
-
-    private func drawMultiSessionBadge(color: NSColor, x: CGFloat, y: CGFloat) {
-        let badgeRect = NSRect(x: x, y: y, width: 8, height: 8)
-        NSColor.windowBackgroundColor.withAlphaComponent(0.92).setFill()
-        NSBezierPath(ovalIn: badgeRect).fill()
-        color.withAlphaComponent(0.92).setStroke()
-        NSBezierPath(ovalIn: badgeRect.insetBy(dx: 0.5, dy: 0.5)).stroke()
     }
 }
