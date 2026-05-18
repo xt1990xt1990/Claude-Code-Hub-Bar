@@ -17,7 +17,9 @@ Private configuration should be entered locally and should not be committed to t
 - Menu bar summary for today’s cost and request activity.
 - Running-request mode with provider, billing model, multiplier, and elapsed time.
 - Rotation for multiple running requests.
-- Dashboard, leaderboard, logs, and providers panels.
+- Breathing cache indicator in the menu bar — slow green pulse, fast red flash on rebuild.
+- Dashboard, leaderboard, logs, and providers panels with a sliding-pill tab switcher.
+- Liquid Glass translucent panel on macOS 26, with an `ultraThinMaterial` fallback on older systems.
 - Log details with provider chain, TTFB, throughput, and cache tokens.
 - Cache hit-rate display for logs and leaderboards.
 - Provider group filters, enable/disable, probe, and circuit reset controls.
