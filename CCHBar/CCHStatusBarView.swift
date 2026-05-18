@@ -313,7 +313,7 @@ final class CCHStatusBarView: NSView {
         let width: CGFloat = 7.8
         let height: CGFloat = 7.1
         let tipX = round(center.x * 2) / 2
-        let tipY = round((center.y - 2.1) * 2) / 2
+        let tipY = round((center.y - height * 2 / 3) * 2) / 2
         let baseY = tipY + height
         let halfWidth = width / 2
         let path = NSBezierPath()

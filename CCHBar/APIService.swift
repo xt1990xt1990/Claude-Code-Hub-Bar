@@ -393,18 +393,26 @@ actor APIService {
     func fetchProviders(config: CCHConfig) async throws -> [CCHProvider] {
         let providersData: Any
         let healthData: Any?
+        let usageRows: [CCHLeaderboardEntry]
         do {
             providersData = try await getV1(config: config, path: "/api/v1/providers")
             healthData = try? await getV1(config: config, path: "/api/v1/providers/health")
+            usageRows = (try? await fetchOfficialLeaderboardRows(config: config, period: "daily", scope: "provider", cacheHitMode: false)) ?? []
         } catch where shouldFallbackToActions(error) {
             providersData = try await postAction(config: config, module: "providers", action: "getProviders")
             healthData = try? await postAction(config: config, module: "providers", action: "getProvidersHealthStatus")
+            let usageLogRows = (try? await fetchUsageLogRowsForLeaderboard(config: config, period: "daily")) ?? []
+            usageRows = aggregateLeaderboard(rows: usageLogRows, scope: "provider")
         }
         let rows = itemRows(from: providersData)
         let healthMap = healthData as? [String: Any] ?? [:]
+        let usageById = Dictionary(uniqueKeysWithValues: usageRows.map { ($0.id, $0) })
+        let usageByName = Dictionary(usageRows.map { ($0.title.lowercased(), $0) }, uniquingKeysWith: mergeLeaderboardEntries)
 
         return rows.map { row in
             let id = intValue(row["id"])
+            let name = stringValue(row["name"], fallback: "Provider")
+            let usage = usageById["provider-\(id)"] ?? usageByName[name.lowercased()]
             let healthDict = healthMap[String(id)] as? [String: Any] ?? [:]
             let health = CCHProviderHealth(
                 circuitState: stringValue(healthDict["circuitState"], fallback: "closed"),
@@ -416,7 +424,7 @@ actor APIService {
 
             return CCHProvider(
                 id: id,
-                name: stringValue(row["name"], fallback: "Provider"),
+                name: name,
                 providerType: stringValue(row["providerType"]),
                 vendorId: optionalInt(row["providerVendorId"]),
                 apiURL: stringValue(row["url"]),
@@ -426,8 +434,8 @@ actor APIService {
                 weight: intValue(row["weight"]),
                 groupTag: stringValue(row["groupTag"], fallback: "default"),
                 costMultiplier: doubleValue(row["costMultiplier"], fallback: 1),
-                todayCalls: intValue(row["todayCallCount"]),
-                todayCost: doubleValue(row["todayTotalCostUsd"]),
+                todayCalls: usage?.requests ?? intValue(row["todayCallCount"]),
+                todayCost: usage?.cost ?? doubleValue(row["todayTotalCostUsd"]),
                 lastCallTime: stringValue(row["lastCallTime"]),
                 lastCallModel: stringValue(row["lastCallModel"]),
                 allowedModels: compactArrayDescription(row["allowedModels"]),
