@@ -128,19 +128,17 @@ struct SettingsView: View {
                 state.startRefreshTimer()
             }
 
+            SettingsControlRow(title: "顶栏信息", subtitle: "刘海屏可一键收起秒数和缓存灯，状态栏会自动缩短。") {
+                Toggle("显示详情", isOn: $state.showStatusBarDetails)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+
             HStack(spacing: 10) {
                 SettingsInfoPill(icon: "play.circle.fill", title: "运行中", value: "\(state.menuBarRunningLogs.count)")
                 SettingsInfoPill(icon: "server.rack", title: "渠道", value: "\(state.enabledProviderCount)/\(state.providers.count)")
                 SettingsInfoPill(icon: "clock", title: "最近", value: state.lastRefresh.map { $0.formatted(date: .omitted, time: .shortened) } ?? "-")
                 Spacer()
-                Button {
-                    state.simulateCacheAlert()
-                } label: {
-                    Label("预览缓存提醒", systemImage: "memorychip")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(.red)
                 Button {
                     runFullRefresh()
                 } label: {
@@ -272,9 +270,7 @@ private struct SettingsHeader: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
-                Text(formatMoney(state.overview.todayCost))
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
-                    .monospacedDigit()
+                MoneyValue(value: state.overview.todayCost, majorSize: 18, minorSize: 10, weight: .bold)
                     .contentTransition(.numericText())
                 Text("\(compactNumber(state.overview.todayRequests)) 次请求")
                     .font(.caption)

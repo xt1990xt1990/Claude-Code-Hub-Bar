@@ -17,7 +17,7 @@ private struct CCHMenuBarRunningItem {
 final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private let state = MonitorState()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    private let statusView = CCHStatusBarView(frame: NSRect(x: 0, y: 0, width: CCHStatusBarView.fixedWidth, height: 22))
+    private let statusView = CCHStatusBarView(frame: NSRect(x: 0, y: 0, width: CCHStatusBarView.fixedWidth(showDetails: true), height: 22))
     private let popover = NSPopover()
     private var stateCancellable: AnyCancellable?
     private var rotationTimer: AnyCancellable?
@@ -92,13 +92,10 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private func updateStatusItem() {
+        statusView.showsDetails = state.showStatusBarDetails
         let items = visibleMenuBarItems
         if let item = visibleItem(from: items) {
-            let provider = compactScrollingText(
-                compactProviderName(item.providerName),
-                offset: tickCounter,
-                visibleCharacters: CCHStatusBarView.visibleProviderCharacters
-            )
+            let provider = compactProviderName(item.providerName)
             let billing = item.model.trimmingCharacters(in: .whitespacesAndNewlines)
             let billingText = billing.isEmpty ? "model" : billing
 

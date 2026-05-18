@@ -16,6 +16,47 @@ private extension Color {
     static let cchUserAccent = Color.orange.opacity(0.95)
 }
 
+struct MoneyValue: View {
+    let value: Double
+    var majorSize: CGFloat
+    var minorSize: CGFloat?
+    var weight: Font.Weight
+    var color: Color
+
+    init(
+        value: Double,
+        majorSize: CGFloat,
+        minorSize: CGFloat? = nil,
+        weight: Font.Weight = .semibold,
+        color: Color = .primary
+    ) {
+        self.value = value
+        self.majorSize = majorSize
+        self.minorSize = minorSize
+        self.weight = weight
+        self.color = color
+    }
+
+    var body: some View {
+        let parts = moneyDisplayParts(value)
+        let resolvedMinorSize = minorSize ?? max(6, majorSize * 0.55)
+        HStack(alignment: .top, spacing: 0) {
+            Text(parts.major)
+                .font(.system(size: majorSize, weight: weight, design: .rounded))
+                .monospacedDigit()
+            if let minor = parts.minor {
+                Text(minor)
+                    .font(.system(size: resolvedMinorSize, weight: .bold, design: .rounded))
+                    .baselineOffset(majorSize * 0.28)
+                    .monospacedDigit()
+            }
+        }
+        .foregroundStyle(color)
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
 struct CCHLogoMark: View {
     var size: CGFloat = 22
 
@@ -286,7 +327,7 @@ private struct DashboardTabView: View {
             RunningRequestsPanel(state: state)
 
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
-                MetricCard(title: "成本", value: formatMoney(state.overview.todayCost), detail: "今日", color: .green, icon: "dollarsign.circle")
+                MetricCard(title: "成本", value: MoneyValue(value: state.overview.todayCost, majorSize: 23, minorSize: 12, weight: .bold), detail: "今日", color: .green, icon: "dollarsign.circle")
                 MetricCard(title: "请求", value: compactNumber(state.overview.todayRequests), detail: "\(state.overview.recentMinuteRequests)/分钟", color: .cyan, icon: "bolt.horizontal.circle")
                 MetricCard(title: "会话", value: "\(state.overview.concurrentSessions)", detail: "\(state.menuBarRunningLogs.count) 运行中", color: .purple, icon: "play.circle")
                 MetricCard(title: "缓存", value: formatPercent(cacheHitRate(cacheReadTokens: state.logSummary.cacheReadTokens, inputTokens: state.logSummary.inputTokens)), detail: cacheMetricDetail, color: cacheMetricColor, icon: "memorychip")
@@ -317,7 +358,10 @@ private struct RunningRequestsPanel: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("空闲")
                             .font(.system(size: 13, weight: .semibold))
-                        Text("今日 \(compactNumber(state.overview.todayRequests)) 次请求 · \(formatMoney(state.overview.todayCost))")
+                        HStack(spacing: 4) {
+                            Text("今日 \(compactNumber(state.overview.todayRequests)) 次请求 ·")
+                            MoneyValue(value: state.overview.todayCost, majorSize: 11, minorSize: 6.5, weight: .semibold, color: .secondary)
+                        }
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -494,7 +538,8 @@ private struct DashboardLeaderboardPanel: View {
                                 entry: entry,
                                 accent: accent,
                                 maxCost: maxCost,
-                                cacheHitRate: state.leaderboardCacheHitRate(for: entry)
+                                cacheHitRate: state.leaderboardCacheHitRate(for: entry),
+                                showsCache: entry.cacheHitRateOverride != nil
                             )
                         }
                     }
@@ -525,6 +570,7 @@ private struct DashboardLeaderboardRow: View {
     let accent: Color
     let maxCost: Double
     let cacheHitRate: Double?
+    let showsCache: Bool
 
     var rankColor: Color {
         switch rank {
@@ -557,9 +603,7 @@ private struct DashboardLeaderboardRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    Text(formatMoney(entry.cost))
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .monospacedDigit()
+                    MoneyValue(value: entry.cost, majorSize: 12, minorSize: 7, weight: .bold)
                 }
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
@@ -575,8 +619,10 @@ private struct DashboardLeaderboardRow: View {
                     Text("\(compactNumber(entry.requests)) 请求")
                     Text("\(compactNumber(entry.tokens)) Token")
                     Spacer()
-                    Text("缓存 \(cacheHitRate.map(formatPercent) ?? "-")")
-                        .foregroundStyle(cacheRateColor(cacheHitRate))
+                    if showsCache, let cacheHitRate {
+                        Text("缓存 \(formatPercent(cacheHitRate))")
+                            .foregroundStyle(cacheRateColor(cacheHitRate))
+                    }
                 }
                 .font(.system(size: 9, weight: .medium))
                 .monospacedDigit()
@@ -623,16 +669,17 @@ private struct LeaderboardTabView: View {
             }
 
             HStack(spacing: 10) {
-                MiniStat(title: "请求", value: compactNumber(state.leaderboard.reduce(0) { $0 + $1.requests }))
-                MiniStat(title: "成本", value: formatMoney(state.leaderboard.reduce(0) { $0 + $1.cost }))
-                MiniStat(title: "Tokens", value: compactNumber(state.leaderboard.reduce(0) { $0 + $1.tokens }))
-                MiniStat(
-                    title: "缓存",
-                    value: formatPercent(cacheHitRate(
-                        cacheReadTokens: state.leaderboard.reduce(0) { $0 + $1.cacheReadTokens },
-                        inputTokens: state.leaderboard.reduce(0) { $0 + $1.inputTokens }
-                    ))
-                )
+                MiniStat(title: "请求", value: Text(compactNumber(state.leaderboard.reduce(0) { $0 + $1.requests })).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
+                MiniStat(title: "成本", value: MoneyValue(value: state.leaderboard.reduce(0) { $0 + $1.cost }, majorSize: 14, minorSize: 8, weight: .bold))
+                MiniStat(title: "Tokens", value: Text(compactNumber(state.leaderboard.reduce(0) { $0 + $1.tokens })).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
+                if let cacheHitRate = state.leaderboardOfficialCacheHitRate {
+                    MiniStat(
+                        title: "缓存",
+                        value: Text(formatPercent(cacheHitRate))
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                    )
+                }
                 Spacer()
             }
 
@@ -647,6 +694,7 @@ private struct LeaderboardTabView: View {
                             rank: index + 1,
                             entry: entry,
                             cacheHitRate: state.leaderboardCacheHitRate(for: entry),
+                            showsCache: entry.cacheHitRateOverride != nil,
                             accent: accent
                         )
                     }
@@ -695,11 +743,11 @@ private struct LogsTabView: View {
             }
 
             HStack(spacing: 10) {
-                MiniStat(title: "总数", value: compactNumber(state.logSummary.totalRequests))
-                MiniStat(title: "成本", value: formatMoney(state.logSummary.totalCost))
-                MiniStat(title: "Tokens", value: compactNumber(state.logSummary.totalTokens))
-                MiniStat(title: "缓存", value: formatPercent(cacheHitRate(cacheReadTokens: state.logSummary.cacheReadTokens, inputTokens: state.logSummary.inputTokens)))
-                MiniStat(title: "已载入", value: "\(state.logs.count)/\(state.logTotal)")
+                MiniStat(title: "总数", value: Text(compactNumber(state.logSummary.totalRequests)).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
+                MiniStat(title: "成本", value: MoneyValue(value: state.logSummary.totalCost, majorSize: 14, minorSize: 8, weight: .bold))
+                MiniStat(title: "Tokens", value: Text(compactNumber(state.logSummary.totalTokens)).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
+                MiniStat(title: "缓存", value: Text(formatPercent(cacheHitRate(cacheReadTokens: state.logSummary.cacheReadTokens, inputTokens: state.logSummary.inputTokens))).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
+                MiniStat(title: "已载入", value: Text("\(state.logs.count)/\(state.logTotal)").font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
                 Spacer()
                 Button("打开") { state.openCCH("/zh-CN/dashboard/logs") }
                     .buttonStyle(.borderless)
@@ -763,9 +811,9 @@ private struct ProvidersTabView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                MiniStat(title: "渠道", value: "\(state.filteredProviders.count)")
-                MiniStat(title: "启用", value: "\(state.filteredEnabledProviderCount)")
-                MiniStat(title: "异常", value: "\(state.filteredUnhealthyProviderCount)")
+                MiniStat(title: "渠道", value: Text("\(state.filteredProviders.count)").font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
+                MiniStat(title: "启用", value: Text("\(state.filteredEnabledProviderCount)").font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
+                MiniStat(title: "异常", value: Text("\(state.filteredUnhealthyProviderCount)").font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
                 Spacer()
                 Button("打开") { state.openCCH("/zh-CN/dashboard/providers") }
                     .buttonStyle(.borderless)
@@ -852,10 +900,30 @@ private struct ProviderGroupChips: View {
 
 private struct MetricCard: View {
     let title: String
-    let value: String
+    let value: AnyView
     let detail: String
     let color: Color
     let icon: String
+
+    init(title: String, value: String, detail: String, color: Color, icon: String) {
+        self.title = title
+        self.value = AnyView(
+            Text(value)
+                .font(.system(size: 23, weight: .bold, design: .rounded))
+                .monospacedDigit()
+        )
+        self.detail = detail
+        self.color = color
+        self.icon = icon
+    }
+
+    init<V: View>(title: String, value: V, detail: String, color: Color, icon: String) {
+        self.title = title
+        self.value = AnyView(value)
+        self.detail = detail
+        self.color = color
+        self.icon = icon
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -867,9 +935,7 @@ private struct MetricCard: View {
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.secondary)
             }
-            Text(value)
-                .font(.system(size: 23, weight: .bold, design: .rounded))
-                .monospacedDigit()
+            value
             Text(detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -883,16 +949,28 @@ private struct MetricCard: View {
 
 private struct MiniStat: View {
     let title: String
-    let value: String
+    let value: AnyView
+
+    init(title: String, value: String) {
+        self.title = title
+        self.value = AnyView(
+            Text(value)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+        )
+    }
+
+    init<V: View>(title: String, value: V) {
+        self.title = title
+        self.value = AnyView(value)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased())
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .monospacedDigit()
+            value
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -1101,9 +1179,7 @@ private struct ActiveSessionRow: View {
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-            Text(formatMoney(session.costUsd))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
+            MoneyValue(value: session.costUsd, majorSize: 12, minorSize: 7, weight: .semibold)
                 .frame(width: 62, alignment: .trailing)
         }
         .padding(9)
@@ -1117,6 +1193,7 @@ private struct LeaderboardRow: View {
     let rank: Int
     let entry: CCHLeaderboardEntry
     let cacheHitRate: Double?
+    let showsCache: Bool
     let accent: Color
 
     var isExpanded: Bool {
@@ -1175,14 +1252,14 @@ private struct LeaderboardRow: View {
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .frame(width: 70, alignment: .trailing)
-                    Text(cacheHitRate.map(formatPercent) ?? "-")
-                        .font(.caption)
-                        .foregroundStyle(cacheRateColor(cacheHitRate))
-                        .monospacedDigit()
-                        .frame(width: 58, alignment: .trailing)
-                    Text(formatMoney(entry.cost))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
+                    if showsCache, let cacheHitRate {
+                        Text(formatPercent(cacheHitRate))
+                            .font(.caption)
+                            .foregroundStyle(cacheRateColor(cacheHitRate))
+                            .monospacedDigit()
+                            .frame(width: 58, alignment: .trailing)
+                    }
+                    MoneyValue(value: entry.cost, majorSize: 12, minorSize: 7, weight: .semibold)
                         .frame(width: 70, alignment: .trailing)
                 }
                 .padding(9)
@@ -1199,7 +1276,6 @@ private struct LeaderboardRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(!canExpand)
 
             if isExpanded {
                 VStack(spacing: 5) {
@@ -1240,14 +1316,14 @@ private struct LeaderboardModelStatRow: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(width: 62, alignment: .trailing)
-            Text(stat.cacheHitRate.map(formatPercent) ?? "-")
-                .font(.caption2)
-                .foregroundStyle(cacheRateColor(stat.cacheHitRate))
-                .monospacedDigit()
-                .frame(width: 52, alignment: .trailing)
-            Text(formatMoney(stat.cost))
-                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                .monospacedDigit()
+            if let cacheHitRate = stat.cacheHitRate {
+                Text(formatPercent(cacheHitRate))
+                    .font(.caption2)
+                    .foregroundStyle(cacheRateColor(cacheHitRate))
+                    .monospacedDigit()
+                    .frame(width: 52, alignment: .trailing)
+            }
+            MoneyValue(value: stat.cost, majorSize: 10.5, minorSize: 6.2, weight: .semibold)
                 .frame(width: 62, alignment: .trailing)
         }
         .padding(.horizontal, 9)
@@ -1330,9 +1406,7 @@ private struct LogRow: View {
                 bottomColor: cacheReadDisplayColor(cacheStatus)
             )
             .frame(width: 56, alignment: .trailing)
-            Text(formatMoney(log.costUsd))
-                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                .monospacedDigit()
+            MoneyValue(value: log.costUsd, majorSize: 11.5, minorSize: 6.8, weight: .semibold)
                 .frame(width: 62, alignment: .trailing)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(formatMillisecondsAsSeconds(log.durationMs))
@@ -1640,10 +1714,7 @@ private struct ProviderRow: View {
                         Text("\(provider.todayCalls) 次")
                             .font(.system(size: 12, weight: .semibold, design: .rounded))
                             .monospacedDigit()
-                        Text(formatMoney(provider.todayCost))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
+                        MoneyValue(value: provider.todayCost, majorSize: 10.5, minorSize: 6.2, weight: .semibold, color: .secondary)
                     }
                     .frame(width: 64, alignment: .trailing)
                     Toggle("", isOn: Binding(

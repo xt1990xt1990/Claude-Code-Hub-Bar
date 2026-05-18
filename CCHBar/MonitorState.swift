@@ -88,6 +88,7 @@ final class MonitorState: ObservableObject {
     @AppStorage("cch_env_path") var cchEnvPath = ""
     @AppStorage("refreshInterval") var refreshInterval: Double = 15
     @AppStorage("active_session_user_filter") var activeSessionUserFilter = ""
+    @AppStorage("show_status_bar_details") var showStatusBarDetails = true
 
     @Published var selectedTab: CCHPanelTab = .dashboard
     @Published var leaderboardPeriod: CCHLeaderboardPeriod = .daily
@@ -235,6 +236,17 @@ final class MonitorState: ObservableObject {
 
     func leaderboardCacheHitRate(for entry: CCHLeaderboardEntry) -> Double? {
         entry.cacheHitRate
+    }
+
+    var leaderboardOfficialCacheHitRate: Double? {
+        let rows = leaderboard.filter { $0.cacheHitRateOverride != nil && $0.inputTokens > 0 }
+        guard !rows.isEmpty else { return nil }
+        let totalInputTokens = rows.reduce(0) { $0 + $1.inputTokens }
+        guard totalInputTokens > 0 else { return nil }
+        let weighted = rows.reduce(0.0) { partial, entry in
+            partial + (entry.cacheHitRateOverride ?? 0) * Double(entry.inputTokens)
+        }
+        return min(1, max(0, weighted / Double(totalInputTokens)))
     }
 
     func setLeaderboardScope(_ scope: CCHLeaderboardScope) {
@@ -710,24 +722,22 @@ private func buildCacheStatusMap(for logs: [CCHLogEntry]) -> [Int: CCHCacheStatu
 private func isLargeCacheDrop(_ log: CCHLogEntry, previous: CCHLogEntry?) -> Bool {
     guard
         let previous,
-        log.inputTokens >= 30_000,
-        log.cacheReadTokens <= max(2_000, log.inputTokens / 20),
-        previous.cacheReadTokens >= 20_000,
-        log.requestSequence > 1,
-        log.messagesCount >= 40,
+        log.inputTokens >= 20_000,
+        log.cacheReadTokens <= max(2_500, log.inputTokens / 18),
+        previous.cacheReadTokens >= 15_000,
         !isCompactCacheRequest(log)
     else { return false }
 
     let previousCachedContext = previous.inputTokens + previous.cacheReadTokens
-    guard previousCachedContext >= 30_000 else { return false }
+    guard previousCachedContext >= 20_000 else { return false }
     let ratio = Double(log.inputTokens) / Double(previousCachedContext)
-    return ratio >= 0.72 && ratio <= 1.35
+    return ratio >= 0.55 && ratio <= 1.55
 }
 
 private func isCompactCacheRequest(_ log: CCHLogEntry) -> Bool {
     let modelText = "\(log.model) \(log.originalModel)".lowercased()
     if modelText.contains("compact") { return true }
-    if log.messagesCount > 0, log.messagesCount < 40 { return true }
+    if log.messagesCount > 0, log.messagesCount < 12 { return true }
     return false
 }
 
@@ -773,13 +783,45 @@ private func menuBarActivityScore(_ session: CCHActiveSession) -> Int {
 }
 
 func formatMoney(_ value: Double) -> String {
-    if value >= 1000 {
-        return String(format: "$%.1fk", value / 1000)
+    let parts = moneyDisplayParts(value)
+    return parts.major + (parts.minor ?? "")
+}
+
+func moneyParts(_ value: Double) -> (major: String, minor: String?) {
+    moneyDisplayParts(value)
+}
+
+func moneyDisplayParts(_ value: Double) -> (major: String, minor: String?) {
+    guard value.isFinite else { return ("$0.00", nil) }
+    let absValue = abs(value)
+    if absValue >= 1000 {
+        return (String(format: "$%.1fk", value / 1000), nil)
     }
-    if value >= 100 {
-        return String(format: "$%.0f", value)
+    if absValue >= 100 {
+        return (String(format: "$%.0f", value), nil)
     }
-    return String(format: "$%.2f", value)
+
+    let trimmed = trimMoneySuffix(String(format: "$%.6f", value))
+    let parts = trimmed.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+    guard parts.count == 2 else { return (trimmed, nil) }
+
+    let fraction = String(parts[1])
+    guard fraction.count > 3 else { return (trimmed, nil) }
+
+    let major = String(parts[0]) + "." + String(fraction.prefix(3))
+    let minor = String(fraction.dropFirst(3))
+    return (major, minor.isEmpty ? nil : minor)
+}
+
+private func trimMoneySuffix(_ value: String) -> String {
+    var text = value
+    while text.last == "0" {
+        text.removeLast()
+    }
+    if text.last == "." {
+        text.removeLast()
+    }
+    return text == "$0" ? "$0.00" : text
 }
 
 func compactNumber(_ value: Int) -> String {
@@ -852,8 +894,9 @@ func normalizedTokensPerSecond(
 }
 
 func cacheHitRate(cacheReadTokens: Int, inputTokens: Int) -> Double {
-    guard inputTokens > 0 else { return 0 }
-    return min(1, max(0, Double(cacheReadTokens) / Double(inputTokens)))
+    let totalCacheableInput = inputTokens + cacheReadTokens
+    guard totalCacheableInput > 0 else { return 0 }
+    return min(1, max(0, Double(cacheReadTokens) / Double(totalCacheableInput)))
 }
 
 func cacheRateColor(_ rate: Double?) -> Color {
@@ -885,14 +928,13 @@ func multiplierLevel(_ value: Double) -> Int {
     return 3
 }
 
-func compactScrollingText(_ value: String, offset: Int, visibleCharacters: Int) -> String {
+func compactScrollingText(_ value: String, visibleCharacters: Int) -> String {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     guard trimmed.count > visibleCharacters, visibleCharacters > 0 else {
         return trimmed
     }
-    let tape = Array(trimmed + "    ")
-    let start = offset % tape.count
-    return String((0..<visibleCharacters).map { tape[(start + $0) % tape.count] })
+    guard visibleCharacters > 1 else { return String(trimmed.prefix(visibleCharacters)) }
+    return String(trimmed.prefix(visibleCharacters - 1)) + "…"
 }
 
 func shortTime(_ raw: String) -> String {
