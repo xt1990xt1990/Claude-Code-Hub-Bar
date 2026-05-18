@@ -127,6 +127,7 @@ struct CCHLogEntry: Identifiable {
     let originalModel: String
     let endpoint: String
     let statusCode: Int?
+    let messagesCount: Int
     let inputTokens: Int
     let outputTokens: Int
     let totalTokens: Int
@@ -139,6 +140,17 @@ struct CCHLogEntry: Identifiable {
     let isFastTier: Bool
     let errorMessage: String
     let providerChain: [CCHProviderChainItem]
+}
+
+enum CCHCacheVisibilityState: Equatable {
+    case normal
+    case rebuilding
+}
+
+struct CCHCacheStatusContext: Equatable {
+    let state: CCHCacheVisibilityState
+    let createdTokens: Int
+    let readTokens: Int
 }
 
 struct CCHProviderHealth {
@@ -230,7 +242,7 @@ actor APIService {
     }
 
     func fetchOverview(config: CCHConfig) async throws -> CCHOverview {
-        let data = try await postAction(config: config, module: "overview", action: "getOverviewData")
+        let data = try await getV1(config: config, path: "/api/v1/dashboard/overview")
         guard let dict = data as? [String: Any] else { throw APIError.parseError }
         return CCHOverview(
             concurrentSessions: intValue(dict["concurrentSessions"]),
@@ -245,28 +257,15 @@ actor APIService {
     }
 
     func fetchActiveSessions(config: CCHConfig) async throws -> [CCHActiveSession] {
-        let data = try await postAction(config: config, module: "active-sessions", action: "getActiveSessions")
-        guard let rows = data as? [[String: Any]] else { throw APIError.parseError }
-        return rows.map { row in
-            CCHActiveSession(
-                sessionId: stringValue(row["sessionId"]),
-                providerId: intValue(row["providerId"]),
-                userName: stringValue(row["userName"]),
-                keyName: stringValue(row["keyName"]),
-                providerName: stringValue(row["providerName"]),
-                model: stringValue(row["model"]),
-                apiType: stringValue(row["apiType"]),
-                startTime: intValue(row["startTime"]),
-                inputTokens: intValue(row["inputTokens"]),
-                outputTokens: intValue(row["outputTokens"]),
-                totalTokens: intValue(row["totalTokens"]),
-                costUsd: doubleValue(row["costUsd"]),
-                durationMs: intValue(row["durationMs"]),
-                requestCount: intValue(row["requestCount"]),
-                concurrentCount: intValue(row["concurrentCount"]),
-                status: stringValue(row["status"])
-            )
-        }
+        let data = try await getV1(
+            config: config,
+            path: "/api/v1/sessions",
+            queryItems: [
+                URLQueryItem(name: "state", value: "active"),
+                URLQueryItem(name: "pageSize", value: "100")
+            ]
+        )
+        return itemRows(from: data).map(parseActiveSession)
     }
 
     func fetchLeaderboard(
@@ -275,106 +274,22 @@ actor APIService {
         scope: String,
         cacheHitMode: Bool = false
     ) async throws -> [CCHLeaderboardEntry] {
-        if !cacheHitMode {
-            return try await fetchLeaderboardWithCacheAnnotations(config: config, period: period, scope: scope)
-        }
-        return try await fetchLeaderboardRows(config: config, period: period, scope: scope, cacheHitMode: true)
+        _ = cacheHitMode
+        let rows = try await fetchUsageLogRowsForLeaderboard(config: config, period: period)
+        return aggregateLeaderboard(rows: rows, scope: scope)
     }
 
-    private func fetchLeaderboardWithCacheAnnotations(
-        config: CCHConfig,
-        period: String,
-        scope: String
-    ) async throws -> [CCHLeaderboardEntry] {
-        async let costRows = fetchLeaderboardRows(config: config, period: period, scope: scope, cacheHitMode: false)
-        async let cacheRows = fetchLeaderboardRows(config: config, period: period, scope: scope, cacheHitMode: true)
-
-        let primary = try await costRows
-        let cache = (try? await cacheRows) ?? []
-        guard !cache.isEmpty else { return primary }
-
-        let cacheByTitle = Dictionary(cache.map { ($0.title.lowercased(), $0) }, uniquingKeysWith: mergeLeaderboardEntries)
-        return primary.map { entry in
-            guard let cacheEntry = cacheByTitle[entry.title.lowercased()] else { return entry }
-            return entry.mergingCacheData(from: cacheEntry)
-        }
-    }
-
-    private func fetchLeaderboardRows(
-        config: CCHConfig,
-        period: String,
-        scope: String,
-        cacheHitMode: Bool
-    ) async throws -> [CCHLeaderboardEntry] {
-        let base = try normalizedBaseURL(config)
-        guard var components = URLComponents(string: base + "/api/leaderboard") else {
-            throw APIError.invalidURL
-        }
-        let apiScope: String
-        if cacheHitMode {
-            switch scope {
-            case "user":
-                apiScope = "userCacheHitRate"
-            case "provider":
-                apiScope = "providerCacheHitRate"
-            default:
-                apiScope = scope
-            }
-        } else {
-            apiScope = scope
-        }
-        components.queryItems = [
-            URLQueryItem(name: "period", value: period),
-            URLQueryItem(name: "scope", value: apiScope)
-        ] + leaderboardExtraQueryItems(scope: apiScope)
-        guard let url = components.url else { throw APIError.invalidURL }
-        let value = try await requestJSON(config: config, url: url, method: "GET", body: nil)
-        guard let rows = value as? [[String: Any]] else { throw APIError.parseError }
-
-        return rows.map { row in
-            let title: String
-            let subtitle: String
-            switch apiScope {
-            case "providerCacheHitRate":
-                title = stringValue(row["providerName"], fallback: "Provider")
-                subtitle = "缓存命中榜"
-            case "userCacheHitRate":
-                title = stringValue(row["userName"], fallback: "User")
-                subtitle = "缓存命中榜"
-            case "provider":
-                title = stringValue(row["providerName"], fallback: "Provider")
-                subtitle = String(format: "success %.1f%%", doubleValue(row["successRate"]) * 100)
-            case "model":
-                title = stringValue(row["model"], fallback: "Model")
-                subtitle = "model"
-            default:
-                title = stringValue(row["userName"], fallback: "User")
-                subtitle = "user"
-            }
-
-            let cacheHitRate = optionalCacheHitRate(row)
-            let totalInputTokens = intValue(row["totalInputTokens"])
-                + intValue(row["inputTokens"])
-                + intValue(row["promptTokens"])
-            let cacheReadTokens = intValue(row["cacheReadTokens"])
-                + intValue(row["totalCacheReadTokens"])
-                + intValue(row["cacheReadInputTokens"])
-
-            let stableId = leaderboardStableId(row, scope: apiScope, title: title)
-            return CCHLeaderboardEntry(
-                id: stableId,
-                title: title,
-                subtitle: subtitle,
-                requests: intValue(row["totalRequests"]),
-                cost: doubleValue(row["totalCost"]),
-                tokens: intValue(row["totalTokens"]),
-                inputTokens: totalInputTokens,
-                cacheReadTokens: cacheReadTokens,
-                cacheHitRateOverride: cacheHitRate,
-                successRate: row["successRate"] == nil ? nil : doubleValue(row["successRate"]),
-                modelStats: parseLeaderboardModelStats(row["modelStats"], parentId: stableId)
-            )
-        }
+    private func fetchUsageLogRowsForLeaderboard(config: CCHConfig, period: String) async throws -> [[String: Any]] {
+        let queryItems = usageLogQueryItems(
+            page: 1,
+            pageSize: 100,
+            startDate: leaderboardStartDate(period),
+            model: "",
+            statusCode: "",
+            sessionId: ""
+        )
+        let data = try await getV1(config: config, path: "/api/v1/usage-logs", queryItems: queryItems)
+        return itemRows(from: data)
     }
 
     func fetchLogs(
@@ -386,49 +301,38 @@ actor APIService {
         statusCode: String,
         sessionId: String
     ) async throws -> CCHLogsPage {
-        var body: [String: Any] = [
-            "page": page,
-            "pageSize": pageSize
-        ]
-        if let startDate {
-            body["startDate"] = ISO8601DateFormatter().string(from: startDate)
-            body["endDate"] = ISO8601DateFormatter().string(from: Date())
-        }
-        if !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            body["model"] = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if let code = Int(statusCode.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            body["statusCode"] = code
-        }
-        if !sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            body["sessionId"] = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        let data = try await postAction(config: config, module: "usage-logs", action: "getUsageLogs", body: body)
+        let queryItems = usageLogQueryItems(
+            page: page,
+            pageSize: pageSize,
+            startDate: startDate,
+            model: model,
+            statusCode: statusCode,
+            sessionId: sessionId
+        )
+        let data = try await getV1(config: config, path: "/api/v1/usage-logs", queryItems: queryItems)
         guard let dict = data as? [String: Any] else { throw APIError.parseError }
-        let rows = dict["logs"] as? [[String: Any]] ?? []
-        let summary = dict["summary"] as? [String: Any] ?? [:]
+        let rows = itemRows(from: dict)
+        let stats = (try? await getV1(config: config, path: "/api/v1/usage-logs/stats", queryItems: queryItems)) as? [String: Any] ?? [:]
+        let pageInfo = dict["pageInfo"] as? [String: Any] ?? [:]
         return CCHLogsPage(
             logs: rows.map(parseLog),
-            total: intValue(dict["total"]),
+            total: intValue(pageInfo["total"], fallback: intValue(dict["total"], fallback: rows.count)),
             summary: CCHLogSummary(
-                totalRequests: intValue(summary["totalRequests"]),
-                totalCost: doubleValue(summary["totalCost"]),
-                totalTokens: intValue(summary["totalTokens"]),
-                inputTokens: intValue(summary["totalInputTokens"]),
-                outputTokens: intValue(summary["totalOutputTokens"]),
-                cacheCreationTokens: intValue(summary["totalCacheCreationTokens"])
-                    + intValue(summary["totalCacheCreation1hTokens"])
-                    + intValue(summary["totalCacheCreation5mTokens"]),
-                cacheReadTokens: intValue(summary["totalCacheReadTokens"])
+                totalRequests: intValue(stats["totalRequests"]),
+                totalCost: doubleValue(stats["totalCost"]),
+                totalTokens: intValue(stats["totalTokens"]),
+                inputTokens: intValue(stats["totalInputTokens"]),
+                outputTokens: intValue(stats["totalOutputTokens"]),
+                cacheCreationTokens: cacheCreationTokens(from: stats, prefix: "total"),
+                cacheReadTokens: intValue(stats["totalCacheReadTokens"])
             )
         )
     }
 
     func fetchProviders(config: CCHConfig) async throws -> [CCHProvider] {
-        let providersData = try await postAction(config: config, module: "providers", action: "getProviders")
-        let healthData = try? await postAction(config: config, module: "providers", action: "getProvidersHealthStatus")
-        guard let rows = providersData as? [[String: Any]] else { throw APIError.parseError }
+        let providersData = try await getV1(config: config, path: "/api/v1/providers")
+        let healthData = try? await getV1(config: config, path: "/api/v1/providers/health")
+        let rows = itemRows(from: providersData)
         let healthMap = healthData as? [String: Any] ?? [:]
 
         return rows.map { row in
@@ -468,51 +372,38 @@ actor APIService {
     }
 
     func setProviderEnabled(config: CCHConfig, providerId: Int, enabled: Bool) async throws {
-        _ = try await postAction(
-            config: config,
-            module: "providers",
-            action: "editProvider",
-            body: ["providerId": providerId, "is_enabled": enabled]
-        )
+        _ = try await patchV1(config: config, path: "/api/v1/providers/\(providerId)", body: ["is_enabled": enabled])
     }
 
     func resetProviderCircuit(config: CCHConfig, providerId: Int) async throws {
-        _ = try await postAction(
-            config: config,
-            module: "providers",
-            action: "resetProviderCircuit",
-            body: ["providerId": providerId]
-        )
+        _ = try await postV1(config: config, path: "/api/v1/providers/\(providerId)/circuit:reset", body: [:])
     }
 
     func probeFirstEndpoint(config: CCHConfig, provider: CCHProvider) async throws -> CCHProbeResult {
         guard let vendorId = provider.vendorId else {
             throw APIError.actionError("这个 Provider 没有可测速的 Vendor")
         }
-        let endpointsData = try await postAction(
+        let endpointsData = try await getV1(
             config: config,
-            module: "providers",
-            action: "getProviderEndpoints",
-            body: ["vendorId": vendorId, "providerType": provider.providerType]
+            path: "/api/v1/provider-vendors/\(vendorId)/endpoints",
+            queryItems: [
+                URLQueryItem(name: "providerType", value: provider.providerType),
+                URLQueryItem(name: "dashboard", value: "true")
+            ]
         )
-        guard let rows = endpointsData as? [[String: Any]] else { throw APIError.parseError }
+        let rows = itemRows(from: endpointsData)
         guard let endpoint = rows.first(where: { boolValue($0["isEnabled"]) }) ?? rows.first else {
             throw APIError.actionError("没有可测速的端点")
         }
 
         let endpointId = intValue(endpoint["id"])
-        let data = try await postAction(
+        let data = try await postV1(
             config: config,
-            module: "providers",
-            action: "probeProviderEndpoint",
-            body: ["endpointId": endpointId, "timeoutMs": 12000]
+            path: "/api/v1/provider-endpoints/\(endpointId):probe",
+            body: ["timeoutMs": 12000]
         )
-        guard
-            let dict = data as? [String: Any],
-            let result = dict["result"] as? [String: Any]
-        else {
-            throw APIError.parseError
-        }
+        guard let dict = data as? [String: Any] else { throw APIError.parseError }
+        let result = dict["result"] as? [String: Any] ?? dict
 
         return CCHProbeResult(
             ok: boolValue(result["ok"]),
@@ -523,22 +414,30 @@ actor APIService {
         )
     }
 
-    private func postAction(
+    private func getV1(
         config: CCHConfig,
-        module: String,
-        action: String,
-        body: [String: Any] = [:]
+        path: String,
+        queryItems: [URLQueryItem] = []
     ) async throws -> Any {
+        try await requestJSON(config: config, url: v1URL(config: config, path: path, queryItems: queryItems), method: "GET", body: nil)
+    }
+
+    private func postV1(config: CCHConfig, path: String, body: [String: Any]) async throws -> Any {
+        try await requestJSON(config: config, url: v1URL(config: config, path: path), method: "POST", body: body)
+    }
+
+    private func patchV1(config: CCHConfig, path: String, body: [String: Any]) async throws -> Any {
+        try await requestJSON(config: config, url: v1URL(config: config, path: path), method: "PATCH", body: body)
+    }
+
+    private func v1URL(config: CCHConfig, path: String, queryItems: [URLQueryItem] = []) throws -> URL {
         let base = try normalizedBaseURL(config)
-        guard let url = URL(string: "\(base)/api/actions/\(module)/\(action)") else {
-            throw APIError.invalidURL
+        guard var components = URLComponents(string: base + path) else { throw APIError.invalidURL }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
         }
-        let value = try await requestJSON(config: config, url: url, method: "POST", body: body)
-        guard let dict = value as? [String: Any] else { throw APIError.parseError }
-        if boolValue(dict["ok"]) {
-            return dict["data"] ?? NSNull()
-        }
-        throw APIError.actionError(stringValue(dict["error"], fallback: "CCH 操作失败"))
+        guard let url = components.url else { throw APIError.invalidURL }
+        return url
     }
 
     private func requestJSON(
@@ -617,10 +516,11 @@ actor APIService {
             originalModel: stringValue(row["originalModel"]),
             endpoint: stringValue(row["endpoint"]),
             statusCode: optionalInt(row["statusCode"]),
+            messagesCount: intValue(row["messagesCount"]),
             inputTokens: intValue(row["inputTokens"]),
             outputTokens: intValue(row["outputTokens"]),
             totalTokens: intValue(row["totalTokens"]),
-            cacheCreationTokens: intValue(row["cacheCreationInputTokens"]),
+            cacheCreationTokens: cacheCreationTokens(from: row),
             cacheReadTokens: intValue(row["cacheReadInputTokens"]),
             costUsd: doubleValue(row["costUsd"]),
             durationMs: optionalInt(row["durationMs"]),
@@ -809,16 +709,140 @@ private func optionalCacheHitRate(_ row: [String: Any]) -> Double? {
     return nil
 }
 
-private func leaderboardExtraQueryItems(scope: String) -> [URLQueryItem] {
-    switch scope {
-    case "user":
-        return [URLQueryItem(name: "includeUserModelStats", value: "1")]
-    case "provider":
-        return [URLQueryItem(name: "includeModelStats", value: "1")]
-    case "userCacheHitRate":
-        return [URLQueryItem(name: "includeUserModelStats", value: "1")]
+private func itemRows(from value: Any) -> [[String: Any]] {
+    if let rows = value as? [[String: Any]] {
+        return rows
+    }
+    guard let dict = value as? [String: Any] else { return [] }
+    for key in ["items", "logs", "data"] {
+        if let rows = dict[key] as? [[String: Any]] {
+            return rows
+        }
+    }
+    if let data = dict["data"] as? [String: Any] {
+        return itemRows(from: data)
+    }
+    return []
+}
+
+private func parseActiveSession(_ row: [String: Any]) -> CCHActiveSession {
+    CCHActiveSession(
+        sessionId: stringValue(row["sessionId"]),
+        providerId: intValue(row["providerId"]),
+        userName: stringValue(row["userName"]),
+        keyName: stringValue(row["keyName"]),
+        providerName: stringValue(row["providerName"]),
+        model: stringValue(row["model"]),
+        apiType: stringValue(row["apiType"]),
+        startTime: intValue(row["startTime"]),
+        inputTokens: intValue(row["inputTokens"]),
+        outputTokens: intValue(row["outputTokens"]),
+        totalTokens: intValue(row["totalTokens"]),
+        costUsd: doubleValue(row["costUsd"]),
+        durationMs: intValue(row["durationMs"]),
+        requestCount: intValue(row["requestCount"]),
+        concurrentCount: intValue(row["concurrentCount"]),
+        status: stringValue(row["status"])
+    )
+}
+
+private func usageLogQueryItems(
+    page: Int,
+    pageSize: Int,
+    startDate: Date?,
+    model: String,
+    statusCode: String,
+    sessionId: String
+) -> [URLQueryItem] {
+    var queryItems = [
+        URLQueryItem(name: "page", value: "\(page)"),
+        URLQueryItem(name: "pageSize", value: "\(pageSize)")
+    ]
+    if let startDate {
+        queryItems.append(URLQueryItem(name: "startTime", value: "\(Int(startDate.timeIntervalSince1970 * 1000))"))
+        queryItems.append(URLQueryItem(name: "endTime", value: "\(Int(Date().timeIntervalSince1970 * 1000))"))
+    }
+    let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmedModel.isEmpty {
+        queryItems.append(URLQueryItem(name: "model", value: trimmedModel))
+    }
+    let trimmedStatus = statusCode.trimmingCharacters(in: .whitespacesAndNewlines)
+    if Int(trimmedStatus) != nil {
+        queryItems.append(URLQueryItem(name: "statusCode", value: trimmedStatus))
+    }
+    let trimmedSession = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmedSession.isEmpty {
+        queryItems.append(URLQueryItem(name: "sessionId", value: trimmedSession))
+    }
+    return queryItems
+}
+
+private func cacheCreationTokens(from row: [String: Any], prefix: String = "") -> Int {
+    let keyPrefix = prefix.isEmpty ? "" : prefix
+    let capitalizedPrefix = keyPrefix.isEmpty ? "" : keyPrefix
+    return intValue(row["\(capitalizedPrefix)CacheCreationTokens"])
+        + intValue(row["\(capitalizedPrefix)CacheCreation1hTokens"])
+        + intValue(row["\(capitalizedPrefix)CacheCreation5mTokens"])
+        + intValue(row["cacheCreationInputTokens"])
+        + intValue(row["cacheCreation1hInputTokens"])
+        + intValue(row["cacheCreation5mInputTokens"])
+}
+
+private func leaderboardStartDate(_ period: String) -> Date? {
+    let calendar = Calendar.current
+    switch period {
+    case "daily":
+        return calendar.startOfDay(for: Date())
+    case "weekly":
+        return calendar.dateInterval(of: .weekOfYear, for: Date())?.start
+    case "monthly":
+        return calendar.dateInterval(of: .month, for: Date())?.start
     default:
-        return []
+        return nil
+    }
+}
+
+private func aggregateLeaderboard(rows: [[String: Any]], scope: String) -> [CCHLeaderboardEntry] {
+    let entries = rows.reduce(into: [String: CCHLeaderboardEntry]()) { result, row in
+        let title: String
+        let subtitle: String
+        let id: String
+        switch scope {
+        case "provider":
+            title = stringValue(row["providerName"], fallback: "Provider")
+            subtitle = "provider"
+            let providerId = intValue(row["providerId"])
+            id = providerId > 0 ? "provider-\(providerId)" : "provider-\(title.lowercased())"
+        case "model":
+            title = stringValue(row["model"], fallback: stringValue(row["originalModel"], fallback: "Model"))
+            subtitle = "model"
+            id = "model-\(title.lowercased())"
+        default:
+            title = stringValue(row["userName"], fallback: "User")
+            subtitle = "user"
+            let userId = intValue(row["userId"])
+            id = userId > 0 ? "user-\(userId)" : "user-\(title.lowercased())"
+        }
+
+        let entry = CCHLeaderboardEntry(
+            id: id,
+            title: title,
+            subtitle: subtitle,
+            requests: 1,
+            cost: doubleValue(row["costUsd"]),
+            tokens: intValue(row["totalTokens"]),
+            inputTokens: intValue(row["inputTokens"]),
+            cacheReadTokens: intValue(row["cacheReadInputTokens"]),
+            cacheHitRateOverride: nil,
+            successRate: nil,
+            modelStats: []
+        )
+        result[id] = result[id].map { mergeLeaderboardEntries($0, entry) } ?? entry
+    }
+    return entries.values.sorted {
+        if $0.cost != $1.cost { return $0.cost > $1.cost }
+        if $0.tokens != $1.tokens { return $0.tokens > $1.tokens }
+        return $0.requests > $1.requests
     }
 }
 

@@ -134,6 +134,14 @@ struct SettingsView: View {
                 SettingsInfoPill(icon: "clock", title: "最近", value: state.lastRefresh.map { $0.formatted(date: .omitted, time: .shortened) } ?? "-")
                 Spacer()
                 Button {
+                    state.simulateCacheAlert()
+                } label: {
+                    Label("预览缓存提醒", systemImage: "memorychip")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.red)
+                Button {
                     runFullRefresh()
                 } label: {
                     Label("立即同步", systemImage: "arrow.clockwise")

@@ -4,11 +4,13 @@ import SwiftUI
 
 private struct CCHMenuBarRunningItem {
     let id: String
+    let logId: Int?
     let providerName: String
     let model: String
     let multiplier: Double
     let isRetrying: Bool
     let startedAt: Date?
+    let cacheState: CCHCacheVisibilityState
 }
 
 @MainActor
@@ -105,12 +107,17 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
                 detail: "\(item.isRetrying ? "retrying " : "")\(billingText) \(formatMultiplier(item.multiplier))",
                 elapsed: elapsedText(for: item),
                 isRetrying: item.isRetrying,
-                sessionCount: items.count
+                sessionCount: items.count,
+                cacheState: item.cacheState
             )
             statusItem.button?.toolTip = "\(provider) · \(billingText) · \(formatMultiplier(item.multiplier))"
         } else {
             runningItemIndex = 0
-            statusView.payload = .idle(primary: state.menuBarText, detail: state.menuBarIdleDetail)
+            statusView.payload = .idle(
+                primary: state.menuBarText,
+                detail: state.menuBarIdleDetail,
+                cacheState: state.statusBarCacheState
+            )
             statusItem.button?.toolTip = "Claude Code Hub idle"
         }
 
@@ -194,11 +201,13 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             : log.model
         return CCHMenuBarRunningItem(
             id: id,
+            logId: log.id,
             providerName: log.providerName,
             model: model,
             multiplier: state.providerMultiplier(for: log.providerName),
             isRetrying: false,
-            startedAt: parseCCHDate(log.createdAt)
+            startedAt: parseCCHDate(log.createdAt),
+            cacheState: state.cacheStatus(for: log).state
         )
     }
 
@@ -211,11 +220,13 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             : session.model
         return CCHMenuBarRunningItem(
             id: id,
+            logId: nil,
             providerName: session.providerName,
             model: model,
             multiplier: state.providerMultiplierById[session.providerId] ?? state.providerMultiplier(for: session.providerName),
             isRetrying: session.status.lowercased().contains("retry"),
-            startedAt: Date(timeIntervalSince1970: TimeInterval(session.startTime) / 1000)
+            startedAt: Date(timeIntervalSince1970: TimeInterval(session.startTime) / 1000),
+            cacheState: .normal
         )
     }
 

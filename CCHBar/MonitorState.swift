@@ -116,6 +116,10 @@ final class MonitorState: ObservableObject {
     @Published var actionMessage: String?
     @Published var errorMessage: String?
     @Published var panelVisible = false
+    @Published private(set) var cacheStatusByLogId: [Int: CCHCacheStatusContext] = [:]
+    @Published private(set) var menuBarCacheAlertLogId: Int?
+    @Published private(set) var simulatedCacheAlertLogId: Int?
+    @Published private(set) var simulatedIdleCacheAlert = false
 
     private let api = APIService()
     private var refreshTimer: AnyCancellable?
@@ -125,6 +129,10 @@ final class MonitorState: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var isLoadingActiveSessions = false
     private var isLoadingFocusedView = false
+    private var lastAnnouncedCacheAlertLogId: Int?
+    private var cacheAlertDismissTask: Task<Void, Never>?
+    private var simulatedCacheAlertDismissTask: Task<Void, Never>?
+    private var recentLogHistory: [CCHLogEntry] = []
 
     var config: CCHConfig {
         CCHConfig(baseURL: cchBaseURL, token: cchToken, envPath: cchEnvPath)
@@ -136,6 +144,14 @@ final class MonitorState: ObservableObject {
 
     var menuBarIdleDetail: String {
         "\(compactNumber(overview.todayRequests)) req"
+    }
+
+    var hasCacheAlert: Bool {
+        menuBarCacheAlertLogId != nil || simulatedCacheAlertLogId != nil || simulatedIdleCacheAlert
+    }
+
+    var statusBarCacheState: CCHCacheVisibilityState {
+        hasCacheAlert ? .rebuilding : .normal
     }
 
     var providerMultiplierById: [Int: Double] {
@@ -238,8 +254,51 @@ final class MonitorState: ObservableObject {
         activeSessionTimer?.cancel()
         focusedViewTimer?.cancel()
         refreshTask?.cancel()
+        cacheAlertDismissTask?.cancel()
+        simulatedCacheAlertDismissTask?.cancel()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+    }
+
+    func cacheStatus(for log: CCHLogEntry) -> CCHCacheStatusContext {
+        if isCacheAlertLog(log.id) {
+            return CCHCacheStatusContext(
+                state: .rebuilding,
+                createdTokens: log.cacheCreationTokens,
+                readTokens: log.cacheReadTokens
+            )
+        }
+        return cacheStatusByLogId[log.id] ?? CCHCacheStatusContext(
+            state: .normal,
+            createdTokens: log.cacheCreationTokens,
+            readTokens: log.cacheReadTokens
+        )
+    }
+
+    func isCacheAlertLog(_ logId: Int) -> Bool {
+        menuBarCacheAlertLogId == logId || simulatedCacheAlertLogId == logId
+    }
+
+    func simulateCacheAlert() {
+        simulatedCacheAlertDismissTask?.cancel()
+
+        if let log = (menuBarRunningLogs.first ?? recentLogs.first ?? logs.first) {
+            simulatedCacheAlertLogId = log.id
+            simulatedIdleCacheAlert = false
+        } else {
+            simulatedCacheAlertLogId = nil
+            simulatedIdleCacheAlert = true
+        }
+
+        actionMessage = "已触发缓存提醒预览"
+        simulatedCacheAlertDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            self.simulatedCacheAlertLogId = nil
+            self.simulatedIdleCacheAlert = false
+            if self.actionMessage == "已触发缓存提醒预览" {
+                self.actionMessage = nil
+            }
         }
     }
 
@@ -408,7 +467,7 @@ final class MonitorState: ObservableObject {
         async let recentLogsResult = api.fetchLogs(
             config: config,
             page: 1,
-            pageSize: 10,
+            pageSize: 80,
             startDate: nil,
             model: "",
             statusCode: "",
@@ -432,6 +491,8 @@ final class MonitorState: ObservableObject {
         do {
             let page = try await recentLogsResult
             recentLogs = page.logs
+            mergeRecentLogHistory(page.logs)
+            rebuildCacheStatus()
         } catch {
             errors.append("Logs: \(error.localizedDescription)")
         }
@@ -540,8 +601,10 @@ final class MonitorState: ObservableObject {
             if logModelFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                logStatusFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                logSessionFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                recentLogs = Array(logs.prefix(50))
+                recentLogs = Array(logs.prefix(80))
+                mergeRecentLogHistory(recentLogs)
             }
+            rebuildCacheStatus()
             logTotal = page.total
             logSummary = page.summary
             if let selectedLog, !page.logs.contains(where: { $0.id == selectedLog.id }) {
@@ -576,6 +639,119 @@ final class MonitorState: ObservableObject {
         }
     }
 
+    private func rebuildCacheStatus() {
+        let combined = uniqueLogs(recentLogs + logs + recentLogHistory)
+        let next = buildCacheStatusMap(for: combined)
+        cacheStatusByLogId = next
+        announceLatestCacheAlert(from: combined, statusMap: next)
+    }
+
+    private func mergeRecentLogHistory(_ values: [CCHLogEntry]) {
+        let merged = uniqueLogs(values + recentLogHistory)
+            .sorted(by: isNewerLog)
+        recentLogHistory = Array(merged.prefix(240))
+    }
+
+    private func uniqueLogs(_ values: [CCHLogEntry]) -> [CCHLogEntry] {
+        var seen = Set<Int>()
+        return values.filter { seen.insert($0.id).inserted }
+    }
+
+    private func announceLatestCacheAlert(from values: [CCHLogEntry], statusMap: [Int: CCHCacheStatusContext]) {
+        guard let latest = values
+            .filter({ statusMap[$0.id]?.state == .rebuilding })
+            .sorted(by: isNewerLog)
+            .first
+        else { return }
+
+        guard latest.id != lastAnnouncedCacheAlertLogId else { return }
+        lastAnnouncedCacheAlertLogId = latest.id
+        menuBarCacheAlertLogId = latest.id
+        cacheAlertDismissTask?.cancel()
+        cacheAlertDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_500_000_000)
+            if self.menuBarCacheAlertLogId == latest.id {
+                self.menuBarCacheAlertLogId = nil
+            }
+        }
+    }
+
+}
+
+private func buildCacheStatusMap(for logs: [CCHLogEntry]) -> [Int: CCHCacheStatusContext] {
+    var result: [Int: CCHCacheStatusContext] = [:]
+    for group in Dictionary(grouping: logs, by: cacheSessionKey).values {
+        let ordered = group
+            .filter { $0.statusCode.map { (200..<300).contains($0) } ?? false }
+            .sorted(by: isOlderLog)
+        var previous: CCHLogEntry?
+        for log in ordered {
+            let state = isLargeCacheDrop(log, previous: previous) ? CCHCacheVisibilityState.rebuilding : .normal
+            result[log.id] = CCHCacheStatusContext(
+                state: state,
+                createdTokens: log.cacheCreationTokens,
+                readTokens: log.cacheReadTokens
+            )
+            if log.inputTokens > 0 || log.cacheReadTokens > 0 || log.totalTokens > 0 {
+                previous = log
+            }
+        }
+    }
+    for log in logs where result[log.id] == nil {
+        result[log.id] = CCHCacheStatusContext(
+            state: .normal,
+            createdTokens: log.cacheCreationTokens,
+            readTokens: log.cacheReadTokens
+        )
+    }
+    return result
+}
+
+private func isLargeCacheDrop(_ log: CCHLogEntry, previous: CCHLogEntry?) -> Bool {
+    guard
+        let previous,
+        log.inputTokens >= 30_000,
+        log.cacheReadTokens <= max(2_000, log.inputTokens / 20),
+        previous.cacheReadTokens >= 20_000,
+        log.requestSequence > 1,
+        log.messagesCount >= 40,
+        !isCompactCacheRequest(log)
+    else { return false }
+
+    let previousCachedContext = previous.inputTokens + previous.cacheReadTokens
+    guard previousCachedContext >= 30_000 else { return false }
+    let ratio = Double(log.inputTokens) / Double(previousCachedContext)
+    return ratio >= 0.72 && ratio <= 1.35
+}
+
+private func isCompactCacheRequest(_ log: CCHLogEntry) -> Bool {
+    let modelText = "\(log.model) \(log.originalModel)".lowercased()
+    if modelText.contains("compact") { return true }
+    if log.messagesCount > 0, log.messagesCount < 40 { return true }
+    return false
+}
+
+private func cacheSessionKey(_ log: CCHLogEntry) -> String {
+    log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId
+}
+
+private func isOlderLog(_ lhs: CCHLogEntry, _ rhs: CCHLogEntry) -> Bool {
+    if lhs.sessionId == rhs.sessionId, lhs.requestSequence != rhs.requestSequence {
+        return lhs.requestSequence < rhs.requestSequence
+    }
+    guard
+        let lhsDate = parseCCHDate(lhs.createdAt),
+        let rhsDate = parseCCHDate(rhs.createdAt)
+    else { return lhs.id < rhs.id }
+    return lhsDate < rhsDate
+}
+
+private func isNewerLog(_ lhs: CCHLogEntry, _ rhs: CCHLogEntry) -> Bool {
+    guard
+        let lhsDate = parseCCHDate(lhs.createdAt),
+        let rhsDate = parseCCHDate(rhs.createdAt)
+    else { return lhs.id > rhs.id }
+    return lhsDate > rhsDate
 }
 
 private func isRunningStatus(_ status: String) -> Bool {

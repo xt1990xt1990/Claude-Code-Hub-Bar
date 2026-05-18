@@ -114,7 +114,6 @@ struct MenuBarView: View {
         .animation(.easeInOut(duration: 0.18), value: state.isLoading)
         .animation(.spring(response: 0.34, dampingFraction: 0.9), value: state.recentLogs.map(\.id))
         .animation(.spring(response: 0.34, dampingFraction: 0.9), value: state.logs.map(\.id))
-        .animation(.spring(response: 0.34, dampingFraction: 0.9), value: state.providers.map(\.id))
         .onAppear {
             state.setPanelVisible(true)
         }
@@ -274,6 +273,14 @@ private struct FooterActionButton: View {
 private struct DashboardTabView: View {
     @ObservedObject var state: MonitorState
 
+    private var cacheMetricColor: Color {
+        state.hasCacheAlert ? .red : .mint
+    }
+
+    private var cacheMetricDetail: String {
+        state.hasCacheAlert ? "缓存掉线" : "命中率"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             RunningRequestsPanel(state: state)
@@ -282,7 +289,7 @@ private struct DashboardTabView: View {
                 MetricCard(title: "成本", value: formatMoney(state.overview.todayCost), detail: "今日", color: .green, icon: "dollarsign.circle")
                 MetricCard(title: "请求", value: compactNumber(state.overview.todayRequests), detail: "\(state.overview.recentMinuteRequests)/分钟", color: .cyan, icon: "bolt.horizontal.circle")
                 MetricCard(title: "会话", value: "\(state.overview.concurrentSessions)", detail: "\(state.menuBarRunningLogs.count) 运行中", color: .purple, icon: "play.circle")
-                MetricCard(title: "缓存", value: formatPercent(cacheHitRate(cacheReadTokens: state.logSummary.cacheReadTokens, inputTokens: state.logSummary.inputTokens)), detail: "命中率", color: .mint, icon: "memorychip")
+                MetricCard(title: "缓存", value: formatPercent(cacheHitRate(cacheReadTokens: state.logSummary.cacheReadTokens, inputTokens: state.logSummary.inputTokens)), detail: cacheMetricDetail, color: cacheMetricColor, icon: "memorychip")
             }
 
             HStack(alignment: .top, spacing: 12) {
@@ -407,7 +414,7 @@ private struct RecentRequestsPanel: View {
                 EmptyStateView(text: "暂无最近日志")
             } else {
                 ForEach(state.recentLogs.prefix(5)) { log in
-                    CompactLogRow(log: log)
+                    CompactLogRow(log: log, cacheStatus: state.cacheStatus(for: log))
                         .transition(.opacity.combined(with: .move(edge: .trailing)))
                 }
             }
@@ -705,7 +712,7 @@ private struct LogsTabView: View {
                             EmptyStateView(text: "暂无日志")
                         } else {
                             ForEach(state.logs) { log in
-                                LogRow(log: log, isSelected: state.selectedLog?.id == log.id)
+                                LogRow(log: log, isSelected: state.selectedLog?.id == log.id, cacheStatus: state.cacheStatus(for: log))
                                     .onTapGesture {
                                         state.selectedLog = log
                                     }
@@ -744,7 +751,7 @@ private struct LogsTabView: View {
                 .frame(height: 346)
 
                 LogDetailView(log: state.selectedLog ?? state.logs.first)
-                    .frame(width: 250)
+                    .frame(width: 230)
             }
         }
     }
@@ -769,11 +776,24 @@ private struct ProvidersTabView: View {
             if state.filteredProviders.isEmpty {
                 EmptyStateView(text: "暂无渠道")
             } else {
-                VStack(spacing: 8) {
+                LazyVStack(spacing: 8) {
                     ForEach(state.filteredProviders) { provider in
-                        ProviderRow(state: state, provider: provider)
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                        ProviderRow(
+                            provider: provider,
+                            setEnabled: { value in
+                                Task { await state.setProvider(provider, enabled: value) }
+                            },
+                            probe: {
+                                Task { await state.probe(provider) }
+                            },
+                            resetCircuit: {
+                                Task { await state.resetCircuit(provider) }
+                            }
+                        )
                     }
+                }
+                .transaction { transaction in
+                    transaction.animation = nil
                 }
             }
         }
@@ -792,19 +812,34 @@ private struct ProviderGroupChips: View {
                 HStack(spacing: 7) {
                     ForEach(state.providerGroups, id: \.self) { group in
                         Button {
-                            state.toggleProviderGroup(group)
+                            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                                state.toggleProviderGroup(group)
+                            }
                         } label: {
                             let selected = state.isProviderGroupSelected(group)
-                            let color = providerGroupColor(group)
-                            Text(group)
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .lineLimit(1)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(selected ? color.opacity(0.28) : color.opacity(0.14))
-                                .foregroundStyle(selected ? color : color.opacity(0.90))
-                                .clipShape(Capsule())
-                                .overlay(Capsule().stroke(color.opacity(selected ? 0.52 : 0.26), lineWidth: 1))
+                            let color = group == "全部" ? Color.blue : providerGroupColor(group)
+                            HStack(spacing: 4) {
+                                if selected {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 8, weight: .black))
+                                        .transition(.scale.combined(with: .opacity))
+                                }
+                                Text(group)
+                                    .lineLimit(1)
+                            }
+                            .font(.system(size: 10.5, weight: selected ? .bold : .semibold))
+                            .padding(.horizontal, selected ? 10 : 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .fill(selected ? color.opacity(0.34) : color.opacity(0.12))
+                            )
+                            .foregroundStyle(selected ? Color.white : color.opacity(0.92))
+                            .overlay(
+                                Capsule()
+                                    .stroke(color.opacity(selected ? 0.88 : 0.28), lineWidth: selected ? 1.4 : 1)
+                            )
+                            .shadow(color: selected ? color.opacity(0.26) : .clear, radius: selected ? 5 : 0, y: 1)
                         }
                         .buttonStyle(.plain)
                     }
@@ -863,6 +898,53 @@ private struct MiniStat: View {
         .padding(.vertical, 7)
         .background(Color.cchGlassPanel)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct UsageMetricColumn: View {
+    let top: Int
+    let bottom: Int
+    let topColor: Color
+    let bottomColor: Color
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text(top > 0 ? compactNumber(top) : "-")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(top > 0 ? topColor : .secondary)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            Text(bottom > 0 ? compactNumber(bottom) : "-")
+                .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                .foregroundStyle(bottom > 0 ? bottomColor : .secondary)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+}
+
+private struct CompactUsageMetric: View {
+    let title: String
+    let top: Int
+    let bottom: Int
+    let topColor: Color
+    let bottomColor: Color
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text(title)
+                .font(.system(size: 7.5, weight: .bold))
+                .foregroundStyle(.secondary)
+            Text(top > 0 ? compactNumber(top) : "-")
+                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(top > 0 ? topColor : .secondary)
+                .monospacedDigit()
+            Text(bottom > 0 ? compactNumber(bottom) : "-")
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundStyle(bottom > 0 ? bottomColor : .secondary.opacity(0.7))
+                .monospacedDigit()
+        }
+        .frame(width: 42, alignment: .trailing)
     }
 }
 
@@ -1187,6 +1269,7 @@ private struct LeaderboardModelStatRow: View {
 private struct LogRow: View {
     let log: CCHLogEntry
     let isSelected: Bool
+    let cacheStatus: CCHCacheStatusContext
 
     var statusColor: Color {
         guard let code = log.statusCode else { return .secondary }
@@ -1231,7 +1314,26 @@ private struct LogRow: View {
                         .lineLimit(1)
                     }
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             Spacer()
+            UsageMetricColumn(
+                top: log.outputTokens,
+                bottom: log.inputTokens,
+                topColor: .primary,
+                bottomColor: .secondary
+            )
+            .frame(width: 48, alignment: .trailing)
+            UsageMetricColumn(
+                top: log.cacheCreationTokens,
+                bottom: log.cacheReadTokens,
+                topColor: cacheCreationDisplayColor(cacheStatus),
+                bottomColor: cacheReadDisplayColor(cacheStatus)
+            )
+            .frame(width: 56, alignment: .trailing)
+            Text(formatMoney(log.costUsd))
+                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(width: 62, alignment: .trailing)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(formatMillisecondsAsSeconds(log.durationMs))
                     .font(.caption)
@@ -1247,10 +1349,6 @@ private struct LogRow: View {
                     .monospacedDigit()
             }
             .frame(width: 76, alignment: .trailing)
-            Text(formatMoney(log.costUsd))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 62, alignment: .trailing)
         }
         .padding(8)
         .background(isSelected ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor).opacity(0.5))
@@ -1260,6 +1358,7 @@ private struct LogRow: View {
 
 private struct CompactLogRow: View {
     let log: CCHLogEntry
+    let cacheStatus: CCHCacheStatusContext
 
     var statusColor: Color {
         guard let code = log.statusCode else { return .green }
@@ -1312,6 +1411,20 @@ private struct CompactLogRow: View {
                     }
             }
             Spacer()
+            CompactUsageMetric(
+                title: "TOK",
+                top: log.outputTokens,
+                bottom: log.inputTokens,
+                topColor: .primary,
+                bottomColor: .secondary
+            )
+            CompactUsageMetric(
+                title: "CACHE",
+                top: log.cacheCreationTokens,
+                bottom: log.cacheReadTokens,
+                topColor: cacheCreationDisplayColor(cacheStatus),
+                bottomColor: cacheReadDisplayColor(cacheStatus)
+            )
             StatusCapsule(text: statusText, color: statusColor)
                 .frame(width: 50, alignment: .trailing)
             VStack(alignment: .trailing, spacing: 1) {
@@ -1322,7 +1435,7 @@ private struct CompactLogRow: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
             .monospacedDigit()
-            .frame(width: 62, alignment: .trailing)
+            .frame(width: 58, alignment: .trailing)
         }
         .padding(8)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
@@ -1483,8 +1596,10 @@ private struct ProviderChainRow: View {
 }
 
 private struct ProviderRow: View {
-    @ObservedObject var state: MonitorState
     let provider: CCHProvider
+    let setEnabled: (Bool) -> Void
+    let probe: () -> Void
+    let resetCircuit: () -> Void
 
     var healthColor: Color {
         if provider.health.circuitState.lowercased() == "open" { return .red }
@@ -1504,42 +1619,42 @@ private struct ProviderRow: View {
             StatusDot(color: healthColor)
                 .frame(width: 12)
             VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(provider.name)
-                            .font(.system(size: 12, weight: .semibold))
-                            .lineLimit(1)
-                        ForEach(providerGroupTitles(provider.groupTag).prefix(2), id: \.self) { group in
-                            ProviderTag(group, color: providerGroupColor(group))
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(provider.name)
+                                .font(.system(size: 12, weight: .semibold))
+                                .lineLimit(1)
+                            ForEach(providerGroupTitles(provider.groupTag).prefix(2), id: \.self) { group in
+                                ProviderTag(group, color: providerGroupColor(group))
+                            }
+                        }
+                        HStack(spacing: 6) {
+                            ProviderTag("优先级 \(provider.priority)", color: .secondary)
+                            ProviderTag("权重 \(provider.weight)", color: .secondary)
+                            MultiplierBadge(value: provider.costMultiplier, compact: true)
                         }
                     }
-                    HStack(spacing: 6) {
-                        ProviderTag("优先级 \(provider.priority)", color: .secondary)
-                        ProviderTag("权重 \(provider.weight)", color: .secondary)
-                        MultiplierBadge(value: provider.costMultiplier, compact: true)
+                    Spacer(minLength: 6)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("\(provider.todayCalls) 次")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                        Text(formatMoney(provider.todayCost))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
                     }
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("\(provider.todayCalls) 次")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text(formatMoney(provider.todayCost))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                .frame(width: 64, alignment: .trailing)
-                Toggle("", isOn: Binding(
-                    get: { provider.isEnabled },
-                    set: { value in
-                        Task { await state.setProvider(provider, enabled: value) }
-                    }
-                ))
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .scaleEffect(0.72)
+                    .frame(width: 64, alignment: .trailing)
+                    Toggle("", isOn: Binding(
+                        get: { provider.isEnabled },
+                        set: { value in
+                            setEnabled(value)
+                        }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .scaleEffect(0.72)
                 }
                 HStack(spacing: 8) {
                     Text(provider.health.circuitState.uppercased())
@@ -1557,12 +1672,12 @@ private struct ProviderRow: View {
                         .lineLimit(1)
                     Spacer()
                     Button("测速") {
-                        Task { await state.probe(provider) }
+                        probe()
                     }
                     .buttonStyle(.borderless)
                     if provider.health.circuitState.lowercased() == "open" {
                         Button("重置") {
-                            Task { await state.resetCircuit(provider) }
+                            resetCircuit()
                         }
                         .buttonStyle(.borderless)
                     }
@@ -1671,6 +1786,24 @@ private func logProviderMultiplier(_ log: CCHLogEntry) -> Double {
         return item.costMultiplier
     }
     return 1
+}
+
+private func cacheCreationDisplayColor(_ status: CCHCacheStatusContext) -> Color {
+    switch status.state {
+    case .rebuilding:
+        return .red
+    case .normal:
+        return status.createdTokens > 0 ? .green : .secondary
+    }
+}
+
+private func cacheReadDisplayColor(_ status: CCHCacheStatusContext) -> Color {
+    switch status.state {
+    case .rebuilding:
+        return .red
+    case .normal:
+        return status.readTokens > 0 ? .green : .secondary
+    }
 }
 
 private func attemptCount(_ chain: [CCHProviderChainItem]) -> Int {
