@@ -356,14 +356,12 @@ private struct HeaderView: View {
     var body: some View {
         HStack(spacing: 10) {
             Button {
-                if let url = URL(string: "https://github.com/ding113/claude-code-hub") {
-                    NSWorkspace.shared.open(url)
-                }
+                state.openCCH()
             } label: {
                 CCHLogoMark(size: 28)
             }
             .buttonStyle(.plain)
-            .help("打开 Claude Code Hub 项目")
+            .help("打开 CCH")
             .opacity(hoveringProjectLink ? 0.86 : 1)
             .onHover { hovering in
                 hoveringProjectLink = hovering
@@ -410,34 +408,9 @@ private struct FooterView: View {
 
     var body: some View {
         VStack(spacing: 7) {
-            if let error = state.errorMessage, !error.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                    Text(error)
-                        .lineLimit(2)
-                    Spacer()
-                }
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-            if let message = state.actionMessage, !message.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                    Text(message)
-                    Spacer()
-                }
-                .font(.caption)
-                .foregroundStyle(.green)
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-            HStack {
-                if let last = state.lastRefresh {
-                    Text("更新于 \(last.formatted(date: .omitted, time: .standard))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
+            HStack(spacing: 10) {
+                FooterStatusLine(state: state)
+                Spacer(minLength: 8)
                 FooterActionButton(title: "设置", icon: "gearshape") {
                     SettingsWindowManager.shared.open(state: state)
                 }
@@ -448,8 +421,111 @@ private struct FooterView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .animation(.easeInOut(duration: 0.18), value: state.errorMessage)
-        .animation(.easeInOut(duration: 0.18), value: state.actionMessage)
+        .animation(.easeInOut(duration: 0.22), value: state.errorMessage)
+        .animation(.easeInOut(duration: 0.22), value: state.actionMessage)
+        .animation(.easeInOut(duration: 0.22), value: state.availableUpdate)
+    }
+}
+
+private struct FooterStatusLine: View {
+    @ObservedObject var state: MonitorState
+
+    private enum Mode: Equatable {
+        case error(String)
+        case action(String)
+        case update(String, URL)
+        case stale(Int)
+        case idle(String)
+    }
+
+    private func mode(at now: Date) -> Mode {
+        if let error = state.errorMessage, !error.isEmpty {
+            return .error(error)
+        }
+        if let action = state.actionMessage, !action.isEmpty {
+            return .action(action)
+        }
+        if let update = state.availableUpdate {
+            return .update("有新版本 v\(update.version)", update.releaseURL)
+        }
+        if let last = state.lastRefresh {
+            let age = now.timeIntervalSince(last)
+            if age > 30 {
+                return .stale(Int(age))
+            }
+        }
+        return .idle("v\(state.appVersion)")
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { context in
+            content(for: mode(at: context.date))
+        }
+    }
+
+    @ViewBuilder
+    private func content(for mode: Mode) -> some View {
+        Group {
+            switch mode {
+            case .error(let message):
+                FooterStatusPill(icon: "exclamationmark.triangle.fill", text: message, color: .orange)
+            case .action(let message):
+                FooterStatusPill(icon: "checkmark.circle.fill", text: message, color: .green)
+            case .update(let message, let url):
+                Button {
+                    NSWorkspace.shared.open(url)
+                } label: {
+                    FooterStatusPill(icon: "arrow.down.circle.fill", text: message, color: .blue)
+                }
+                .buttonStyle(.plain)
+                .help("点击查看版本说明")
+            case .stale(let seconds):
+                FooterStatusPill(icon: "exclamationmark.triangle.fill", text: "数据停滞 \(seconds)s", color: .orange)
+            case .idle(let version):
+                Text(version)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .id(modeId(for: mode))
+        .transition(
+            .asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .bottom)),
+                removal: .opacity.combined(with: .move(edge: .top))
+            )
+        )
+    }
+
+    private func modeId(for mode: Mode) -> String {
+        switch mode {
+        case .error(let m): return "error:\(m)"
+        case .action(let m): return "action:\(m)"
+        case .update(let m, _): return "update:\(m)"
+        case .stale: return "stale"
+        case .idle: return "idle"
+        }
+    }
+}
+
+private struct FooterStatusPill: View {
+    let icon: String
+    let text: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+            Text(text)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(color.opacity(0.13))
+        .clipShape(Capsule())
     }
 }
 
@@ -907,16 +983,13 @@ private struct LogsTabView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Picker("", selection: $state.logRange) {
-                    ForEach(CCHLogRange.allCases) { range in
-                        Text(range.title).tag(range)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 240)
-                .onChange(of: state.logRange) { _, _ in
-                    Task { await state.refreshLogsOnly() }
-                }
+                Label("近 1 小时", systemImage: "clock")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.secondary.opacity(0.12))
+                    .clipShape(Capsule())
                 TextField("模型", text: $state.logModelFilter)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 130)

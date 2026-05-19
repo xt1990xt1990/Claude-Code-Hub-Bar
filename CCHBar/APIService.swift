@@ -203,6 +203,14 @@ struct CCHProbeResult {
     let errorMessage: String
 }
 
+struct CCHGitHubRelease {
+    let tag: String
+    let name: String
+    let body: String
+    let htmlURL: URL
+    let publishedAt: Date?
+}
+
 enum APIError: LocalizedError {
     case invalidURL
     case invalidResponse
@@ -347,7 +355,8 @@ actor APIService {
         startDate: Date?,
         model: String,
         statusCode: String,
-        sessionId: String
+        sessionId: String,
+        includeStats: Bool = true
     ) async throws -> CCHLogsPage {
         let queryItems = usageLogQueryItems(
             page: page,
@@ -373,7 +382,12 @@ actor APIService {
         }
         guard let dict = data as? [String: Any] else { throw APIError.parseError }
         let rows = itemRows(from: dict)
-        let stats = (try? await getV1(config: config, path: "/api/v1/usage-logs/stats", queryItems: queryItems)) as? [String: Any] ?? [:]
+        let stats: [String: Any]
+        if includeStats {
+            stats = (try? await getV1(config: config, path: "/api/v1/usage-logs/stats", queryItems: queryItems)) as? [String: Any] ?? [:]
+        } else {
+            stats = [:]
+        }
         let pageInfo = dict["pageInfo"] as? [String: Any] ?? [:]
         return CCHLogsPage(
             logs: rows.map(parseLog),
@@ -525,6 +539,46 @@ actor APIService {
             statusCode: optionalInt(result["statusCode"]),
             latencyMs: optionalInt(result["latencyMs"]),
             errorMessage: stringValue(result["errorMessage"])
+        )
+    }
+
+    func fetchLatestRelease(owner: String, repo: String) async throws -> CCHGitHubRelease {
+        guard let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases/latest") else {
+            throw APIError.invalidURL
+        }
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 10
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        guard (200...299).contains(http.statusCode) else {
+            throw APIError.httpError(http.statusCode)
+        }
+        guard
+            let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let htmlURLString = dict["html_url"] as? String,
+            let htmlURL = URL(string: htmlURLString)
+        else {
+            throw APIError.parseError
+        }
+
+        let publishedAt: Date?
+        if let raw = dict["published_at"] as? String {
+            let iso = ISO8601DateFormatter()
+            publishedAt = iso.date(from: raw)
+        } else {
+            publishedAt = nil
+        }
+
+        return CCHGitHubRelease(
+            tag: stringValue(dict["tag_name"]),
+            name: stringValue(dict["name"]),
+            body: stringValue(dict["body"]),
+            htmlURL: htmlURL,
+            publishedAt: publishedAt
         )
     }
 

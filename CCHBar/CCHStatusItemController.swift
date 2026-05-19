@@ -86,7 +86,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private func handleStatusTick() {
         tickCounter += 1
         let items = visibleMenuBarItems
-        if items.count > 1, tickCounter % 2 == 0 {
+        if items.count > 1, tickCounter % 4 == 0 {
             advanceProviderRotation()
         } else {
             updateStatusItem()

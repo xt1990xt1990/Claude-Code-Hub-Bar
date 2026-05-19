@@ -54,31 +54,26 @@ enum CCHLeaderboardScope: String, CaseIterable, Identifiable {
 
 enum CCHLogRange: String, CaseIterable, Identifiable {
     case hour1
-    case hours6
-    case day1
-    case day7
-    case all
 
     var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .hour1: return "1h"
-        case .hours6: return "6h"
-        case .day1: return "24h"
-        case .day7: return "7d"
-        case .all: return "全部"
-        }
-    }
+    var title: String { "1h" }
 
     var startDate: Date? {
-        switch self {
-        case .hour1: return Calendar.current.date(byAdding: .hour, value: -1, to: Date())
-        case .hours6: return Calendar.current.date(byAdding: .hour, value: -6, to: Date())
-        case .day1: return Calendar.current.date(byAdding: .day, value: -1, to: Date())
-        case .day7: return Calendar.current.date(byAdding: .day, value: -7, to: Date())
-        case .all: return nil
-        }
+        Calendar.current.date(byAdding: .hour, value: -1, to: Date())
     }
+}
+
+struct CCHAvailableUpdate: Equatable {
+    let version: String
+    let displayName: String
+    let releaseURL: URL
+    let body: String
+    let publishedAt: Date?
+}
+
+private enum CCHLogHighlightContext {
+    case recent
+    case logsPage
 }
 
 @MainActor
@@ -89,12 +84,14 @@ final class MonitorState: ObservableObject {
     @AppStorage("refreshInterval") var refreshInterval: Double = 15
     @AppStorage("active_session_user_filter") var activeSessionUserFilter = ""
     @AppStorage("show_status_bar_details") var showStatusBarDetails = true
+    @AppStorage("check_for_updates") var checkForUpdatesEnabled: Bool = true
+    @AppStorage("dismissed_update_version") var dismissedUpdateVersion: String = ""
 
     @Published var selectedTab: CCHPanelTab = .dashboard
     @Published var leaderboardPeriod: CCHLeaderboardPeriod = .daily
     @Published var leaderboardScope: CCHLeaderboardScope = .user
     @Published var expandedLeaderboardEntryId: String?
-    @Published var logRange: CCHLogRange = .day1
+    @Published var logRange: CCHLogRange = .hour1
     @Published var logModelFilter = ""
     @Published var logStatusFilter = ""
     @Published var logSessionFilter = ""
@@ -122,11 +119,16 @@ final class MonitorState: ObservableObject {
     @Published private(set) var menuBarCacheAlertLogId: Int?
     @Published private(set) var simulatedCacheAlertLogId: Int?
     @Published private(set) var simulatedIdleCacheAlert = false
+    @Published private(set) var availableUpdate: CCHAvailableUpdate?
+    @Published private(set) var lastUpdateCheck: Date?
+    @Published private(set) var updateCheckError: String?
+    @Published private(set) var isCheckingForUpdate = false
 
     private let api = APIService()
     private var refreshTimer: AnyCancellable?
     private var activeSessionTimer: AnyCancellable?
     private var focusedViewTimer: AnyCancellable?
+    private var updateCheckTimer: AnyCancellable?
     private var wakeObserver: NSObjectProtocol?
     private var refreshTask: Task<Void, Never>?
     private var isLoadingActiveSessions = false
@@ -134,9 +136,15 @@ final class MonitorState: ObservableObject {
     private var lastAnnouncedCacheAlertLogId: Int?
     private var cacheAlertDismissTask: Task<Void, Never>?
     private var simulatedCacheAlertDismissTask: Task<Void, Never>?
+    private var actionMessageDismissTask: Task<Void, Never>?
     private var highlightedLogDismissTasks: [Int: Task<Void, Never>] = [:]
-    private var knownLogIds = Set<Int>()
+    private var knownRecentLogIds = Set<Int>()
+    private var knownLogPageIds = Set<Int>()
     private var recentLogHistory: [CCHLogEntry] = []
+
+    var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    }
 
     var config: CCHConfig {
         CCHConfig(baseURL: cchBaseURL, token: cchToken, envPath: cchEnvPath)
@@ -260,17 +268,24 @@ final class MonitorState: ObservableObject {
     init() {
         startRefreshTimer()
         startActiveSessionTimer()
+        startUpdateCheckTimer()
         observeSystemWake()
         refreshTask = Task { await refresh() }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            await self?.checkForUpdates(force: false)
+        }
     }
 
     deinit {
         refreshTimer?.cancel()
         activeSessionTimer?.cancel()
         focusedViewTimer?.cancel()
+        updateCheckTimer?.cancel()
         refreshTask?.cancel()
         cacheAlertDismissTask?.cancel()
         simulatedCacheAlertDismissTask?.cancel()
+        actionMessageDismissTask?.cancel()
         highlightedLogDismissTasks.values.forEach { $0.cancel() }
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
@@ -483,11 +498,12 @@ final class MonitorState: ObservableObject {
         async let recentLogsResult = api.fetchLogs(
             config: config,
             page: 1,
-            pageSize: 80,
-            startDate: nil,
+            pageSize: 40,
+            startDate: Calendar.current.date(byAdding: .hour, value: -1, to: Date()),
             model: "",
             statusCode: "",
-            sessionId: ""
+            sessionId: "",
+            includeStats: false
         )
 
         var errors: [String] = []
@@ -506,7 +522,7 @@ final class MonitorState: ObservableObject {
 
         do {
             let page = try await recentLogsResult
-            registerIncomingLogs(page.logs, isReset: true)
+            registerIncomingLogs(page.logs, isReset: true, context: .recent)
             recentLogs = page.logs
             mergeRecentLogHistory(page.logs)
             rebuildCacheStatus()
@@ -520,10 +536,11 @@ final class MonitorState: ObservableObject {
     }
 
     func setProvider(_ provider: CCHProvider, enabled: Bool) async {
+        actionMessageDismissTask?.cancel()
         actionMessage = nil
         do {
             try await api.setProviderEnabled(config: config, providerId: provider.id, enabled: enabled)
-            actionMessage = enabled ? "渠道已启用" : "渠道已停用"
+            flashActionMessage(enabled ? "渠道已启用" : "渠道已停用")
             _ = await loadProviders()
         } catch {
             errorMessage = error.localizedDescription
@@ -531,10 +548,11 @@ final class MonitorState: ObservableObject {
     }
 
     func resetCircuit(_ provider: CCHProvider) async {
+        actionMessageDismissTask?.cancel()
         actionMessage = nil
         do {
             try await api.resetProviderCircuit(config: config, providerId: provider.id)
-            actionMessage = "熔断状态已重置"
+            flashActionMessage("熔断状态已重置")
             _ = await loadProviders()
         } catch {
             errorMessage = error.localizedDescription
@@ -542,18 +560,30 @@ final class MonitorState: ObservableObject {
     }
 
     func probe(_ provider: CCHProvider) async {
+        actionMessageDismissTask?.cancel()
         actionMessage = nil
         do {
             let result = try await api.probeFirstEndpoint(config: config, provider: provider)
             if result.ok {
                 let latency = result.latencyMs.map { formatMillisecondsAsSeconds($0) } ?? "正常"
-                actionMessage = "测速 \(provider.name): \(latency)"
+                flashActionMessage("测速 \(provider.name): \(latency)")
             } else {
-                actionMessage = "测速失败: \(result.errorMessage)"
+                flashActionMessage("测速失败: \(result.errorMessage)", duration: 4)
             }
             _ = await loadProviders()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func flashActionMessage(_ message: String, duration: TimeInterval = 2.6) {
+        actionMessageDismissTask?.cancel()
+        actionMessage = message
+        actionMessageDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+            if self.actionMessage == message {
+                self.actionMessage = nil
+            }
         }
     }
 
@@ -608,7 +638,7 @@ final class MonitorState: ObservableObject {
                 statusCode: logStatusFilter,
                 sessionId: logSessionFilter
             )
-            registerIncomingLogs(page.logs, isReset: reset)
+            registerIncomingLogs(page.logs, isReset: reset, context: .logsPage)
             logPage = nextPage
             if reset {
                 logs = page.logs
@@ -644,14 +674,22 @@ final class MonitorState: ObservableObject {
         }
     }
 
-    private func registerIncomingLogs(_ values: [CCHLogEntry], isReset: Bool) {
+    private func registerIncomingLogs(_ values: [CCHLogEntry], isReset: Bool, context: CCHLogHighlightContext) {
         let ids = Set(values.map(\.id))
+        let knownIds: Set<Int>
+        switch context {
+        case .recent: knownIds = knownRecentLogIds
+        case .logsPage: knownIds = knownLogPageIds
+        }
         defer {
-            knownLogIds.formUnion(ids)
+            switch context {
+            case .recent: knownRecentLogIds.formUnion(ids)
+            case .logsPage: knownLogPageIds.formUnion(ids)
+            }
         }
 
-        guard isReset, !knownLogIds.isEmpty else { return }
-        let newIds = ids.subtracting(knownLogIds)
+        guard isReset, !knownIds.isEmpty else { return }
+        let newIds = ids.subtracting(knownIds)
         guard !newIds.isEmpty else { return }
 
         highlightedLogIds.formUnion(newIds)
@@ -712,6 +750,73 @@ final class MonitorState: ObservableObject {
             if self.menuBarCacheAlertLogId == latest.id {
                 self.menuBarCacheAlertLogId = nil
             }
+        }
+    }
+
+    func startUpdateCheckTimer() {
+        updateCheckTimer?.cancel()
+        let interval: TimeInterval = 6 * 60 * 60
+        updateCheckTimer = Timer.publish(every: interval, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.checkForUpdates(force: false) }
+            }
+    }
+
+    func checkForUpdates(force: Bool) async {
+        if isCheckingForUpdate { return }
+        if !force, !checkForUpdatesEnabled { return }
+        isCheckingForUpdate = true
+        defer { isCheckingForUpdate = false }
+        do {
+            let release = try await api.fetchLatestRelease(
+                owner: "xt1990xt1990",
+                repo: "Claude-Code-Hub-Bar"
+            )
+            lastUpdateCheck = Date()
+            updateCheckError = nil
+            let normalized = normalizeReleaseVersion(release.tag)
+            guard !normalized.isEmpty else {
+                availableUpdate = nil
+                return
+            }
+            let comparison = compareSemver(normalized, appVersion)
+            if comparison == .orderedDescending {
+                if force || normalized != dismissedUpdateVersion {
+                    availableUpdate = CCHAvailableUpdate(
+                        version: normalized,
+                        displayName: release.name.isEmpty ? "v\(normalized)" : release.name,
+                        releaseURL: release.htmlURL,
+                        body: release.body,
+                        publishedAt: release.publishedAt
+                    )
+                } else {
+                    availableUpdate = nil
+                }
+            } else {
+                availableUpdate = nil
+            }
+        } catch {
+            lastUpdateCheck = Date()
+            updateCheckError = error.localizedDescription
+        }
+    }
+
+    func dismissAvailableUpdate() {
+        if let version = availableUpdate?.version {
+            dismissedUpdateVersion = version
+        }
+        availableUpdate = nil
+    }
+
+    func openLatestRelease() {
+        if let url = availableUpdate?.releaseURL {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        if let url = URL(string: "https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases") {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -1041,4 +1146,33 @@ func formatDuration(_ seconds: TimeInterval) -> String {
 func compactProviderName(_ value: String) -> String {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? "Provider" : trimmed
+}
+
+func normalizeReleaseVersion(_ value: String) -> String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.lowercased().hasPrefix("v") {
+        return String(trimmed.dropFirst())
+    }
+    return trimmed
+}
+
+func compareSemver(_ lhs: String, _ rhs: String) -> ComparisonResult {
+    let lhsParts = semverComponents(lhs)
+    let rhsParts = semverComponents(rhs)
+    let count = max(lhsParts.count, rhsParts.count)
+    for index in 0..<count {
+        let l = index < lhsParts.count ? lhsParts[index] : 0
+        let r = index < rhsParts.count ? rhsParts[index] : 0
+        if l < r { return .orderedAscending }
+        if l > r { return .orderedDescending }
+    }
+    return .orderedSame
+}
+
+private func semverComponents(_ value: String) -> [Int] {
+    let main = value
+        .split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        .first
+        .map(String.init) ?? value
+    return main.split(separator: ".").map { Int($0) ?? 0 }
 }

@@ -21,6 +21,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     connectionCard
                     syncCard
+                    updateCard
                     systemCard
                 }
                 .padding(18)
@@ -147,6 +148,110 @@ struct SettingsView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(state.isLoading)
+            }
+        }
+    }
+
+    private var updateCard: some View {
+        SettingsCard(
+            icon: "arrow.down.app.fill",
+            title: "更新",
+            subtitle: "检查新版本并提醒下载。",
+            accent: .green
+        ) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("自动检查更新")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(state.checkForUpdatesEnabled
+                         ? "每 6 小时检查一次，发现新版后在状态栏弹窗底部提醒。"
+                         : "已关闭。可在下方手动触发检查。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: $state.checkForUpdatesEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .onChange(of: state.checkForUpdatesEnabled) { _, newValue in
+                        if newValue {
+                            Task { await state.checkForUpdates(force: true) }
+                        }
+                    }
+            }
+
+            HStack(spacing: 10) {
+                SettingsInfoPill(icon: "app.badge", title: "当前", value: "v\(state.appVersion)")
+                if let update = state.availableUpdate {
+                    SettingsInfoPill(icon: "sparkles", title: "新版", value: "v\(update.version)")
+                }
+                if let last = state.lastUpdateCheck {
+                    SettingsInfoPill(icon: "clock", title: "检查", value: last.formatted(date: .omitted, time: .shortened))
+                }
+                Spacer()
+                Button {
+                    Task { await state.checkForUpdates(force: true) }
+                } label: {
+                    if state.isCheckingForUpdate {
+                        Label("检查中", systemImage: "arrow.triangle.2.circlepath")
+                    } else {
+                        Label("立即检查", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(state.isCheckingForUpdate)
+            }
+
+            if let update = state.availableUpdate {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                            .foregroundStyle(.green)
+                        Text(update.displayName)
+                            .font(.system(size: 13, weight: .semibold))
+                        if let publishedAt = update.publishedAt {
+                            Text(publishedAt.formatted(date: .abbreviated, time: .omitted))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    if !update.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(update.body)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(4)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: 8) {
+                        Spacer()
+                        Button("跳过此版本") {
+                            state.dismissAvailableUpdate()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        Button {
+                            state.openLatestRelease()
+                        } label: {
+                            Label("打开下载页", systemImage: "arrow.up.forward.app")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(.green)
+                    }
+                }
+                .padding(11)
+                .background(Color.green.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.green.opacity(0.3), lineWidth: 1)
+                )
+            } else if let error = state.updateCheckError {
+                Text("检查失败：\(error)")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         }
     }
