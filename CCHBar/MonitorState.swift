@@ -772,7 +772,7 @@ final class MonitorState: ObservableObject {
         do {
             let release = try await api.fetchLatestRelease(
                 owner: "xt1990xt1990",
-                repo: "Claude-Code-Hub-Bar"
+                repo: "CCHBar"
             )
             lastUpdateCheck = Date()
             updateCheckError = nil
@@ -815,7 +815,7 @@ final class MonitorState: ObservableObject {
             NSWorkspace.shared.open(url)
             return
         }
-        if let url = URL(string: "https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases") {
+        if let url = URL(string: "https://github.com/xt1990xt1990/CCHBar/releases") {
             NSWorkspace.shared.open(url)
         }
     }

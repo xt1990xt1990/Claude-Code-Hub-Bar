@@ -674,24 +674,29 @@ private struct RunningRequestRow: View {
                     Text(log.providerName.isEmpty ? "渠道" : log.providerName)
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
+                        .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 160, compactThreshold: 18)
                     MultiplierBadge(value: state.providerMultiplier(for: log.providerName))
                 }
-                Text("\(model.isEmpty ? "模型" : model) · \(log.userName.isEmpty ? "-" : log.userName) · 序号 \(log.requestSequence) · 已运行 \(runningDurationText(log))")
-                    .hidden()
-                    .overlay(alignment: .leading) {
-                        HStack(spacing: 4) {
-                            ModelBrandIcon(model: model, provider: log.providerName, size: 12)
-                            Text(model.isEmpty ? "模型" : model)
-                            Text("·")
-                            Text(log.userName.isEmpty ? "-" : log.userName)
-                                .foregroundStyle(Color.cchUserAccent)
-                            Text("· 序号 \(log.requestSequence) · 已运行 \(runningDurationText(log))")
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    ModelBrandIcon(model: model, provider: log.providerName, size: 12)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text(model.isEmpty ? "模型" : model)
                         .lineLimit(1)
-                    }
+                        .truncationMode(.tail)
+                        .textAdaptiveWidth(model.isEmpty ? "模型" : model, limit: 190, compactThreshold: 18)
+                    Text("·")
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text(log.userName.isEmpty ? "-" : log.userName)
+                        .foregroundStyle(Color.cchUserAccent)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text("· 序号 \(log.requestSequence) · 已运行 \(runningDurationText(log))")
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
+            .layoutPriority(1)
 
             Spacer()
 
@@ -1294,6 +1299,28 @@ private struct CompactUsageMetric: View {
     }
 }
 
+private struct AdaptiveTextWidth: ViewModifier {
+    let textLength: Int
+    let limit: CGFloat
+    let compactThreshold: Int
+
+    func body(content: Content) -> some View {
+        if textLength <= compactThreshold {
+            content
+                .fixedSize(horizontal: true, vertical: false)
+        } else {
+            content
+                .frame(maxWidth: limit, alignment: .leading)
+        }
+    }
+}
+
+private extension View {
+    func textAdaptiveWidth(_ text: String, limit: CGFloat, compactThreshold: Int = 18) -> some View {
+        modifier(AdaptiveTextWidth(textLength: text.count, limit: limit, compactThreshold: compactThreshold))
+    }
+}
+
 private struct MultiplierBadge: View {
     let value: Double
     var compact = false
@@ -1310,6 +1337,8 @@ private struct MultiplierBadge: View {
         Text(formatMultiplier(value))
             .font(.system(size: compact ? 8.5 : 9, weight: .bold, design: .rounded))
             .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, compact ? 4 : 5)
             .padding(.vertical, 1)
             .background(color.opacity(0.13))
@@ -1325,11 +1354,12 @@ private struct StatusCapsule: View {
         Text(text)
             .font(.system(size: 9, weight: .bold, design: .rounded))
             .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(color.opacity(0.14))
             .clipShape(Capsule())
-            .lineLimit(1)
     }
 }
 
@@ -1338,6 +1368,8 @@ private struct FastTierBadge: View {
         Text("FAST")
             .font(.system(size: 8.5, weight: .bold, design: .rounded))
             .foregroundStyle(.orange)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(Color.orange.opacity(0.14))
@@ -1359,12 +1391,13 @@ private struct ProviderTag: View {
         Text(text)
             .font(.system(size: 9, weight: .bold, design: .rounded))
             .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(color.opacity(0.18))
             .overlay(Capsule().stroke(color.opacity(0.26), lineWidth: 1))
             .clipShape(Capsule())
-            .lineLimit(1)
     }
 }
 
@@ -1651,29 +1684,37 @@ private struct LogRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     ModelBrandIcon(model: model, provider: log.providerName, size: 13)
+                        .fixedSize(horizontal: true, vertical: false)
                     Text(model)
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        .textAdaptiveWidth(model, limit: 175, compactThreshold: 18)
                     if log.isFastTier {
                         FastTierBadge()
                     }
                     MultiplierBadge(value: logProviderMultiplier(log), compact: true)
                     StatusCapsule(text: log.statusCode.map(String.init) ?? "请求中", color: statusColor)
                 }
-                Text("\(log.userName.isEmpty ? "-" : log.userName) · \(log.providerName.isEmpty ? "渠道" : log.providerName) · \(shortTime(log.createdAt))")
-                    .hidden()
-                    .overlay(alignment: .leading) {
-                        HStack(spacing: 0) {
-                            Text(log.userName.isEmpty ? "-" : log.userName)
-                                .foregroundStyle(Color.cchUserAccent)
-                            Text(" · \(log.providerName.isEmpty ? "渠道" : log.providerName) · \(shortTime(log.createdAt))")
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(log.userName.isEmpty ? "-" : log.userName)
+                        .foregroundStyle(Color.cchUserAccent)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text("·")
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text(log.providerName.isEmpty ? "渠道" : log.providerName)
                         .lineLimit(1)
-                    }
+                        .truncationMode(.tail)
+                        .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 160, compactThreshold: 18)
+                    Text("· \(shortTime(log.createdAt))")
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
             Spacer()
             UsageMetricColumn(
                 top: log.outputTokens,
@@ -1753,27 +1794,33 @@ private struct CompactLogRow: View {
                     Text(log.providerName.isEmpty ? "渠道" : log.providerName)
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
+                        .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 150, compactThreshold: 18)
                     MultiplierBadge(value: logProviderMultiplier(log), compact: true)
                     if log.isFastTier {
                         FastTierBadge()
                     }
                 }
-                Text("\(log.userName.isEmpty ? "-" : log.userName) · \(model.isEmpty ? "模型" : model) · \(shortTime(log.createdAt))")
-                    .hidden()
-                    .overlay(alignment: .leading) {
-                        HStack(spacing: 4) {
-                            Text(log.userName.isEmpty ? "-" : log.userName)
-                                .foregroundStyle(Color.cchUserAccent)
-                            Text("·")
-                            ModelBrandIcon(model: model, provider: log.providerName, size: 11)
-                            Text(model.isEmpty ? "模型" : model)
-                            Text("· \(shortTime(log.createdAt))")
-                        }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(log.userName.isEmpty ? "-" : log.userName)
+                        .foregroundStyle(Color.cchUserAccent)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(3)
+                    Text("·")
+                        .fixedSize(horizontal: true, vertical: false)
+                    ModelBrandIcon(model: model, provider: log.providerName, size: 11)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text(model.isEmpty ? "模型" : model)
                         .lineLimit(1)
-                    }
+                        .truncationMode(.tail)
+                        .textAdaptiveWidth(model.isEmpty ? "模型" : model, limit: 170, compactThreshold: 18)
+                    Text("· \(shortTime(log.createdAt))")
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
+            .layoutPriority(1)
             Spacer()
             CompactUsageMetric(
                 title: "TOK",
