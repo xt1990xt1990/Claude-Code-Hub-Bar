@@ -1688,8 +1688,7 @@ private struct LogRow: View {
                     Text(model)
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
-                        .truncationMode(.tail)
-                        .textAdaptiveWidth(model, limit: 175, compactThreshold: 18)
+                        .fixedSize(horizontal: true, vertical: false)
                     if log.isFastTier {
                         FastTierBadge()
                     }
@@ -1812,7 +1811,7 @@ private struct CompactLogRow: View {
                     Text(model.isEmpty ? "模型" : model)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .textAdaptiveWidth(model.isEmpty ? "模型" : model, limit: 170, compactThreshold: 18)
+                        .textAdaptiveWidth(model.isEmpty ? "模型" : model, limit: 130, compactThreshold: 10)
                     Text("· \(shortTime(log.createdAt))")
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -1820,6 +1819,7 @@ private struct CompactLogRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
             Spacer()
             CompactUsageMetric(
