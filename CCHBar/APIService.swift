@@ -37,6 +37,36 @@ struct CCHActiveSession: Identifiable {
     let status: String
 }
 
+struct CCHStatusRunningItem: Identifiable, Equatable {
+    let id: String
+    let logId: Int?
+    let providerName: String
+    let model: String
+    let multiplier: Double
+    let isRetrying: Bool
+    let startedAt: Date?
+    let cacheState: CCHCacheVisibilityState
+}
+
+struct CCHStatusBarSnapshot: Equatable {
+    let showsDetails: Bool
+    let idlePrimary: String
+    let idleDetail: String
+    let idleCacheState: CCHCacheVisibilityState
+    let runningItems: [CCHStatusRunningItem]
+    let hasRecentLogs: Bool
+    let generatedAt: Date
+
+    static func == (lhs: CCHStatusBarSnapshot, rhs: CCHStatusBarSnapshot) -> Bool {
+        lhs.showsDetails == rhs.showsDetails
+            && lhs.idlePrimary == rhs.idlePrimary
+            && lhs.idleDetail == rhs.idleDetail
+            && lhs.idleCacheState == rhs.idleCacheState
+            && lhs.runningItems == rhs.runningItems
+            && lhs.hasRecentLogs == rhs.hasRecentLogs
+    }
+}
+
 struct CCHLeaderboardModelStat: Identifiable {
     let id: String
     let model: String
@@ -211,6 +241,20 @@ struct CCHGitHubRelease {
     let publishedAt: Date?
 }
 
+struct CCHLeaderboardSummary: Equatable {
+    var requests = 0
+    var cost: Double = 0
+    var tokens = 0
+    var cacheHitRate: Double?
+}
+
+struct CCHProviderFilterSnapshot {
+    var groups: [String] = ["全部"]
+    var providers: [CCHProvider] = []
+    var enabledCount = 0
+    var unhealthyCount = 0
+}
+
 enum APIError: LocalizedError {
     case invalidURL
     case invalidResponse
@@ -234,6 +278,7 @@ enum APIError: LocalizedError {
 actor APIService {
     private let session: URLSession
     private let directSession: URLSession
+    private var cachedToken: (path: String, modifiedAt: Date?, token: String)?
 
     init() {
         let config = URLSessionConfiguration.default
@@ -404,19 +449,25 @@ actor APIService {
         )
     }
 
-    func fetchProviders(config: CCHConfig) async throws -> [CCHProvider] {
+    func fetchProviders(config: CCHConfig, includeUsage: Bool = true) async throws -> [CCHProvider] {
         let providersData: Any
         let healthData: Any?
         let usageRows: [CCHLeaderboardEntry]
         do {
             providersData = try await getV1(config: config, path: "/api/v1/providers")
             healthData = try? await getV1(config: config, path: "/api/v1/providers/health")
-            usageRows = (try? await fetchOfficialLeaderboardRows(config: config, period: "daily", scope: "provider", cacheHitMode: false)) ?? []
+            usageRows = includeUsage
+                ? ((try? await fetchOfficialLeaderboardRows(config: config, period: "daily", scope: "provider", cacheHitMode: false)) ?? [])
+                : []
         } catch where shouldFallbackToActions(error) {
             providersData = try await postAction(config: config, module: "providers", action: "getProviders")
             healthData = try? await postAction(config: config, module: "providers", action: "getProvidersHealthStatus")
-            let usageLogRows = (try? await fetchUsageLogRowsForLeaderboard(config: config, period: "daily")) ?? []
-            usageRows = aggregateLeaderboard(rows: usageLogRows, scope: "provider")
+            if includeUsage {
+                let usageLogRows = (try? await fetchUsageLogRowsForLeaderboard(config: config, period: "daily")) ?? []
+                usageRows = aggregateLeaderboard(rows: usageLogRows, scope: "provider")
+            } else {
+                usageRows = []
+            }
         }
         let rows = itemRows(from: providersData)
         let healthMap = healthData as? [String: Any] ?? [:]
@@ -769,7 +820,14 @@ actor APIService {
         let path = config.envPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty else { throw APIError.missingToken }
 
-        let content = try String(contentsOfFile: (path as NSString).expandingTildeInPath, encoding: .utf8)
+        let expandedPath = (path as NSString).expandingTildeInPath
+        let modifiedAt = try? FileManager.default
+            .attributesOfItem(atPath: expandedPath)[.modificationDate] as? Date
+        if let cachedToken, cachedToken.path == expandedPath, cachedToken.modifiedAt == modifiedAt {
+            return cachedToken.token
+        }
+
+        let content = try String(contentsOfFile: expandedPath, encoding: .utf8)
         let tokenKeys = Set(["CCH_API_KEY", "CCH_TOKEN", "API_KEY", "AUTH_TOKEN", "TOKEN", "KEY"])
         for rawLine in content.split(whereSeparator: \.isNewline) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -778,10 +836,14 @@ actor APIService {
                 let key = line[..<eq].trimmingCharacters(in: .whitespacesAndNewlines)
                 let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines)
                 if tokenKeys.contains(key.uppercased()), !value.isEmpty {
-                    return value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                    let token = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                    cachedToken = (expandedPath, modifiedAt, token)
+                    return token
                 }
             } else {
-                return line.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                let token = line.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                cachedToken = (expandedPath, modifiedAt, token)
+                return token
             }
         }
         throw APIError.missingToken

@@ -2,17 +2,6 @@ import AppKit
 import Combine
 import SwiftUI
 
-private struct CCHMenuBarRunningItem {
-    let id: String
-    let logId: Int?
-    let providerName: String
-    let model: String
-    let multiplier: Double
-    let isRetrying: Bool
-    let startedAt: Date?
-    let cacheState: CCHCacheVisibilityState
-}
-
 @MainActor
 final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private let state = MonitorState()
@@ -23,10 +12,14 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private var rotationTimer: AnyCancellable?
     private var tickCounter = 0
     private var runningItemIndex = 0
-    private var lastRunningItems: [CCHMenuBarRunningItem] = []
+    private var lastRunningItems: [CCHStatusRunningItem] = []
     private var lastRunningItemsSeenAt: Date?
     private let runningSessionHoldDuration: TimeInterval = 5
     private var outsideClickMonitor: Any?
+    private var lastAppliedSnapshot: CCHStatusBarSnapshot?
+    private var lastPayload: CCHStatusBarView.Payload?
+    private var lastTooltip: String?
+    private var lastLength: CGFloat = 0
 
     override init() {
         super.init()
@@ -71,11 +64,11 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private func observeState() {
-        stateCancellable = state.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.updateStatusItem()
+        stateCancellable = state.$statusBarSnapshot
+            .removeDuplicates()
+            .sink { [weak self] snapshot in
+                self?.applyStatusSnapshot(snapshot, force: false)
             }
-        }
         rotationTimer = Timer.publish(every: 1, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
@@ -85,23 +78,31 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
 
     private func handleStatusTick() {
         tickCounter += 1
-        let items = visibleMenuBarItems
+        let items = visibleMenuBarItems(from: state.statusBarSnapshot)
         if items.count > 1, tickCounter % 4 == 0 {
             advanceProviderRotation()
         } else {
-            updateStatusItem()
+            applyStatusSnapshot(state.statusBarSnapshot, force: true)
         }
     }
 
     private func updateStatusItem() {
-        statusView.showsDetails = state.showStatusBarDetails
-        let items = visibleMenuBarItems
+        applyStatusSnapshot(state.statusBarSnapshot, force: true)
+    }
+
+    private func applyStatusSnapshot(_ snapshot: CCHStatusBarSnapshot, force: Bool) {
+        let semanticSnapshotChanged = lastAppliedSnapshot != snapshot
+        lastAppliedSnapshot = snapshot
+        statusView.showsDetails = snapshot.showsDetails
+        let items = visibleMenuBarItems(from: snapshot)
+        let payload: CCHStatusBarView.Payload
+        let tooltip: String
         if let item = visibleItem(from: items) {
             let provider = compactProviderName(item.providerName)
             let billing = item.model.trimmingCharacters(in: .whitespacesAndNewlines)
             let billingText = billing.isEmpty ? "model" : billing
 
-            statusView.payload = .running(
+            payload = .running(
                 provider: provider,
                 detail: "\(item.isRetrying ? "retrying " : "")\(billingText) \(formatMultiplier(item.multiplier))",
                 elapsed: elapsedText(for: item),
@@ -109,23 +110,34 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
                 sessionCount: items.count,
                 cacheState: item.cacheState
             )
-            statusItem.button?.toolTip = "\(provider) · \(billingText) · \(formatMultiplier(item.multiplier))"
+            tooltip = "\(provider) · \(billingText) · \(formatMultiplier(item.multiplier))"
         } else {
             runningItemIndex = 0
-            statusView.payload = .idle(
-                primary: state.menuBarText,
-                detail: state.menuBarIdleDetail,
-                cacheState: state.statusBarCacheState
+            payload = .idle(
+                primary: snapshot.idlePrimary,
+                detail: snapshot.idleDetail,
+                cacheState: snapshot.idleCacheState
             )
-            statusItem.button?.toolTip = "Claude Code Hub idle"
+            tooltip = "Claude Code Hub idle"
         }
 
-        statusItem.length = statusView.preferredWidth
-        statusView.needsDisplay = true
+        if force || semanticSnapshotChanged || lastPayload != payload {
+            statusView.payload = payload
+            lastPayload = payload
+        }
+        if force || semanticSnapshotChanged || lastTooltip != tooltip {
+            statusItem.button?.toolTip = tooltip
+            lastTooltip = tooltip
+        }
+        let width = statusView.preferredWidth
+        if force || abs(lastLength - width) > 0.5 {
+            statusItem.length = width
+            lastLength = width
+        }
     }
 
     private func advanceProviderRotation() {
-        let items = visibleMenuBarItems
+        let items = visibleMenuBarItems(from: state.statusBarSnapshot)
         guard !items.isEmpty else {
             updateStatusItem()
             return
@@ -147,11 +159,11 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private var visibleMenuBarItems: [CCHMenuBarRunningItem] {
-        let items = currentMenuBarItems
+    private func visibleMenuBarItems(from snapshot: CCHStatusBarSnapshot) -> [CCHStatusRunningItem] {
+        let items = snapshot.runningItems
         if !items.isEmpty {
             lastRunningItems = items
-            lastRunningItemsSeenAt = Date()
+            lastRunningItemsSeenAt = snapshot.generatedAt
             if runningItemIndex >= items.count {
                 runningItemIndex = 0
             }
@@ -176,118 +188,23 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private func shouldHoldLastRunningSessions(since seenAt: Date) -> Bool {
-        if !state.recentLogs.isEmpty, state.menuBarRunningLogs.isEmpty { return false }
+        let snapshot = state.statusBarSnapshot
+        if snapshot.hasRecentLogs, snapshot.runningItems.isEmpty { return false }
         return Date().timeIntervalSince(seenAt) < runningSessionHoldDuration
     }
 
-    private var currentMenuBarItems: [CCHMenuBarRunningItem] {
-        state.menuBarRunningLogs.map { menuBarItem(from: $0) }
-    }
-
-    private func visibleItem(from items: [CCHMenuBarRunningItem]) -> CCHMenuBarRunningItem? {
+    private func visibleItem(from items: [CCHStatusRunningItem]) -> CCHStatusRunningItem? {
         guard !items.isEmpty else { return nil }
         return items[visibleItemIndex(for: items)]
     }
 
-    private func visibleItemIndex(for items: [CCHMenuBarRunningItem]) -> Int {
+    private func visibleItemIndex(for items: [CCHStatusRunningItem]) -> Int {
         items.count > 1 ? runningItemIndex % items.count : 0
     }
 
-    private func menuBarItem(from log: CCHLogEntry) -> CCHMenuBarRunningItem {
-        let id = log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId
-        let model = log.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? log.originalModel
-            : log.model
-        return CCHMenuBarRunningItem(
-            id: id,
-            logId: log.id,
-            providerName: log.providerName,
-            model: model,
-            multiplier: state.providerMultiplier(for: log.providerName),
-            isRetrying: false,
-            startedAt: parseCCHDate(log.createdAt),
-            cacheState: state.cacheStatus(for: log).state
-        )
-    }
-
-    private func menuBarItem(from session: CCHActiveSession) -> CCHMenuBarRunningItem {
-        let id = session.sessionId.isEmpty
-            ? "\(session.providerId)-\(session.providerName)-\(session.startTime)"
-            : session.sessionId
-        let model = session.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? session.apiType
-            : session.model
-        return CCHMenuBarRunningItem(
-            id: id,
-            logId: nil,
-            providerName: session.providerName,
-            model: model,
-            multiplier: state.providerMultiplierById[session.providerId] ?? state.providerMultiplier(for: session.providerName),
-            isRetrying: session.status.lowercased().contains("retry"),
-            startedAt: Date(timeIntervalSince1970: TimeInterval(session.startTime) / 1000),
-            cacheState: .normal
-        )
-    }
-
-    private func elapsedText(for item: CCHMenuBarRunningItem) -> String {
+    private func elapsedText(for item: CCHStatusRunningItem) -> String {
         guard let startedAt = item.startedAt else { return "--" }
         return formatDuration(Date().timeIntervalSince(startedAt))
-    }
-
-    private func coalescedCurrentSessions(from sessions: [CCHActiveSession]) -> [CCHActiveSession] {
-        var bestBySession: [String: CCHActiveSession] = [:]
-
-        for session in sessions {
-            let key = session.sessionId.isEmpty
-                ? "\(session.providerId)-\(session.providerName)-\(session.startTime)"
-                : session.sessionId
-
-            if let existing = bestBySession[key] {
-                if isHigherPriority(session, than: existing) {
-                    bestBySession[key] = session
-                }
-            } else {
-                bestBySession[key] = session
-            }
-        }
-
-        return bestBySession.values.sorted { lhs, rhs in
-            isHigherPriority(lhs, than: rhs)
-        }
-    }
-
-    private func isHigherPriority(_ lhs: CCHActiveSession, than rhs: CCHActiveSession) -> Bool {
-        let lhsScore = priorityScore(lhs)
-        let rhsScore = priorityScore(rhs)
-        if lhsScore != rhsScore {
-            return lhsScore > rhsScore
-        }
-        if lhs.requestCount != rhs.requestCount {
-            return lhs.requestCount > rhs.requestCount
-        }
-        if lhs.totalTokens != rhs.totalTokens {
-            return lhs.totalTokens > rhs.totalTokens
-        }
-        return lhs.startTime > rhs.startTime
-    }
-
-    private func priorityScore(_ session: CCHActiveSession) -> Int {
-        let normalizedStatus = session.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        var score = 0
-        if session.concurrentCount > 0 {
-            score += 1_000 + min(session.concurrentCount, 50)
-        }
-        if normalizedStatus.contains("retry") {
-            score += 200
-        }
-        if normalizedStatus.contains("active")
-            || normalizedStatus.contains("running")
-            || normalizedStatus.contains("progress")
-            || normalizedStatus.contains("request")
-            || normalizedStatus.contains("请求") {
-            score += 100
-        }
-        return score
     }
 
     @objc private func togglePopoverAction() {
@@ -312,10 +229,6 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
                 forceActiveMaterial(in: contentView)
             }
             startOutsideClickMonitor()
-            Task {
-                try? await Task.sleep(nanoseconds: 220_000_000)
-                await state.refreshFocusedView()
-            }
         }
     }
 

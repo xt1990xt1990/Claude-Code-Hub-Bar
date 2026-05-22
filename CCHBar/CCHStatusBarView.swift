@@ -6,13 +6,14 @@ final class CCHStatusBarView: NSView {
         showDetails ? 116 : 92
     }
 
-    enum Payload {
+    enum Payload: Equatable {
         case idle(primary: String, detail: String, cacheState: CCHCacheVisibilityState)
         case running(provider: String, detail: String, elapsed: String, isRetrying: Bool, sessionCount: Int, cacheState: CCHCacheVisibilityState)
     }
 
     var payload: Payload = .idle(primary: "TTL $0.00", detail: "0 req", cacheState: .normal) {
         didSet {
+            guard payload != oldValue else { return }
             updateLabels()
             needsLayout = true
             needsDisplay = true
@@ -21,14 +22,12 @@ final class CCHStatusBarView: NSView {
     var onClick: (() -> Void)?
     var showsDetails = true {
         didSet {
+            guard showsDetails != oldValue else { return }
             updateLabels()
             needsLayout = true
             needsDisplay = true
         }
     }
-    private var runningPulsePhase: CGFloat = 0
-    private var animationTimer: Timer?
-    private var animationStartTime: CFTimeInterval = CACurrentMediaTime()
     private var marqueeStartTime: CFTimeInterval = CACurrentMediaTime()
     private var marqueeText = ""
     private var shouldMarqueePrimaryText = false
@@ -37,6 +36,7 @@ final class CCHStatusBarView: NSView {
     private let pulseDuration: CFTimeInterval = 1.15
     private let marqueePauseDuration: CFTimeInterval = 1.2
     private let marqueeSpeed: CGFloat = 18
+    private let animationFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
     private let iconCenter = NSPoint(x: 7.0, y: 11)
     private let textLeading: CGFloat = 18
     private let primaryClipView = NSView()
@@ -45,7 +45,10 @@ final class CCHStatusBarView: NSView {
     private let detailLabel = NSTextField(labelWithString: "")
     private let countLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")
+    private let runningRingLayer = CAShapeLayer()
     private let cacheIndicatorLayer = CALayer()
+    private var lastCacheIndicatorConfiguration: (state: CCHCacheVisibilityState, isRunning: Bool, showsDetails: Bool)?
+    private var lastMarqueeConfiguration: (text: String, textWidth: CGFloat, textRunWidth: CGFloat)?
 
     var preferredWidth: CGFloat {
         Self.fixedWidth(showDetails: showsDetails)
@@ -100,6 +103,7 @@ final class CCHStatusBarView: NSView {
             width: 12,
             height: 2
         )
+        updateRunningRingPath()
     }
 
     override init(frame frameRect: NSRect) {
@@ -131,21 +135,17 @@ final class CCHStatusBarView: NSView {
             if wasRunning || idleTransitionProgress < 1 {
                 beginIdleTransition()
             }
-            let blueAlpha = max(0, 1 - idleTransitionProgress)
             let idleColor = blendColor(
                 from: NSColor.systemBlue.withAlphaComponent(0.95),
                 to: NSColor.labelColor.withAlphaComponent(0.56),
                 progress: idleTransitionProgress
             )
-            if blueAlpha > 0.02 {
-                drawRunningRing(color: NSColor.systemBlue.withAlphaComponent(blueAlpha), center: iconCenter)
-            }
             drawLogoTriangle(color: idleColor, center: iconCenter)
         case .running(let provider, let detail, let elapsed, let isRetrying, _, _):
             wasRunning = true
             idleTransitionProgress = 0
-            startRunningAnimation()
             let accent = isRetrying ? NSColor.systemOrange : NSColor.systemBlue
+            startRunningAnimation(color: accent)
             drawRunningIcon(color: accent, center: iconCenter)
             _ = provider
             _ = detail
@@ -162,6 +162,7 @@ final class CCHStatusBarView: NSView {
         addSubview(primaryClipView)
 
         for label in [primaryLabel, marqueeCloneLabel, detailLabel, countLabel, elapsedLabel] {
+            label.wantsLayer = true
             label.isBezeled = false
             label.drawsBackground = false
             label.isEditable = false
@@ -182,6 +183,11 @@ final class CCHStatusBarView: NSView {
         countLabel.frame = NSRect(x: 104, y: 1.0, width: 18, height: 13)
         elapsedLabel.frame = NSRect(x: 119, y: 1.2, width: 42, height: 14)
         elapsedLabel.alignment = .center
+        runningRingLayer.fillColor = NSColor.clear.cgColor
+        runningRingLayer.lineWidth = 1.8
+        runningRingLayer.lineCap = .round
+        runningRingLayer.opacity = 0
+        layer?.addSublayer(runningRingLayer)
         cacheIndicatorLayer.cornerRadius = 1.5
         cacheIndicatorLayer.frame = CGRect(x: 133, y: 16.8, width: 14, height: 2)
         cacheIndicatorLayer.opacity = 0
@@ -237,10 +243,14 @@ final class CCHStatusBarView: NSView {
         if marqueeText != nextText {
             marqueeText = nextText
             marqueeStartTime = CACurrentMediaTime()
+            lastMarqueeConfiguration = nil
         }
         primaryLabel.stringValue = nextText
         marqueeCloneLabel.stringValue = nextText
-        shouldMarqueePrimaryText = shouldMarquee
+        if shouldMarqueePrimaryText != shouldMarquee {
+            shouldMarqueePrimaryText = shouldMarquee
+            lastMarqueeConfiguration = nil
+        }
         marqueeCloneLabel.isHidden = true
         needsLayout = true
     }
@@ -249,6 +259,8 @@ final class CCHStatusBarView: NSView {
         let primarySize = primaryLabel.intrinsicContentSize.width
         let shouldMarquee = shouldMarqueePrimaryText && primarySize > textWidth + 2
         guard shouldMarquee else {
+            primaryLabel.layer?.removeAnimation(forKey: "marquee")
+            lastMarqueeConfiguration = nil
             primaryLabel.frame = NSRect(x: 0, y: 0, width: textWidth, height: 11)
             marqueeCloneLabel.isHidden = true
             return
@@ -256,38 +268,29 @@ final class CCHStatusBarView: NSView {
 
         marqueeCloneLabel.isHidden = true
         let textRunWidth = ceil(primarySize)
-        let offset = currentMarqueeOffset(textWidth: textWidth, textRunWidth: textRunWidth)
-        primaryLabel.frame = NSRect(x: -offset, y: 0, width: textRunWidth, height: 11)
-    }
-
-    private func currentMarqueeOffset(textWidth: CGFloat, textRunWidth: CGFloat) -> CGFloat {
-        let overflow = max(0, textRunWidth - textWidth)
-        guard overflow > 1 else { return 0 }
-        let movingDuration = CFTimeInterval(overflow / marqueeSpeed)
-        let cycleDuration = marqueePauseDuration + movingDuration + marqueePauseDuration + movingDuration
-        let elapsed = (CACurrentMediaTime() - marqueeStartTime).truncatingRemainder(dividingBy: cycleDuration)
-        if elapsed < marqueePauseDuration {
-            return 0
+        primaryLabel.frame = NSRect(x: 0, y: 0, width: textRunWidth, height: 11)
+        let nextConfiguration = (text: marqueeText, textWidth: textWidth, textRunWidth: textRunWidth)
+        if let lastMarqueeConfiguration,
+           lastMarqueeConfiguration.text == nextConfiguration.text,
+           abs(lastMarqueeConfiguration.textWidth - nextConfiguration.textWidth) < 0.5,
+           abs(lastMarqueeConfiguration.textRunWidth - nextConfiguration.textRunWidth) < 0.5,
+           primaryLabel.layer?.animation(forKey: "marquee") != nil {
+            return
         }
-        let forwardElapsed = elapsed - marqueePauseDuration
-        if forwardElapsed < movingDuration {
-            return easedMarqueeOffset(progress: forwardElapsed / movingDuration, overflow: overflow)
-        }
-        let tailPauseElapsed = forwardElapsed - movingDuration
-        if tailPauseElapsed < marqueePauseDuration {
-            return overflow
-        }
-        let backwardElapsed = min(movingDuration, tailPauseElapsed - marqueePauseDuration)
-        return overflow - easedMarqueeOffset(progress: backwardElapsed / movingDuration, overflow: overflow)
-    }
-
-    private func easedMarqueeOffset(progress: CFTimeInterval, overflow: CGFloat) -> CGFloat {
-        let clamped = CGFloat(min(1, max(0, progress)))
-        let eased = clamped * clamped * (3 - 2 * clamped)
-        return overflow * eased
+        primaryLabel.layer?.removeAnimation(forKey: "marquee")
+        lastMarqueeConfiguration = nextConfiguration
+        applyMarqueeAnimation(textWidth: textWidth, textRunWidth: textRunWidth)
     }
 
     private func updateCacheIndicator(state: CCHCacheVisibilityState, isRunning: Bool) {
+        let nextConfiguration = (state: state, isRunning: isRunning, showsDetails: showsDetails)
+        if let lastCacheIndicatorConfiguration,
+           lastCacheIndicatorConfiguration == nextConfiguration,
+           cacheIndicatorLayer.animation(forKey: "breath") != nil || !isRunning {
+            return
+        }
+        lastCacheIndicatorConfiguration = nextConfiguration
+
         guard showsDetails else {
             cacheIndicatorLayer.removeAnimation(forKey: "breath")
             cacheIndicatorLayer.opacity = 0
@@ -322,6 +325,11 @@ final class CCHStatusBarView: NSView {
     }
 
     private func applyBreathingAnimation(period: CFTimeInterval, minOpacity: Float, maxOpacity: Float) {
+        if let animation = cacheIndicatorLayer.animation(forKey: "breath") as? CABasicAnimation,
+           animation.duration == period / 2,
+           cacheIndicatorLayer.opacity == maxOpacity {
+            return
+        }
         let presented = cacheIndicatorLayer.presentation()?.opacity ?? cacheIndicatorLayer.opacity
         cacheIndicatorLayer.removeAnimation(forKey: "breath")
 
@@ -360,58 +368,86 @@ final class CCHStatusBarView: NSView {
     }
 
     private func drawRunningIcon(color: NSColor, center: NSPoint) {
-        drawRunningRing(color: color, center: center)
         drawLogoTriangle(color: color, center: center)
     }
 
-    private func drawRunningRing(color: NSColor, center: NSPoint) {
-        let easedPhase = 1 - pow(1 - runningPulsePhase, 1.8)
-        let size = 10 + easedPhase * 13
-        let alpha = max(0, color.alphaComponent * 0.58 * (1 - runningPulsePhase))
-        let ringRect = NSRect(
-            x: center.x - size / 2,
-            y: center.y - size / 2,
-            width: size,
-            height: size
-        )
-        color.withAlphaComponent(alpha).setStroke()
-        let ring = NSBezierPath(ovalIn: ringRect)
-        ring.lineWidth = 1.4
-        ring.stroke()
-    }
-
-    private func startRunningAnimation() {
-        guard animationTimer == nil else { return }
-        animationStartTime = CACurrentMediaTime() - CFTimeInterval(runningPulsePhase) * pulseDuration
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let elapsed = CACurrentMediaTime() - self.animationStartTime
-            self.runningPulsePhase = CGFloat(elapsed.truncatingRemainder(dividingBy: self.pulseDuration) / self.pulseDuration)
-            self.needsLayout = true
-            self.needsDisplay = true
+    private func startRunningAnimation(color: NSColor = .systemBlue) {
+        updateRunningRingPath()
+        runningRingLayer.strokeColor = color.withAlphaComponent(0.92).cgColor
+        if runningRingLayer.animation(forKey: "pulse") != nil {
+            runningRingLayer.opacity = 1
+            return
         }
-        RunLoop.main.add(timer, forMode: .common)
-        animationTimer = timer
+
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 0.45
+        scale.toValue = 1.0
+        scale.duration = pulseDuration
+        scale.timingFunction = CAMediaTimingFunction(name: .easeOut)
+
+        let opacity = CABasicAnimation(keyPath: "opacity")
+        opacity.fromValue = 0.86
+        opacity.toValue = 0
+        opacity.duration = pulseDuration
+        opacity.timingFunction = CAMediaTimingFunction(name: .easeOut)
+
+        let group = CAAnimationGroup()
+        group.animations = [scale, opacity]
+        group.duration = pulseDuration
+        group.repeatCount = .infinity
+        group.isRemovedOnCompletion = false
+        group.preferredFrameRateRange = animationFrameRateRange
+        runningRingLayer.add(group, forKey: "pulse")
+        runningRingLayer.opacity = 1
     }
 
     private func stopRunningAnimation() {
-        guard let animationTimer else { return }
-        animationTimer.invalidate()
-        self.animationTimer = nil
-        runningPulsePhase = 0
+        runningRingLayer.removeAnimation(forKey: "pulse")
+        runningRingLayer.opacity = 0
+    }
+
+    private func updateRunningRingPath() {
+        let size: CGFloat = 23
+        let bounds = CGRect(x: 0, y: 0, width: size, height: size)
+        runningRingLayer.path = CGPath(ellipseIn: bounds.insetBy(dx: 0.9, dy: 0.9), transform: nil)
+        runningRingLayer.bounds = bounds
+        runningRingLayer.position = CGPoint(x: iconCenter.x, y: iconCenter.y)
+        runningRingLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+    }
+
+    private func applyMarqueeAnimation(textWidth: CGFloat, textRunWidth: CGFloat) {
+        guard textRunWidth > textWidth + 2 else { return }
+        let overflow = textRunWidth - textWidth
+        let movingDuration = CFTimeInterval(overflow / marqueeSpeed)
+        let cycleDuration = marqueePauseDuration + movingDuration + marqueePauseDuration + movingDuration
+        let values: [CGFloat] = [0, 0, -overflow, -overflow, 0]
+        let keyTimes: [NSNumber] = [
+            0,
+            NSNumber(value: marqueePauseDuration / cycleDuration),
+            NSNumber(value: (marqueePauseDuration + movingDuration) / cycleDuration),
+            NSNumber(value: (marqueePauseDuration + movingDuration + marqueePauseDuration) / cycleDuration),
+            1
+        ]
+
+        let animation = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        animation.values = values
+        animation.keyTimes = keyTimes
+        animation.duration = cycleDuration
+        animation.repeatCount = .infinity
+        animation.preferredFrameRateRange = animationFrameRateRange
+        animation.timingFunctions = [
+            CAMediaTimingFunction(name: .linear),
+            CAMediaTimingFunction(name: .easeInEaseOut),
+            CAMediaTimingFunction(name: .linear),
+            CAMediaTimingFunction(name: .easeInEaseOut)
+        ]
+        primaryLabel.layer?.add(animation, forKey: "marquee")
     }
 
     private func beginIdleTransition() {
         wasRunning = false
-        if idleTransitionProgress >= 1 {
-            stopRunningAnimation()
-            return
-        }
-        startRunningAnimation()
-        idleTransitionProgress = min(1, idleTransitionProgress + 0.08)
-        if idleTransitionProgress >= 1 {
-            stopRunningAnimation()
-        }
+        idleTransitionProgress = 1
+        stopRunningAnimation()
     }
 
     private func blendColor(from: NSColor, to: NSColor, progress: CGFloat) -> NSColor {
