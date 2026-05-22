@@ -134,6 +134,9 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
                     .font(.system(size: 12, weight: .semibold))
             }
+            .onChange(of: state.showStatusBarDetails) { _, _ in
+                state.refreshStatusBarSnapshotForPreferencesChange()
+            }
 
             HStack(spacing: 10) {
                 SettingsInfoPill(icon: "play.circle.fill", title: "运行中", value: "\(state.menuBarRunningLogs.count)")

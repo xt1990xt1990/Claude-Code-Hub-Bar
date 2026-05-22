@@ -940,10 +940,10 @@ private struct LeaderboardTabView: View {
             }
 
             HStack(spacing: 10) {
-                MiniStat(title: "请求", value: Text(compactNumber(state.leaderboard.reduce(0) { $0 + $1.requests })).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
-                MiniStat(title: "成本", value: MoneyValue(value: state.leaderboard.reduce(0) { $0 + $1.cost }, majorSize: 14, minorSize: 8, weight: .bold))
-                MiniStat(title: "Tokens", value: Text(compactNumber(state.leaderboard.reduce(0) { $0 + $1.tokens })).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
-                if let cacheHitRate = state.leaderboardOfficialCacheHitRate {
+                MiniStat(title: "请求", value: Text(compactNumber(state.leaderboardSummary.requests)).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
+                MiniStat(title: "成本", value: MoneyValue(value: state.leaderboardSummary.cost, majorSize: 14, minorSize: 8, weight: .bold))
+                MiniStat(title: "Tokens", value: Text(compactNumber(state.leaderboardSummary.tokens)).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
+                if let cacheHitRate = state.leaderboardSummary.cacheHitRate {
                     MiniStat(
                         title: "缓存",
                         value: Text(formatPercent(cacheHitRate))

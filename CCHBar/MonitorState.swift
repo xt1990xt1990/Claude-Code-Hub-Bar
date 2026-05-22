@@ -76,6 +76,20 @@ private enum CCHLogHighlightContext {
     case logsPage
 }
 
+private enum CCHRefreshKey: Hashable {
+    case overview
+    case activeSessions
+    case recentLogs
+    case logs(includeStats: Bool)
+    case leaderboard
+    case providers(usage: Bool)
+}
+
+private struct CCHRefreshTaskSlot {
+    let id: UUID
+    let task: Task<String?, Never>
+}
+
 @MainActor
 final class MonitorState: ObservableObject {
     @AppStorage("cch_base_url") var cchBaseURL = ""
@@ -123,6 +137,17 @@ final class MonitorState: ObservableObject {
     @Published private(set) var lastUpdateCheck: Date?
     @Published private(set) var updateCheckError: String?
     @Published private(set) var isCheckingForUpdate = false
+    @Published private(set) var leaderboardSummary = CCHLeaderboardSummary()
+    @Published private(set) var providerFilterSnapshot = CCHProviderFilterSnapshot()
+    @Published private(set) var statusBarSnapshot = CCHStatusBarSnapshot(
+        showsDetails: true,
+        idlePrimary: "TTL $0.00",
+        idleDetail: "0 req",
+        idleCacheState: .normal,
+        runningItems: [],
+        hasRecentLogs: false,
+        generatedAt: Date()
+    )
 
     private let api = APIService()
     private var refreshTimer: AnyCancellable?
@@ -141,6 +166,12 @@ final class MonitorState: ObservableObject {
     private var knownRecentLogIds = Set<Int>()
     private var knownLogPageIds = Set<Int>()
     private var recentLogHistory: [CCHLogEntry] = []
+    private var providerMultiplierByName: [String: Double] = [:]
+    private var providerMultiplierByProviderId: [Int: Double] = [:]
+    private var cachedMenuBarRunningLogs: [CCHLogEntry] = []
+    private var refreshTasks: [CCHRefreshKey: CCHRefreshTaskSlot] = [:]
+    private var lastProviderUsageRefresh: Date?
+    private var lastLogSummaryRefresh: Date?
 
     var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
@@ -167,7 +198,7 @@ final class MonitorState: ObservableObject {
     }
 
     var providerMultiplierById: [Int: Double] {
-        Dictionary(providers.map { ($0.id, $0.costMultiplier) }, uniquingKeysWith: { current, _ in current })
+        providerMultiplierByProviderId
     }
 
     var filteredActiveSessions: [CCHActiveSession] {
@@ -187,22 +218,7 @@ final class MonitorState: ObservableObject {
     }
 
     var menuBarRunningLogs: [CCHLogEntry] {
-        let ordered = recentLogs
-            .sorted { lhs, rhs in
-                if lhs.id != rhs.id { return lhs.id > rhs.id }
-                if lhs.requestSequence != rhs.requestSequence {
-                    return lhs.requestSequence > rhs.requestSequence
-                }
-                return lhs.createdAt > rhs.createdAt
-            }
-
-        var seenSessionIds = Set<String>()
-        return ordered.compactMap { log in
-            guard log.statusCode == nil else { return nil }
-            let key = log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId
-            guard seenSessionIds.insert(key).inserted else { return nil }
-            return log
-        }
+        cachedMenuBarRunningLogs
     }
 
     var currentMenuBarSession: CCHActiveSession? {
@@ -226,23 +242,19 @@ final class MonitorState: ObservableObject {
     }
 
     var providerGroups: [String] {
-        let groups = Set(providers.flatMap { providerGroupTitles($0.groupTag) })
-        return ["全部"] + groups.filter { $0 != "全部" }.sorted()
+        providerFilterSnapshot.groups
     }
 
     var filteredProviders: [CCHProvider] {
-        guard !selectedProviderGroups.isEmpty else { return providers }
-        return providers.filter { provider in
-            !Set(providerGroupTitles(provider.groupTag)).isDisjoint(with: selectedProviderGroups)
-        }
+        providerFilterSnapshot.providers
     }
 
     var filteredEnabledProviderCount: Int {
-        filteredProviders.filter(\.isEnabled).count
+        providerFilterSnapshot.enabledCount
     }
 
     var filteredUnhealthyProviderCount: Int {
-        filteredProviders.filter { $0.health.circuitState.lowercased() != "closed" || $0.health.failureCount > 0 }.count
+        providerFilterSnapshot.unhealthyCount
     }
 
     func leaderboardCacheHitRate(for entry: CCHLeaderboardEntry) -> Double? {
@@ -250,14 +262,7 @@ final class MonitorState: ObservableObject {
     }
 
     var leaderboardOfficialCacheHitRate: Double? {
-        let rows = leaderboard.filter { $0.cacheHitRateOverride != nil && $0.inputTokens > 0 }
-        guard !rows.isEmpty else { return nil }
-        let totalInputTokens = rows.reduce(0) { $0 + $1.inputTokens }
-        guard totalInputTokens > 0 else { return nil }
-        let weighted = rows.reduce(0.0) { partial, entry in
-            partial + (entry.cacheHitRateOverride ?? 0) * Double(entry.inputTokens)
-        }
-        return min(1, max(0, weighted / Double(totalInputTokens)))
+        leaderboardSummary.cacheHitRate
     }
 
     func setLeaderboardScope(_ scope: CCHLeaderboardScope) {
@@ -321,12 +326,14 @@ final class MonitorState: ObservableObject {
             simulatedCacheAlertLogId = nil
             simulatedIdleCacheAlert = true
         }
+        updateStatusBarSnapshot()
 
         actionMessage = "已触发缓存提醒预览"
         simulatedCacheAlertDismissTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             self.simulatedCacheAlertLogId = nil
             self.simulatedIdleCacheAlert = false
+            self.updateStatusBarSnapshot()
             if self.actionMessage == "已触发缓存提醒预览" {
                 self.actionMessage = nil
             }
@@ -336,10 +343,7 @@ final class MonitorState: ObservableObject {
     func providerMultiplier(for providerName: String) -> Double {
         let normalized = providerName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return 1 }
-        return providers.first(where: {
-            $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                .caseInsensitiveCompare(normalized) == .orderedSame
-        })?.costMultiplier ?? 1
+        return providerMultiplierByName[normalized.lowercased()] ?? 1
     }
 
     func isProviderGroupSelected(_ group: String) -> Bool {
@@ -349,6 +353,7 @@ final class MonitorState: ObservableObject {
     func toggleProviderGroup(_ group: String) {
         guard group != "全部" else {
             selectedProviderGroups = []
+            rebuildProviderFilterSnapshot()
             return
         }
 
@@ -359,6 +364,7 @@ final class MonitorState: ObservableObject {
             next.insert(group)
         }
         selectedProviderGroups = next
+        rebuildProviderFilterSnapshot()
     }
 
     func startRefreshTimer() {
@@ -393,6 +399,10 @@ final class MonitorState: ObservableObject {
         }
     }
 
+    func refreshStatusBarSnapshotForPreferencesChange() {
+        updateStatusBarSnapshot()
+    }
+
     func startFocusedViewTimer() {
         focusedViewTimer?.cancel()
         focusedViewTimer = Timer.publish(every: 3, on: .main, in: .common)
@@ -408,11 +418,11 @@ final class MonitorState: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        async let overviewResult = loadOverview()
-        async let sessionsResult = loadActiveSessions()
-        async let leaderboardResult = loadLeaderboard()
-        async let logsResult = loadLogs()
-        async let providersResult = loadProviders()
+        async let overviewResult = runRefresh(.overview) { await self.loadOverview() }
+        async let sessionsResult = runRefresh(.activeSessions) { await self.loadActiveSessions() }
+        async let leaderboardResult = runRefresh(.leaderboard) { await self.loadLeaderboard() }
+        async let logsResult = runRefresh(.logs(includeStats: true)) { await self.loadLogs(includeStats: true) }
+        async let providersResult = runRefresh(.providers(usage: true)) { await self.loadProviders(includeUsage: true) }
 
         let errors = await [
             overviewResult,
@@ -431,8 +441,8 @@ final class MonitorState: ObservableObject {
 
     func refreshBackgroundSnapshot() async {
         let errors = await [
-            loadOverview(),
-            loadProviders()
+            runRefresh(.overview) { await self.loadOverview() },
+            runRefresh(.providers(usage: false)) { await self.loadProviders(includeUsage: self.shouldRefreshProviderUsage()) }
         ].compactMap { $0 }
 
         if !errors.isEmpty {
@@ -443,7 +453,9 @@ final class MonitorState: ObservableObject {
 
     func refreshLogsOnly() async {
         isLoading = true
-        errorMessage = await loadLogs(reset: true)
+        errorMessage = await runRefresh(.logs(includeStats: true)) {
+            await self.loadLogs(reset: true, includeStats: true)
+        }
         lastRefresh = Date()
         isLoading = false
     }
@@ -451,14 +463,16 @@ final class MonitorState: ObservableObject {
     func loadMoreLogs() async {
         guard !isLoadingMoreLogs, logs.count < logTotal || logTotal == 0 else { return }
         isLoadingMoreLogs = true
-        errorMessage = await loadLogs(reset: false)
+        errorMessage = await runRefresh(.logs(includeStats: false)) {
+            await self.loadLogs(reset: false, includeStats: false)
+        }
         lastRefresh = Date()
         isLoadingMoreLogs = false
     }
 
     func refreshLeaderboardOnly() async {
         isLoading = true
-        errorMessage = await loadLeaderboard()
+        errorMessage = await runRefresh(.leaderboard) { await self.loadLeaderboard() }
         lastRefresh = Date()
         isLoading = false
     }
@@ -471,13 +485,17 @@ final class MonitorState: ObservableObject {
         let error: String?
         switch selectedTab {
         case .dashboard:
-            error = await loadOverview()
+            async let overviewError = runRefresh(.overview) { await self.loadOverview() }
+            async let recentError = runRefresh(.recentLogs) { await self.loadRecentLogsForStatusBar() }
+            error = await [overviewError, recentError].compactMap { $0 }.first
         case .logs:
-            error = await loadLogs(reset: true)
+            error = await runRefresh(.logs(includeStats: shouldRefreshLogSummary())) {
+                await self.loadLogs(reset: true, includeStats: self.shouldRefreshLogSummary())
+            }
         case .leaderboard:
-            error = await loadLeaderboard()
+            error = await runRefresh(.leaderboard) { await self.loadLeaderboard() }
         case .providers:
-            error = await loadProviders()
+            error = await runRefresh(.providers(usage: true)) { await self.loadProviders(includeUsage: true) }
         }
 
         if let error {
@@ -493,42 +511,11 @@ final class MonitorState: ObservableObject {
         isLoadingActiveSessions = true
         defer { isLoadingActiveSessions = false }
 
-        async let sessionsResult = api.fetchActiveSessions(config: config)
-        async let overviewResult = api.fetchOverview(config: config)
-        async let recentLogsResult = api.fetchLogs(
-            config: config,
-            page: 1,
-            pageSize: 40,
-            startDate: Calendar.current.date(byAdding: .hour, value: -1, to: Date()),
-            model: "",
-            statusCode: "",
-            sessionId: "",
-            includeStats: false
-        )
+        async let sessionsError = runRefresh(.activeSessions) { await self.loadActiveSessions() }
+        async let overviewError = runRefresh(.overview) { await self.loadOverview() }
+        async let recentLogsError = runRefresh(.recentLogs) { await self.loadRecentLogsForStatusBar() }
 
-        var errors: [String] = []
-
-        do {
-            activeSessions = try await sessionsResult
-        } catch {
-            errors.append("Sessions: \(error.localizedDescription)")
-        }
-
-        do {
-            overview = try await overviewResult
-        } catch {
-            errors.append("Dashboard: \(error.localizedDescription)")
-        }
-
-        do {
-            let page = try await recentLogsResult
-            registerIncomingLogs(page.logs, isReset: true, context: .recent)
-            recentLogs = page.logs
-            mergeRecentLogHistory(page.logs)
-            rebuildCacheStatus()
-        } catch {
-            errors.append("Logs: \(error.localizedDescription)")
-        }
+        let errors = await [sessionsError, overviewError, recentLogsError].compactMap { $0 }
 
         if !errors.isEmpty, activeSessions.isEmpty, recentLogs.isEmpty, errorMessage == nil {
             errorMessage = errors.joined(separator: " · ")
@@ -594,9 +581,40 @@ final class MonitorState: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    private func runRefresh(
+        _ key: CCHRefreshKey,
+        operation: @escaping @MainActor () async -> String?
+    ) async -> String? {
+        if let slot = refreshTasks[key] {
+            return await slot.task.value
+        }
+
+        let id = UUID()
+        let task = Task { @MainActor in
+            await operation()
+        }
+        refreshTasks[key] = CCHRefreshTaskSlot(id: id, task: task)
+        let result = await task.value
+        if refreshTasks[key]?.id == id {
+            refreshTasks[key] = nil
+        }
+        return result
+    }
+
+    private func shouldRefreshProviderUsage(now: Date = Date()) -> Bool {
+        guard let lastProviderUsageRefresh else { return true }
+        return now.timeIntervalSince(lastProviderUsageRefresh) >= 30
+    }
+
+    private func shouldRefreshLogSummary(now: Date = Date()) -> Bool {
+        guard let lastLogSummaryRefresh else { return true }
+        return now.timeIntervalSince(lastLogSummaryRefresh) >= 15
+    }
+
     private func loadOverview() async -> String? {
         do {
             overview = try await api.fetchOverview(config: config)
+            updateStatusBarSnapshot()
             return nil
         } catch {
             return "总览: \(error.localizedDescription)"
@@ -606,6 +624,7 @@ final class MonitorState: ObservableObject {
     private func loadActiveSessions() async -> String? {
         do {
             activeSessions = try await api.fetchActiveSessions(config: config)
+            updateStatusBarSnapshot()
             return nil
         } catch {
             return "会话: \(error.localizedDescription)"
@@ -619,14 +638,38 @@ final class MonitorState: ObservableObject {
                 period: leaderboardPeriod.rawValue,
                 scope: leaderboardScope.rawValue
             )
+            rebuildLeaderboardSummary()
             return nil
         } catch {
             leaderboard = []
+            rebuildLeaderboardSummary()
             return "排行: \(error.localizedDescription)"
         }
     }
 
-    private func loadLogs(reset: Bool = true) async -> String? {
+    private func loadRecentLogsForStatusBar() async -> String? {
+        do {
+            let page = try await api.fetchLogs(
+                config: config,
+                page: 1,
+                pageSize: 40,
+                startDate: Calendar.current.date(byAdding: .hour, value: -1, to: Date()),
+                model: "",
+                statusCode: "",
+                sessionId: "",
+                includeStats: false
+            )
+            registerIncomingLogs(page.logs, isReset: true, context: .recent)
+            recentLogs = page.logs
+            mergeRecentLogHistory(page.logs)
+            rebuildCacheStatus()
+            return nil
+        } catch {
+            return "日志: \(error.localizedDescription)"
+        }
+    }
+
+    private func loadLogs(reset: Bool = true, includeStats: Bool = true) async -> String? {
         do {
             let nextPage = reset ? 1 : logPage + 1
             let page = try await api.fetchLogs(
@@ -636,7 +679,8 @@ final class MonitorState: ObservableObject {
                 startDate: logRange.startDate,
                 model: logModelFilter,
                 statusCode: logStatusFilter,
-                sessionId: logSessionFilter
+                sessionId: logSessionFilter,
+                includeStats: includeStats
             )
             registerIncomingLogs(page.logs, isReset: reset, context: .logsPage)
             logPage = nextPage
@@ -654,7 +698,10 @@ final class MonitorState: ObservableObject {
             }
             rebuildCacheStatus()
             logTotal = page.total
-            logSummary = page.summary
+            if includeStats {
+                logSummary = page.summary
+                lastLogSummaryRefresh = Date()
+            }
             if let selectedLog, !page.logs.contains(where: { $0.id == selectedLog.id }) {
                 self.selectedLog = nil
             }
@@ -664,10 +711,17 @@ final class MonitorState: ObservableObject {
         }
     }
 
-    private func loadProviders() async -> String? {
+    private func loadProviders(includeUsage: Bool = true) async -> String? {
         do {
-            providers = try await api.fetchProviders(config: config)
-            selectedProviderGroups = selectedProviderGroups.intersection(Set(providerGroups))
+            providers = try await api.fetchProviders(config: config, includeUsage: includeUsage)
+            if includeUsage {
+                lastProviderUsageRefresh = Date()
+            }
+            rebuildProviderLookup()
+            let allGroups = computedProviderGroups()
+            selectedProviderGroups = selectedProviderGroups.intersection(Set(allGroups))
+            rebuildProviderFilterSnapshot(groups: allGroups)
+            updateStatusBarSnapshot()
             return nil
         } catch {
             return "渠道: \(error.localizedDescription)"
@@ -720,7 +774,116 @@ final class MonitorState: ObservableObject {
         let combined = uniqueLogs(recentLogs + logs + recentLogHistory)
         let next = buildCacheStatusMap(for: combined)
         cacheStatusByLogId = next
+        rebuildMenuBarRunningLogs()
         announceLatestCacheAlert(from: combined, statusMap: next)
+        updateStatusBarSnapshot()
+    }
+
+    private func rebuildProviderLookup() {
+        providerMultiplierByName = Dictionary(
+            providers.map { ($0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), $0.costMultiplier) },
+            uniquingKeysWith: { current, _ in current }
+        )
+        providerMultiplierByProviderId = Dictionary(
+            providers.map { ($0.id, $0.costMultiplier) },
+            uniquingKeysWith: { current, _ in current }
+        )
+    }
+
+    private func computedProviderGroups() -> [String] {
+        let groups = Set(providers.flatMap { providerGroupTitles($0.groupTag) })
+        return ["全部"] + groups.filter { $0 != "全部" }.sorted()
+    }
+
+    private func rebuildProviderFilterSnapshot(groups: [String]? = nil) {
+        let resolvedGroups = groups ?? computedProviderGroups()
+        let filtered: [CCHProvider]
+        if selectedProviderGroups.isEmpty {
+            filtered = providers
+        } else {
+            filtered = providers.filter { provider in
+                !Set(providerGroupTitles(provider.groupTag)).isDisjoint(with: selectedProviderGroups)
+            }
+        }
+        providerFilterSnapshot = CCHProviderFilterSnapshot(
+            groups: resolvedGroups,
+            providers: filtered,
+            enabledCount: filtered.filter(\.isEnabled).count,
+            unhealthyCount: filtered.filter { $0.health.circuitState.lowercased() != "closed" || $0.health.failureCount > 0 }.count
+        )
+    }
+
+    private func rebuildLeaderboardSummary() {
+        let requests = leaderboard.reduce(0) { $0 + $1.requests }
+        let cost = leaderboard.reduce(0) { $0 + $1.cost }
+        let tokens = leaderboard.reduce(0) { $0 + $1.tokens }
+        let rows = leaderboard.filter { $0.cacheHitRateOverride != nil && $0.inputTokens > 0 }
+        let totalInputTokens = rows.reduce(0) { $0 + $1.inputTokens }
+        let cacheHitRate: Double?
+        if rows.isEmpty || totalInputTokens <= 0 {
+            cacheHitRate = nil
+        } else {
+            let weighted = rows.reduce(0.0) { partial, entry in
+                partial + (entry.cacheHitRateOverride ?? 0) * Double(entry.inputTokens)
+            }
+            cacheHitRate = min(1, max(0, weighted / Double(totalInputTokens)))
+        }
+        leaderboardSummary = CCHLeaderboardSummary(
+            requests: requests,
+            cost: cost,
+            tokens: tokens,
+            cacheHitRate: cacheHitRate
+        )
+    }
+
+    private func rebuildMenuBarRunningLogs() {
+        let ordered = recentLogs.sorted { lhs, rhs in
+            if lhs.id != rhs.id { return lhs.id > rhs.id }
+            if lhs.requestSequence != rhs.requestSequence {
+                return lhs.requestSequence > rhs.requestSequence
+            }
+            return (parsedCCHDate(lhs.createdAt) ?? .distantPast) > (parsedCCHDate(rhs.createdAt) ?? .distantPast)
+        }
+
+        var seenSessionIds = Set<String>()
+        cachedMenuBarRunningLogs = ordered.compactMap { log in
+            guard log.statusCode == nil else { return nil }
+            let key = log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId
+            guard seenSessionIds.insert(key).inserted else { return nil }
+            return log
+        }
+    }
+
+    private func updateStatusBarSnapshot() {
+        let runningItems = cachedMenuBarRunningLogs.map { log -> CCHStatusRunningItem in
+            let model = log.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? log.originalModel
+                : log.model
+            return CCHStatusRunningItem(
+                id: log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId,
+                logId: log.id,
+                providerName: log.providerName,
+                model: model,
+                multiplier: providerMultiplier(for: log.providerName),
+                isRetrying: false,
+                startedAt: parsedCCHDate(log.createdAt),
+                cacheState: cacheStatus(for: log).state
+            )
+        }
+
+        let next = CCHStatusBarSnapshot(
+            showsDetails: showStatusBarDetails,
+            idlePrimary: menuBarText,
+            idleDetail: menuBarIdleDetail,
+            idleCacheState: statusBarCacheState,
+            runningItems: runningItems,
+            hasRecentLogs: !recentLogs.isEmpty,
+            generatedAt: Date()
+        )
+
+        if statusBarSnapshot != next {
+            statusBarSnapshot = next
+        }
     }
 
     private func mergeRecentLogHistory(_ values: [CCHLogEntry]) {
@@ -749,6 +912,7 @@ final class MonitorState: ObservableObject {
             try? await Task.sleep(nanoseconds: 4_500_000_000)
             if self.menuBarCacheAlertLogId == latest.id {
                 self.menuBarCacheAlertLogId = nil
+                self.updateStatusBarSnapshot()
             }
         }
     }
@@ -882,16 +1046,16 @@ private func isOlderLog(_ lhs: CCHLogEntry, _ rhs: CCHLogEntry) -> Bool {
         return lhs.requestSequence < rhs.requestSequence
     }
     guard
-        let lhsDate = parseCCHDate(lhs.createdAt),
-        let rhsDate = parseCCHDate(rhs.createdAt)
+        let lhsDate = parsedCCHDate(lhs.createdAt),
+        let rhsDate = parsedCCHDate(rhs.createdAt)
     else { return lhs.id < rhs.id }
     return lhsDate < rhsDate
 }
 
 private func isNewerLog(_ lhs: CCHLogEntry, _ rhs: CCHLogEntry) -> Bool {
     guard
-        let lhsDate = parseCCHDate(lhs.createdAt),
-        let rhsDate = parseCCHDate(rhs.createdAt)
+        let lhsDate = parsedCCHDate(lhs.createdAt),
+        let rhsDate = parsedCCHDate(rhs.createdAt)
     else { return lhs.id > rhs.id }
     return lhsDate > rhsDate
 }
@@ -1070,7 +1234,7 @@ func compactScrollingText(_ value: String, visibleCharacters: Int) -> String {
 }
 
 func shortTime(_ raw: String) -> String {
-    guard let date = parseCCHDate(raw) else {
+    guard let date = parsedCCHDate(raw) else {
         return raw
     }
     return date.formatted(date: .omitted, time: .shortened)
@@ -1107,26 +1271,56 @@ func providerGroupColor(_ group: String) -> Color {
     )
 }
 
-func parseCCHDate(_ raw: String) -> Date? {
+private enum CCHDateParser {
+    static let fractionalISO: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    static let iso: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    static let localDateTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
+
+    static var cache: [String: Date] = [:]
+}
+
+func parsedCCHDate(_ raw: String) -> Date? {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
+    if let cached = CCHDateParser.cache[trimmed] {
+        return cached
+    }
 
-    let iso = ISO8601DateFormatter()
-    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = iso.date(from: trimmed) {
+    if let date = CCHDateParser.fractionalISO.date(from: trimmed) {
+        CCHDateParser.cache[trimmed] = date
         return date
     }
 
-    iso.formatOptions = [.withInternetDateTime]
-    if let date = iso.date(from: trimmed) {
+    if let date = CCHDateParser.iso.date(from: trimmed) {
+        CCHDateParser.cache[trimmed] = date
         return date
     }
 
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = .current
-    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    return formatter.date(from: trimmed)
+    if let date = CCHDateParser.localDateTime.date(from: trimmed) {
+        CCHDateParser.cache[trimmed] = date
+        return date
+    }
+    return nil
+}
+
+func parseCCHDate(_ raw: String) -> Date? {
+    parsedCCHDate(raw)
 }
 
 func formatDuration(_ seconds: TimeInterval) -> String {
