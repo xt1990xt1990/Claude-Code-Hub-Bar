@@ -63,11 +63,19 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.animates = false
         popover.contentSize = NSSize(width: 760, height: 630)
+    }
+
+    private func ensurePopoverContentController() -> NSViewController {
+        if let controller = popover.contentViewController {
+            return controller
+        }
+
         let host = NSHostingController(rootView: MenuBarView(state: state))
         host.view.wantsLayer = true
         host.view.layer?.backgroundColor = NSColor.clear.cgColor
         host.view.layer?.masksToBounds = false
         popover.contentViewController = host
+        return host
     }
 
     private func observeState() {
@@ -229,12 +237,13 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
 
     private func showPopoverLightly(relativeTo rect: NSRect, of button: NSView) {
         isClosingPopover = false
+        let contentController = ensurePopoverContentController()
         state.setPanelVisible(true)
-        popover.contentViewController?.view.alphaValue = 0
+        contentController.view.alphaValue = 0
         popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
 
-        guard let window = popover.contentViewController?.view.window else {
-            popover.contentViewController?.view.alphaValue = 1
+        guard let window = contentController.view.window else {
+            contentController.view.alphaValue = 1
             startOutsideClickMonitor()
             return
         }
@@ -244,11 +253,9 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         window.hasShadow = true
         window.alphaValue = 0
         window.makeKey()
-        popover.contentViewController?.view.alphaValue = 1
+        contentController.view.alphaValue = 1
 
-        if let contentView = popover.contentViewController?.view {
-            forceActiveMaterial(in: contentView)
-        }
+        forceActiveMaterial(in: contentController.view)
         startOutsideClickMonitor()
 
         NSAnimationContext.runAnimationGroup { context in
@@ -309,5 +316,6 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         popover.contentViewController?.view.alphaValue = 1
         stopOutsideClickMonitor()
         state.setPanelVisible(false)
+        popover.contentViewController = nil
     }
 }

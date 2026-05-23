@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 private enum CCHPanelLayout {
@@ -224,8 +225,13 @@ private struct CCHSegmentedTabBar: View {
 
 struct MenuBarView: View {
     @ObservedObject var state: MonitorState
-    @State private var builtTabs: Set<CCHPanelTab> = [.dashboard]
+    @State private var builtTabs: Set<CCHPanelTab>
     private var theme: CCHThemePalette { state.selectedTheme.palette }
+
+    init(state: MonitorState) {
+        self.state = state
+        _builtTabs = State(initialValue: [.dashboard, state.selectedTab])
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -340,6 +346,7 @@ struct MenuBarView: View {
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.18), value: state.isLoading)
         .onAppear {
+            builtTabs.insert(state.selectedTab)
             state.setPanelVisible(true)
         }
         .onDisappear {
@@ -442,9 +449,11 @@ private struct FooterStatusLine: View {
     @State private var incomingMode: Mode?
     @State private var rollProgress: CGFloat = 1
     @State private var rollGeneration = 0
+    @State private var now = Date()
 
     private let rollHeight: CGFloat = 24
     private let rollDuration: TimeInterval = 0.28
+    private let ticker = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     private enum Mode: Equatable {
         case error(String)
@@ -474,30 +483,40 @@ private struct FooterStatusLine: View {
     }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 5)) { context in
-            let currentMode = mode(at: context.date)
-            let currentModeId = modeId(for: currentMode)
+        let currentMode = mode(at: now)
+        let currentModeId = modeId(for: currentMode)
 
-            ZStack(alignment: .leading) {
-                if let visibleMode {
-                    content(for: visibleMode)
-                        .offset(y: incomingMode == nil ? 0 : -rollProgress * rollHeight)
-                }
-                if let incomingMode {
-                    content(for: incomingMode)
-                        .offset(y: (1 - rollProgress) * rollHeight)
-                }
+        ZStack(alignment: .leading) {
+            if let visibleMode {
+                content(for: visibleMode)
+                    .offset(y: incomingMode == nil ? 0 : -rollProgress * rollHeight)
             }
-            .frame(height: rollHeight, alignment: .leading)
-            .clipped()
-            .onAppear {
-                if visibleMode == nil {
-                    visibleMode = currentMode
-                }
+            if let incomingMode {
+                content(for: incomingMode)
+                    .offset(y: (1 - rollProgress) * rollHeight)
             }
-            .onChange(of: currentModeId) { _, _ in
-                roll(to: currentMode)
+        }
+        .frame(height: rollHeight, alignment: .leading)
+        .clipped()
+        .onAppear {
+            let appearedAt = Date()
+            now = appearedAt
+            if visibleMode == nil {
+                visibleMode = mode(at: appearedAt)
             }
+        }
+        .onDisappear {
+            rollGeneration += 1
+        }
+        .onReceive(ticker) { date in
+            guard state.panelVisible else { return }
+            now = date
+        }
+        .onChange(of: state.lastRefresh) { _, _ in
+            now = Date()
+        }
+        .onChange(of: currentModeId) { _, _ in
+            roll(to: currentMode)
         }
     }
 
@@ -800,7 +819,8 @@ private struct RecentRequestsPanel: View {
                     CompactLogRow(
                         log: log,
                         cacheStatus: state.cacheStatus(for: log),
-                        isNew: state.highlightedLogIds.contains(log.id)
+                        isNew: state.highlightedLogIds.contains(log.id),
+                        isActive: state.panelVisible && state.selectedTab == .dashboard
                     )
                     .transition(.opacity)
                 }
@@ -1112,7 +1132,8 @@ private struct LogsTabView: View {
                                     log: log,
                                     isSelected: state.selectedLog?.id == log.id,
                                     cacheStatus: state.cacheStatus(for: log),
-                                    isNew: state.highlightedLogIds.contains(log.id)
+                                    isNew: state.highlightedLogIds.contains(log.id),
+                                    isActive: state.panelVisible && state.selectedTab == .logs
                                 )
                                     .onTapGesture {
                                         state.selectedLog = log
@@ -1749,6 +1770,7 @@ private struct LogRow: View {
     let isSelected: Bool
     let cacheStatus: CCHCacheStatusContext
     let isNew: Bool
+    let isActive: Bool
     @Environment(\.cchTheme) private var theme
 
     var statusColor: Color {
@@ -1773,7 +1795,7 @@ private struct LogRow: View {
 
     var body: some View {
         HStack(spacing: 9) {
-            LogStatusIndicator(color: statusColor, isRunning: log.statusCode == nil)
+            LogStatusIndicator(color: statusColor, isRunning: log.statusCode == nil, isActive: isActive)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     ModelBrandIcon(model: model, provider: log.providerName, size: 13)
@@ -1843,7 +1865,7 @@ private struct LogRow: View {
         .padding(8)
         .background(isSelected ? theme.rowSelected : theme.control)
         .overlay(alignment: .leading) {
-            NewLogEdgeFlash(active: isNew)
+            NewLogEdgeFlash(active: isNew && isActive)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
@@ -1853,6 +1875,7 @@ private struct CompactLogRow: View {
     let log: CCHLogEntry
     let cacheStatus: CCHCacheStatusContext
     let isNew: Bool
+    let isActive: Bool
     @Environment(\.cchTheme) private var theme
 
     var statusColor: Color {
@@ -1881,7 +1904,7 @@ private struct CompactLogRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            LogStatusIndicator(color: statusColor, isRunning: log.statusCode == nil)
+            LogStatusIndicator(color: statusColor, isRunning: log.statusCode == nil, isActive: isActive)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Text(log.providerName.isEmpty ? "渠道" : log.providerName)
@@ -1945,7 +1968,7 @@ private struct CompactLogRow: View {
         .padding(8)
         .cchSurface(.control)
         .overlay(alignment: .leading) {
-            NewLogEdgeFlash(active: isNew)
+            NewLogEdgeFlash(active: isNew && isActive)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
@@ -2256,11 +2279,22 @@ private struct StatusDot: View {
 private struct LogStatusIndicator: View {
     let color: Color
     let isRunning: Bool
+    let isActive: Bool
     @State private var pulse = false
     @Environment(\.cchTheme) private var theme
 
+    init(color: Color, isRunning: Bool, isActive: Bool = true) {
+        self.color = color
+        self.isRunning = isRunning
+        self.isActive = isActive
+    }
+
     var runningColor: Color {
         theme.accentBlue
+    }
+
+    private var shouldPulse: Bool {
+        isRunning && isActive
     }
 
     var body: some View {
@@ -2282,11 +2316,24 @@ private struct LogStatusIndicator: View {
         }
         .frame(width: 18, height: 18)
         .onAppear {
-            guard isRunning else { return }
+            updatePulse()
+        }
+        .onChange(of: shouldPulse) { _, _ in
+            updatePulse()
+        }
+        .onDisappear {
             pulse = false
-            withAnimation(.easeOut(duration: 1.05).repeatForever(autoreverses: false)) {
-                pulse = true
-            }
+        }
+    }
+
+    private func updatePulse() {
+        guard shouldPulse else {
+            pulse = false
+            return
+        }
+        pulse = false
+        withAnimation(.easeOut(duration: 1.05).repeatForever(autoreverses: false)) {
+            pulse = true
         }
     }
 }
