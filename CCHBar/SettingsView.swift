@@ -12,6 +12,7 @@ struct SettingsView: View {
     @State private var draftCCHEnvPath = ""
     @State private var isApplyingConnection = false
     @State private var launchError: String?
+    private var theme: CCHThemePalette { state.selectedTheme.palette }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,6 +22,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     connectionCard
                     syncCard
+                    appearanceCard
                     updateCard
                     systemCard
                 }
@@ -29,6 +31,8 @@ struct SettingsView: View {
         }
         .frame(width: 620, height: 560)
         .background(SettingsBackground())
+        .foregroundStyle(theme.textPrimary)
+        .environment(\.cchTheme, theme)
         .onAppear {
             launchAtLogin = SMAppService.mainApp.status == .enabled
             loadConnectionDrafts()
@@ -46,7 +50,7 @@ struct SettingsView: View {
             icon: "link.circle.fill",
             title: "连接",
             subtitle: "配置 Claude Code Hub 反代地址和访问密钥。",
-            accent: .blue
+            accent: theme.accentBlue
         ) {
             SettingsControlRow(title: "服务地址", subtitle: "用于打开页面和请求 API。") {
                 SettingsInputField(text: $draftCCHBaseURL, placeholder: "https://cch.example.com/", isURL: true)
@@ -64,7 +68,7 @@ struct SettingsView: View {
             } label: {
                 Label("高级连接来源", systemImage: "slider.horizontal.3")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
             }
             .toggleStyle(.button)
 
@@ -84,10 +88,10 @@ struct SettingsView: View {
                 if hasConnectionChanges {
                     Text("未应用")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(theme.accentOrange)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.orange.opacity(0.12))
+                        .background(theme.accentOrange.opacity(0.12))
                         .clipShape(Capsule())
                 }
 
@@ -98,7 +102,7 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .tint(.blue)
+                .tint(theme.accentBlue)
                 .disabled(!hasConnectionChanges || isApplyingConnection)
             }
         }
@@ -109,7 +113,7 @@ struct SettingsView: View {
             icon: "arrow.triangle.2.circlepath.circle.fill",
             title: "同步",
             subtitle: "控制后台快照和状态栏筛选。",
-            accent: .purple
+            accent: theme.accentPurple
         ) {
             SettingsControlRow(title: "活跃用户", subtitle: "只在状态栏关注指定用户；留空表示全部。") {
                 SettingsInputField(text: $state.activeSessionUserFilter, placeholder: "用户名称，可留空")
@@ -118,10 +122,10 @@ struct SettingsView: View {
             SettingsControlRow(title: "后台刷新", subtitle: "抽屉打开时当前页会更频繁同步。") {
                 HStack(spacing: 10) {
                     Slider(value: $state.refreshInterval, in: 8...120, step: 1)
-                        .tint(.purple)
+                        .tint(theme.accentPurple)
                     Text("\(Int(state.refreshInterval))s")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.purple)
+                        .foregroundStyle(theme.accentPurple)
                         .frame(width: 44, alignment: .trailing)
                 }
             }
@@ -160,7 +164,7 @@ struct SettingsView: View {
             icon: "arrow.down.app.fill",
             title: "更新",
             subtitle: "检查新版本并提醒下载。",
-            accent: .green
+            accent: theme.accentGreen
         ) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -170,7 +174,7 @@ struct SettingsView: View {
                          ? "每 6 小时检查一次，发现新版后在状态栏弹窗底部提醒。"
                          : "已关闭。可在下方手动触发检查。")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 Spacer()
                 Toggle("", isOn: $state.checkForUpdatesEnabled)
@@ -210,20 +214,20 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         Image(systemName: "sparkles")
-                            .foregroundStyle(.green)
+                            .foregroundStyle(theme.accentGreen)
                         Text(update.displayName)
                             .font(.system(size: 13, weight: .semibold))
                         if let publishedAt = update.publishedAt {
                             Text(publishedAt.formatted(date: .abbreviated, time: .omitted))
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(theme.textSecondary)
                         }
                         Spacer()
                     }
                     if !update.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Text(update.body)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(theme.textSecondary)
                             .lineLimit(4)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -241,20 +245,20 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                        .tint(.green)
+                        .tint(theme.accentGreen)
                     }
                 }
                 .padding(11)
-                .background(Color.green.opacity(0.08))
+                .background(theme.accentGreen.opacity(0.08))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.green.opacity(0.3), lineWidth: 1)
+                        .stroke(theme.accentGreen.opacity(0.3), lineWidth: 1)
                 )
             } else if let error = state.updateCheckError {
                 Text("检查失败：\(error)")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(theme.accentOrange)
             }
         }
     }
@@ -264,7 +268,7 @@ struct SettingsView: View {
             icon: "macwindow.on.rectangle",
             title: "系统",
             subtitle: "控制启动项和常用入口。",
-            accent: .orange
+            accent: theme.accentOrange
         ) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -272,7 +276,7 @@ struct SettingsView: View {
                         .font(.system(size: 13, weight: .semibold))
                     Text(launchAtLogin ? "登录后自动启动菜单栏监控。" : "关闭后需要手动打开应用。")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 Spacer()
                 Toggle("", isOn: $launchAtLogin)
@@ -286,7 +290,7 @@ struct SettingsView: View {
             if let launchError {
                 Text(launchError)
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(theme.accentOrange)
             }
 
             HStack {
@@ -298,6 +302,30 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+            }
+        }
+    }
+
+    private var appearanceCard: some View {
+        SettingsCard(
+            icon: "paintpalette.fill",
+            title: "外观",
+            subtitle: "切换菜单栏面板和设置窗口的皮肤。",
+            accent: state.selectedTheme == .endlessDark ? theme.accentBlue : .cyan
+        ) {
+            SettingsControlRow(title: "主题", subtitle: "Liquid Glass 保留当前玻璃质感，Endless Dark 使用深色外壳。") {
+                HStack(spacing: 10) {
+                    ForEach(CCHTheme.allCases) { item in
+                        SettingsThemeButton(
+                            themeOption: item,
+                            isSelected: state.selectedTheme == item
+                        ) {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                state.selectedTheme = item
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -359,6 +387,7 @@ private enum SettingsRefreshStatus: Equatable {
 
 private struct SettingsHeader: View {
     @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         HStack(spacing: 13) {
@@ -369,12 +398,12 @@ private struct SettingsHeader: View {
                         .font(.system(size: 17, weight: .semibold))
                     SettingsTinyBadge(
                         text: state.errorMessage == nil ? "已连接" : "需检查",
-                        color: state.errorMessage == nil ? .green : .orange
+                        color: state.errorMessage == nil ? theme.accentGreen : theme.accentOrange
                     )
                 }
                 Text("菜单栏控制面板")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
@@ -382,16 +411,22 @@ private struct SettingsHeader: View {
                     .contentTransition(.numericText())
                 Text("\(compactNumber(state.overview.todayRequests)) 次请求")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                     .monospacedDigit()
             }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 17)
-        .background(.ultraThinMaterial)
+        .background {
+            if theme.prefersGlassEffects {
+                Rectangle().fill(.ultraThinMaterial)
+            } else {
+                Rectangle().fill(theme.headerBackground)
+            }
+        }
         .overlay(alignment: .bottom) {
             Rectangle()
-                .fill(Color.white.opacity(0.08))
+                .fill(theme.hairline)
                 .frame(height: 1)
         }
     }
@@ -403,6 +438,7 @@ private struct SettingsCard<Content: View>: View {
     let subtitle: String
     var accent: Color
     @ViewBuilder let content: () -> Content
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
@@ -421,7 +457,7 @@ private struct SettingsCard<Content: View>: View {
                         .font(.system(size: 14, weight: .semibold))
                     Text(subtitle)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 Spacer()
             }
@@ -431,13 +467,19 @@ private struct SettingsCard<Content: View>: View {
             }
         }
         .padding(15)
-        .background(.regularMaterial)
+        .background {
+            if theme.prefersGlassEffects {
+                Rectangle().fill(.regularMaterial)
+            } else {
+                Rectangle().fill(theme.panel)
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(
                     LinearGradient(
-                        colors: [accent.opacity(0.34), Color.white.opacity(0.08), Color.black.opacity(0.08)],
+                        colors: [accent.opacity(0.34), theme.border, theme.borderSubtle],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
@@ -452,6 +494,7 @@ private struct SettingsControlRow<Content: View>: View {
     let title: String
     let subtitle: String
     @ViewBuilder let content: () -> Content
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -460,7 +503,7 @@ private struct SettingsControlRow<Content: View>: View {
                     .font(.system(size: 12.5, weight: .semibold))
                 Text(subtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(width: 142, alignment: .leading)
@@ -475,6 +518,7 @@ private struct SettingsInputField: View {
     @Binding var text: String
     let placeholder: String
     var isURL = false
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         TextField("", text: $text, prompt: Text(placeholder))
@@ -483,11 +527,11 @@ private struct SettingsInputField: View {
             .font(.system(size: 12.5, design: isURL ? .monospaced : .default))
             .padding(.horizontal, 10)
             .frame(height: 32)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.72))
+            .cchSurface(.input)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                    .stroke(theme.borderStrong, lineWidth: 1)
             )
     }
 }
@@ -495,6 +539,7 @@ private struct SettingsInputField: View {
 private struct TokenInputField: View {
     @Binding var text: String
     @Binding var revealToken: Bool
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
@@ -506,7 +551,7 @@ private struct TokenInputField: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
                         .frame(minHeight: 68, maxHeight: 82)
-                        .background(Color(nsColor: .controlBackgroundColor).opacity(0.72))
+                        .cchSurface(.input)
                 } else {
                     SecureField("", text: $text, prompt: Text("API Key"))
                         .textFieldStyle(.plain)
@@ -514,7 +559,7 @@ private struct TokenInputField: View {
                         .padding(.leading, 10)
                         .padding(.trailing, 42)
                         .frame(height: 32)
-                        .background(Color(nsColor: .controlBackgroundColor).opacity(0.72))
+                        .cchSurface(.input)
                 }
 
                 Button {
@@ -524,7 +569,7 @@ private struct TokenInputField: View {
                 } label: {
                     Image(systemName: revealToken ? "eye.slash.fill" : "eye.fill")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(revealToken ? .orange : .secondary)
+                        .foregroundStyle(revealToken ? theme.accentOrange : theme.textSecondary)
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
@@ -535,7 +580,7 @@ private struct TokenInputField: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(revealToken ? Color.orange.opacity(0.32) : Color.white.opacity(0.10), lineWidth: 1)
+                    .stroke(revealToken ? theme.accentOrange.opacity(0.32) : theme.borderStrong, lineWidth: 1)
             )
         }
     }
@@ -544,6 +589,7 @@ private struct TokenInputField: View {
 private struct SettingsStatusPill: View {
     let status: SettingsRefreshStatus
     let errorMessage: String?
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         let text: String = {
@@ -561,13 +607,13 @@ private struct SettingsStatusPill: View {
         let color: Color = {
             switch status {
             case .idle:
-                return errorMessage == nil ? .secondary : .orange
+                return errorMessage == nil ? theme.textSecondary : theme.accentOrange
             case .checking:
-                return .blue
+                return theme.accentBlue
             case .success:
-                return .green
+                return theme.accentGreen
             case .failed:
-                return .orange
+                return theme.accentOrange
             }
         }()
 
@@ -597,15 +643,16 @@ private struct SettingsInfoPill: View {
     let icon: String
     let title: String
     let value: String
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
             Text(title)
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
             Text(value)
                 .font(.system(size: 11.5, weight: .bold, design: .rounded))
                 .monospacedDigit()
@@ -613,7 +660,7 @@ private struct SettingsInfoPill: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.58))
+        .cchSurface(.control)
         .clipShape(Capsule())
     }
 }
@@ -633,16 +680,68 @@ private struct SettingsTinyBadge: View {
     }
 }
 
+private struct SettingsThemeButton: View {
+    let themeOption: CCHTheme
+    let isSelected: Bool
+    let action: () -> Void
+    @Environment(\.cchTheme) private var theme
+
+    private var accent: Color {
+        themeOption == .endlessDark ? theme.accentBlue : .cyan
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(accent.opacity(isSelected ? 0.22 : 0.12))
+                    Image(systemName: themeOption.icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(accent)
+                }
+                .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(themeOption.displayName)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(1)
+                    Text(themeOption.summary)
+                        .font(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(accent)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+            .background(isSelected ? accent.opacity(0.12) : theme.control)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(isSelected ? accent.opacity(0.42) : theme.border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct SettingsBackground: View {
+    @Environment(\.cchTheme) private var theme
+
     var body: some View {
         ZStack {
-            Color(nsColor: .windowBackgroundColor)
+            theme.settingsBackgroundBase
             LinearGradient(
-                colors: [
-                    Color.blue.opacity(0.13),
-                    Color.purple.opacity(0.09),
-                    Color.orange.opacity(0.08)
-                ],
+                colors: theme.settingsBackgroundOverlay,
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )

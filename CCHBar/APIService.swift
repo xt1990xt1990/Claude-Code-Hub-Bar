@@ -229,7 +229,7 @@ struct CCHProbeResult {
     let ok: Bool
     let method: String
     let statusCode: Int?
-    let latencyMs: Int?
+    let latencyMs: Double?
     let errorMessage: String
 }
 
@@ -491,9 +491,9 @@ actor APIService {
                 id: id,
                 name: name,
                 providerType: stringValue(row["providerType"]),
-                vendorId: optionalInt(row["providerVendorId"]),
-                apiURL: stringValue(row["url"]),
-                websiteURL: stringValue(row["websiteUrl"]),
+                vendorId: firstOptionalInt(row, keys: ["providerVendorId", "vendorId"]),
+                apiURL: firstStringValue(row, keys: ["url", "endpointUrl", "apiUrl", "apiURL"]),
+                websiteURL: firstStringValue(row, keys: ["websiteUrl", "websiteURL", "homepageUrl", "homepageURL"]),
                 isEnabled: boolValue(row["isEnabled"]),
                 priority: intValue(row["priority"]),
                 weight: intValue(row["weight"]),
@@ -539,33 +539,40 @@ actor APIService {
     }
 
     func probeFirstEndpoint(config: CCHConfig, provider: CCHProvider) async throws -> CCHProbeResult {
-        guard let vendorId = provider.vendorId else {
-            throw APIError.actionError("这个 Provider 没有可测速的 Vendor")
-        }
-        let endpointsData: Any
-        do {
-            endpointsData = try await getV1(
-                config: config,
-                path: "/api/v1/provider-vendors/\(vendorId)/endpoints",
-                queryItems: [
-                    URLQueryItem(name: "providerType", value: provider.providerType),
-                    URLQueryItem(name: "dashboard", value: "true")
-                ]
-            )
-        } catch where shouldFallbackToActions(error) {
-            endpointsData = try await postAction(
-                config: config,
-                module: "providers",
-                action: "getProviderEndpoints",
-                body: ["vendorId": vendorId, "providerType": provider.providerType]
-            )
-        }
-        let rows = itemRows(from: endpointsData)
-        guard let endpoint = rows.first(where: { boolValue($0["isEnabled"]) }) ?? rows.first else {
-            throw APIError.actionError("没有可测速的端点")
+        if let vendorId = provider.vendorId {
+            let endpointsData: Any
+            do {
+                endpointsData = try await getV1(
+                    config: config,
+                    path: "/api/v1/provider-vendors/\(vendorId)/endpoints",
+                    queryItems: [
+                        URLQueryItem(name: "providerType", value: provider.providerType),
+                        URLQueryItem(name: "dashboard", value: "true")
+                    ]
+                )
+            } catch where shouldFallbackToActions(error) {
+                endpointsData = try await postAction(
+                    config: config,
+                    module: "providers",
+                    action: "getProviderEndpoints",
+                    body: ["vendorId": vendorId, "providerType": provider.providerType]
+                )
+            }
+            let rows = itemRows(from: endpointsData)
+            if let endpoint = rows.first(where: isEndpointEnabled) ?? rows.first,
+               let endpointId = firstOptionalInt(endpoint, keys: ["id", "endpointId", "providerEndpointId"]) {
+                return try await probeProviderEndpoint(config: config, endpointId: endpointId)
+            }
         }
 
-        let endpointId = intValue(endpoint["id"])
+        if let result = await probeConfiguredProviderURL(provider) {
+            return result
+        }
+
+        throw APIError.actionError("没有可测速的端点")
+    }
+
+    private func probeProviderEndpoint(config: CCHConfig, endpointId: Int) async throws -> CCHProbeResult {
         let data: Any
         do {
             data = try await postV1(
@@ -588,9 +595,82 @@ actor APIService {
             ok: boolValue(result["ok"]),
             method: stringValue(result["method"]),
             statusCode: optionalInt(result["statusCode"]),
-            latencyMs: optionalInt(result["latencyMs"]),
+            latencyMs: firstOptionalDouble(result, keys: ["latencyMs", "durationMs", "duration"]),
             errorMessage: stringValue(result["errorMessage"])
         )
+    }
+
+    private func probeConfiguredProviderURL(_ provider: CCHProvider) async -> CCHProbeResult? {
+        let rawURL = provider.apiURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawURL.isEmpty else { return nil }
+        let normalizedURL = rawURL.hasPrefix("http://") || rawURL.hasPrefix("https://")
+            ? rawURL
+            : "https://\(rawURL)"
+        guard let url = URL(string: normalizedURL) else {
+            return CCHProbeResult(
+                ok: false,
+                method: "URL",
+                statusCode: nil,
+                latencyMs: nil,
+                errorMessage: "端点地址无效"
+            )
+        }
+
+        let start = Date()
+        do {
+            let response = try await probeURL(url, method: "HEAD")
+            let latencyMs = max(Date().timeIntervalSince(start) * 1000, 0.1)
+            let statusCode = response.statusCode
+            if (200...499).contains(statusCode) {
+                return CCHProbeResult(
+                    ok: true,
+                    method: "HEAD",
+                    statusCode: statusCode,
+                    latencyMs: latencyMs,
+                    errorMessage: ""
+                )
+            }
+            return CCHProbeResult(
+                ok: false,
+                method: "HEAD",
+                statusCode: statusCode,
+                latencyMs: latencyMs,
+                errorMessage: "端点返回 HTTP \(statusCode)"
+            )
+        } catch {
+            let getStart = Date()
+            do {
+                let response = try await probeURL(url, method: "GET")
+                let latencyMs = max(Date().timeIntervalSince(getStart) * 1000, 0.1)
+                let statusCode = response.statusCode
+                return CCHProbeResult(
+                    ok: (200...499).contains(statusCode),
+                    method: "GET",
+                    statusCode: statusCode,
+                    latencyMs: latencyMs,
+                    errorMessage: (200...499).contains(statusCode) ? "" : "端点返回 HTTP \(statusCode)"
+                )
+            } catch {
+                return CCHProbeResult(
+                    ok: false,
+                    method: "GET",
+                    statusCode: nil,
+                    latencyMs: nil,
+                    errorMessage: "测速失败: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func probeURL(_ url: URL, method: String) async throws -> HTTPURLResponse {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 12
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        let requestSession = shouldBypassProxy(for: url) ? directSession : session
+        let (_, response) = try await requestSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        return http
     }
 
     func fetchLatestRelease(owner: String, repo: String) async throws -> CCHGitHubRelease {
@@ -921,6 +1001,16 @@ private func stringValue(_ value: Any?, fallback: String = "") -> String {
     }
 }
 
+private func firstStringValue(_ row: [String: Any], keys: [String], fallback: String = "") -> String {
+    for key in keys {
+        let value = stringValue(row[key]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.isEmpty {
+            return value
+        }
+    }
+    return fallback
+}
+
 private func intValue(_ value: Any?, fallback: Int = 0) -> Int {
     switch value {
     case let n as Int: return n
@@ -937,9 +1027,27 @@ private func optionalInt(_ value: Any?) -> Int? {
     return intValue(value)
 }
 
+private func firstOptionalInt(_ row: [String: Any], keys: [String]) -> Int? {
+    for key in keys {
+        if let value = optionalInt(row[key]) {
+            return value
+        }
+    }
+    return nil
+}
+
 private func optionalDouble(_ value: Any?) -> Double? {
     if value == nil || value is NSNull { return nil }
     return doubleValue(value)
+}
+
+private func firstOptionalDouble(_ row: [String: Any], keys: [String]) -> Double? {
+    for key in keys {
+        if let value = optionalDouble(row[key]) {
+            return value
+        }
+    }
+    return nil
 }
 
 private func doubleValue(_ value: Any?, fallback: Double = 0) -> Double {
@@ -959,6 +1067,13 @@ private func boolValue(_ value: Any?, fallback: Bool = false) -> Bool {
     case let s as String: return ["true", "1", "yes"].contains(s.lowercased())
     default: return fallback
     }
+}
+
+private func isEndpointEnabled(_ row: [String: Any]) -> Bool {
+    for key in ["isEnabled", "enabled"] where row[key] != nil {
+        return boolValue(row[key])
+    }
+    return true
 }
 
 private func isFastTierLog(_ row: [String: Any]) -> Bool {

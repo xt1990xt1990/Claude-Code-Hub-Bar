@@ -90,6 +90,12 @@ private struct CCHRefreshTaskSlot {
     let task: Task<String?, Never>
 }
 
+private enum CCHRetentionLimits {
+    static let recentLogHistory = 240
+    static let knownLogIds = 1_200
+    static let parsedDateCache = 1_500
+}
+
 @MainActor
 final class MonitorState: ObservableObject {
     @AppStorage("cch_base_url") var cchBaseURL = ""
@@ -100,6 +106,7 @@ final class MonitorState: ObservableObject {
     @AppStorage("show_status_bar_details") var showStatusBarDetails = true
     @AppStorage("check_for_updates") var checkForUpdatesEnabled: Bool = true
     @AppStorage("dismissed_update_version") var dismissedUpdateVersion: String = ""
+    @AppStorage("cch_theme") private var themeRawValue = CCHTheme.liquidGlass.rawValue
 
     @Published var selectedTab: CCHPanelTab = .dashboard
     @Published var leaderboardPeriod: CCHLeaderboardPeriod = .daily
@@ -127,6 +134,7 @@ final class MonitorState: ObservableObject {
     @Published var lastRefresh: Date?
     @Published var isLoading = false
     @Published var actionMessage: String?
+    @Published var actionMessageIsWarning = false
     @Published var errorMessage: String?
     @Published var panelVisible = false
     @Published private(set) var cacheStatusByLogId: [Int: CCHCacheStatusContext] = [:]
@@ -164,7 +172,9 @@ final class MonitorState: ObservableObject {
     private var actionMessageDismissTask: Task<Void, Never>?
     private var highlightedLogDismissTasks: [Int: Task<Void, Never>] = [:]
     private var knownRecentLogIds = Set<Int>()
+    private var knownRecentLogIdOrder: [Int] = []
     private var knownLogPageIds = Set<Int>()
+    private var knownLogPageIdOrder: [Int] = []
     private var recentLogHistory: [CCHLogEntry] = []
     private var providerMultiplierByName: [String: Double] = [:]
     private var providerMultiplierByProviderId: [Int: Double] = [:]
@@ -179,6 +189,15 @@ final class MonitorState: ObservableObject {
 
     var config: CCHConfig {
         CCHConfig(baseURL: cchBaseURL, token: cchToken, envPath: cchEnvPath)
+    }
+
+    var selectedTheme: CCHTheme {
+        get { CCHTheme(rawValue: themeRawValue) ?? .liquidGlass }
+        set {
+            guard themeRawValue != newValue.rawValue else { return }
+            themeRawValue = newValue.rawValue
+            objectWillChange.send()
+        }
     }
 
     var menuBarText: String {
@@ -329,6 +348,7 @@ final class MonitorState: ObservableObject {
         updateStatusBarSnapshot()
 
         actionMessage = "已触发缓存提醒预览"
+        actionMessageIsWarning = false
         simulatedCacheAlertDismissTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             self.simulatedCacheAlertLogId = nil
@@ -336,6 +356,7 @@ final class MonitorState: ObservableObject {
             self.updateStatusBarSnapshot()
             if self.actionMessage == "已触发缓存提醒预览" {
                 self.actionMessage = nil
+                self.actionMessageIsWarning = false
             }
         }
     }
@@ -525,6 +546,7 @@ final class MonitorState: ObservableObject {
     func setProvider(_ provider: CCHProvider, enabled: Bool) async {
         actionMessageDismissTask?.cancel()
         actionMessage = nil
+        actionMessageIsWarning = false
         do {
             try await api.setProviderEnabled(config: config, providerId: provider.id, enabled: enabled)
             flashActionMessage(enabled ? "渠道已启用" : "渠道已停用")
@@ -537,6 +559,7 @@ final class MonitorState: ObservableObject {
     func resetCircuit(_ provider: CCHProvider) async {
         actionMessageDismissTask?.cancel()
         actionMessage = nil
+        actionMessageIsWarning = false
         do {
             try await api.resetProviderCircuit(config: config, providerId: provider.id)
             flashActionMessage("熔断状态已重置")
@@ -549,27 +572,31 @@ final class MonitorState: ObservableObject {
     func probe(_ provider: CCHProvider) async {
         actionMessageDismissTask?.cancel()
         actionMessage = nil
+        actionMessageIsWarning = false
         do {
             let result = try await api.probeFirstEndpoint(config: config, provider: provider)
             if result.ok {
-                let latency = result.latencyMs.map { formatMillisecondsAsSeconds($0) } ?? "正常"
+                let latency = formatProbeLatency(result.latencyMs)
                 flashActionMessage("测速 \(provider.name): \(latency)")
             } else {
-                flashActionMessage("测速失败: \(result.errorMessage)", duration: 4)
+                flashActionMessage(result.errorMessage, duration: 5, isWarning: true)
             }
             _ = await loadProviders()
         } catch {
-            errorMessage = error.localizedDescription
+            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
         }
     }
 
-    private func flashActionMessage(_ message: String, duration: TimeInterval = 2.6) {
+    private func flashActionMessage(_ message: String, duration: TimeInterval = 2.6, isWarning: Bool = false) {
+        let duration = min(duration, 6)
         actionMessageDismissTask?.cancel()
+        actionMessageIsWarning = isWarning
         actionMessage = message
         actionMessageDismissTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
             if self.actionMessage == message {
                 self.actionMessage = nil
+                self.actionMessageIsWarning = false
             }
         }
     }
@@ -737,8 +764,10 @@ final class MonitorState: ObservableObject {
         }
         defer {
             switch context {
-            case .recent: knownRecentLogIds.formUnion(ids)
-            case .logsPage: knownLogPageIds.formUnion(ids)
+            case .recent:
+                rememberKnownLogIds(ids, idsSet: &knownRecentLogIds, order: &knownRecentLogIdOrder)
+            case .logsPage:
+                rememberKnownLogIds(ids, idsSet: &knownLogPageIds, order: &knownLogPageIdOrder)
             }
         }
 
@@ -755,6 +784,18 @@ final class MonitorState: ObservableObject {
                 self.highlightedLogDismissTasks[id] = nil
             }
         }
+    }
+
+    private func rememberKnownLogIds(_ ids: Set<Int>, idsSet: inout Set<Int>, order: inout [Int]) {
+        for id in ids.sorted(by: >) where idsSet.insert(id).inserted {
+            order.append(id)
+        }
+
+        guard order.count > CCHRetentionLimits.knownLogIds else { return }
+        let overflow = order.count - CCHRetentionLimits.knownLogIds
+        let removed = order.prefix(overflow)
+        idsSet.subtract(removed)
+        order.removeFirst(overflow)
     }
 
     private func observeSystemWake() {
@@ -889,7 +930,7 @@ final class MonitorState: ObservableObject {
     private func mergeRecentLogHistory(_ values: [CCHLogEntry]) {
         let merged = uniqueLogs(values + recentLogHistory)
             .sorted(by: isNewerLog)
-        recentLogHistory = Array(merged.prefix(240))
+        recentLogHistory = Array(merged.prefix(CCHRetentionLimits.recentLogHistory))
     }
 
     private func uniqueLogs(_ values: [CCHLogEntry]) -> [CCHLogEntry] {
@@ -1143,6 +1184,14 @@ func formatMillisecondsAsSeconds(_ value: Int?) -> String {
     return String(format: "%.2fs", Double(value) / 1000)
 }
 
+func formatProbeLatency(_ value: Double?) -> String {
+    guard let value else { return "正常" }
+    if value < 1000 {
+        return value < 10 ? String(format: "%.1fms", value) : String(format: "%.0fms", value)
+    }
+    return String(format: "%.2fs", value / 1000)
+}
+
 func formatTokensPerSecond(_ value: Double?) -> String {
     guard let value, value > 0 else { return "-- tok/s" }
     return String(format: "%.0f tok/s", value)
@@ -1293,6 +1342,21 @@ private enum CCHDateParser {
     }()
 
     static var cache: [String: Date] = [:]
+    static var cacheOrder: [String] = []
+
+    static func remember(_ date: Date, for key: String) {
+        if cache[key] == nil {
+            cacheOrder.append(key)
+        }
+        cache[key] = date
+
+        guard cacheOrder.count > CCHRetentionLimits.parsedDateCache else { return }
+        let overflow = cacheOrder.count - CCHRetentionLimits.parsedDateCache
+        for key in cacheOrder.prefix(overflow) {
+            cache[key] = nil
+        }
+        cacheOrder.removeFirst(overflow)
+    }
 }
 
 func parsedCCHDate(_ raw: String) -> Date? {
@@ -1303,17 +1367,17 @@ func parsedCCHDate(_ raw: String) -> Date? {
     }
 
     if let date = CCHDateParser.fractionalISO.date(from: trimmed) {
-        CCHDateParser.cache[trimmed] = date
+        CCHDateParser.remember(date, for: trimmed)
         return date
     }
 
     if let date = CCHDateParser.iso.date(from: trimmed) {
-        CCHDateParser.cache[trimmed] = date
+        CCHDateParser.remember(date, for: trimmed)
         return date
     }
 
     if let date = CCHDateParser.localDateTime.date(from: trimmed) {
-        CCHDateParser.cache[trimmed] = date
+        CCHDateParser.remember(date, for: trimmed)
         return date
     }
     return nil

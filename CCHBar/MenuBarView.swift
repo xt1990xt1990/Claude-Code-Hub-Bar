@@ -7,15 +7,6 @@ private enum CCHPanelLayout {
     static let scrollHeight: CGFloat = 476
 }
 
-private extension Color {
-    static let cchPanelBackgroundTop = Color(red: 0.135, green: 0.142, blue: 0.170)
-    static let cchPanelBackgroundBottom = Color(red: 0.085, green: 0.090, blue: 0.115)
-    static let cchGlassPanel = Color.white.opacity(0.085)
-    static let cchGlassPanelSoft = Color.white.opacity(0.055)
-    static let cchGlassRow = Color.white.opacity(0.065)
-    static let cchUserAccent = Color.orange.opacity(0.95)
-}
-
 struct MoneyValue: View {
     let value: Double
     var majorSize: CGFloat
@@ -142,10 +133,11 @@ private struct ModelBrandIcon: View {
 private struct NewLogEdgeFlash: View {
     let active: Bool
     @State private var visible = false
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-            .fill(Color.blue.opacity(visible ? 0.95 : 0))
+            .fill(theme.accentBlue.opacity(visible ? 0.95 : 0))
             .frame(width: 2)
             .padding(.vertical, 6)
             .onAppear {
@@ -171,6 +163,7 @@ private struct NewLogEdgeFlash: View {
 private struct CCHSegmentedTabBar: View {
     @Binding var selection: CCHPanelTab
     @Namespace private var indicatorNamespace
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         HStack(spacing: 4) {
@@ -188,13 +181,13 @@ private struct CCHSegmentedTabBar: View {
                         Text(tab.rawValue)
                             .font(.system(size: 12, weight: .medium))
                     }
-                    .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                    .foregroundStyle(isActive ? theme.textPrimary : theme.textSecondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
                     .contentShape(Rectangle())
                     .background {
                         if isActive {
-                            if #available(macOS 26.0, *) {
+                            if #available(macOS 26.0, *), theme.prefersGlassEffects {
                                 Color.clear
                                     .glassEffect(
                                         .regular.interactive(),
@@ -203,10 +196,10 @@ private struct CCHSegmentedTabBar: View {
                                     .matchedGeometryEffect(id: "cchTabIndicator", in: indicatorNamespace)
                             } else {
                                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(Color.white.opacity(0.16))
+                                    .fill(theme.controlHover)
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .stroke(Color.white.opacity(0.14), lineWidth: 0.5)
+                                            .stroke(theme.borderStrong, lineWidth: 0.5)
                                     )
                                     .shadow(color: Color.black.opacity(0.18), radius: 3, x: 0, y: 1)
                                     .matchedGeometryEffect(id: "cchTabIndicator", in: indicatorNamespace)
@@ -220,10 +213,10 @@ private struct CCHSegmentedTabBar: View {
         .padding(3)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color.white.opacity(0.05))
+                .fill(theme.control)
                 .overlay(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+                        .stroke(theme.border, lineWidth: 0.5)
                 )
         )
     }
@@ -232,10 +225,12 @@ private struct CCHSegmentedTabBar: View {
 struct MenuBarView: View {
     @ObservedObject var state: MonitorState
     @State private var builtTabs: Set<CCHPanelTab> = [.dashboard]
+    private var theme: CCHThemePalette { state.selectedTheme.palette }
 
     var body: some View {
         VStack(spacing: 0) {
             HeaderView(state: state)
+                .background(theme.headerBackground)
             Divider().opacity(0.35)
             CCHSegmentedTabBar(selection: $state.selectedTab)
                 .padding(.horizontal, 14)
@@ -285,17 +280,18 @@ struct MenuBarView: View {
 
             Divider().opacity(0.25)
             FooterView(state: state)
+                .background(theme.footerBackground)
         }
         .frame(width: CCHPanelLayout.width, height: CCHPanelLayout.height, alignment: .top)
         .background {
-            if #available(macOS 26.0, *) {
+            if #available(macOS 26.0, *), theme.prefersGlassEffects {
                 Rectangle()
                     .fill(Color.clear)
                     .glassEffect(.clear, in: Rectangle())
                     .overlay {
                         VStack(spacing: 0) {
                             LinearGradient(
-                                colors: [Color.white.opacity(0.22), Color.white.opacity(0)],
+                                colors: [theme.topHighlight, Color.clear],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
@@ -305,18 +301,26 @@ struct MenuBarView: View {
                     }
             } else {
                 ZStack {
-                    Rectangle().fill(.ultraThinMaterial)
+                    if theme.prefersGlassEffects {
+                        Rectangle().fill(.ultraThinMaterial)
+                    } else {
+                        LinearGradient(
+                            colors: [theme.backgroundTop, theme.backgroundBottom],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    }
                     LinearGradient(
                         colors: [
-                            .cchPanelBackgroundTop.opacity(0.16),
-                            .cchPanelBackgroundBottom.opacity(0.28)
+                            theme.backgroundOverlayTop,
+                            theme.backgroundOverlayBottom
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                     VStack(spacing: 0) {
                         LinearGradient(
-                            colors: [Color.white.opacity(0.18), Color.white.opacity(0)],
+                            colors: [theme.topHighlight, Color.clear],
                             startPoint: .top,
                             endPoint: .bottom
                         )
@@ -328,8 +332,11 @@ struct MenuBarView: View {
         }
         .overlay(
             Rectangle()
-                .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
+                .strokeBorder(theme.border, lineWidth: 1)
         )
+        .foregroundStyle(theme.textPrimary)
+        .environment(\.cchTheme, theme)
+        .tint(theme.accentBlue)
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.18), value: state.isLoading)
         .onAppear {
@@ -352,6 +359,7 @@ struct MenuBarView: View {
 private struct HeaderView: View {
     @ObservedObject var state: MonitorState
     @State private var hoveringProjectLink = false
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         HStack(spacing: 10) {
@@ -376,7 +384,7 @@ private struct HeaderView: View {
                     .font(.system(size: 15, weight: .semibold))
                 Text("总览 · 日志 · 渠道")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
             }
             Spacer()
             if state.isLoading {
@@ -429,10 +437,18 @@ private struct FooterView: View {
 
 private struct FooterStatusLine: View {
     @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
+    @State private var visibleMode: Mode?
+    @State private var incomingMode: Mode?
+    @State private var rollProgress: CGFloat = 1
+    @State private var rollGeneration = 0
+
+    private let rollHeight: CGFloat = 24
+    private let rollDuration: TimeInterval = 0.28
 
     private enum Mode: Equatable {
         case error(String)
-        case action(String)
+        case action(String, Bool)
         case update(String, URL)
         case stale(Int)
         case idle(String)
@@ -443,7 +459,7 @@ private struct FooterStatusLine: View {
             return .error(error)
         }
         if let action = state.actionMessage, !action.isEmpty {
-            return .action(action)
+            return .action(action, state.actionMessageIsWarning)
         }
         if let update = state.availableUpdate {
             return .update("有新版本 v\(update.version)", update.releaseURL)
@@ -459,7 +475,29 @@ private struct FooterStatusLine: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 5)) { context in
-            content(for: mode(at: context.date))
+            let currentMode = mode(at: context.date)
+            let currentModeId = modeId(for: currentMode)
+
+            ZStack(alignment: .leading) {
+                if let visibleMode {
+                    content(for: visibleMode)
+                        .offset(y: incomingMode == nil ? 0 : -rollProgress * rollHeight)
+                }
+                if let incomingMode {
+                    content(for: incomingMode)
+                        .offset(y: (1 - rollProgress) * rollHeight)
+                }
+            }
+            .frame(height: rollHeight, alignment: .leading)
+            .clipped()
+            .onAppear {
+                if visibleMode == nil {
+                    visibleMode = currentMode
+                }
+            }
+            .onChange(of: currentModeId) { _, _ in
+                roll(to: currentMode)
+            }
         }
     }
 
@@ -468,42 +506,72 @@ private struct FooterStatusLine: View {
         Group {
             switch mode {
             case .error(let message):
-                FooterStatusPill(icon: "exclamationmark.triangle.fill", text: message, color: .orange)
-            case .action(let message):
-                FooterStatusPill(icon: "checkmark.circle.fill", text: message, color: .green)
+                FooterStatusPill(icon: "exclamationmark.triangle.fill", text: message, color: theme.accentOrange)
+            case .action(let message, let isWarning):
+                FooterStatusPill(
+                    icon: isWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                    text: message,
+                    color: isWarning ? theme.accentOrange : theme.accentGreen
+                )
             case .update(let message, let url):
                 Button {
                     NSWorkspace.shared.open(url)
                 } label: {
-                    FooterStatusPill(icon: "arrow.down.circle.fill", text: message, color: .blue)
+                    FooterStatusPill(icon: "arrow.down.circle.fill", text: message, color: theme.accentBlue)
                 }
                 .buttonStyle(.plain)
                 .help("点击查看版本说明")
             case .stale(let seconds):
-                FooterStatusPill(icon: "exclamationmark.triangle.fill", text: "数据停滞 \(seconds)s", color: .orange)
+                FooterStatusPill(icon: "exclamationmark.triangle.fill", text: "数据停滞 \(seconds)s", color: theme.accentOrange)
             case .idle(let version):
                 Text(version)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
             }
         }
-        .id(modeId(for: mode))
-        .transition(
-            .asymmetric(
-                insertion: .opacity.combined(with: .move(edge: .bottom)),
-                removal: .opacity.combined(with: .move(edge: .top))
-            )
-        )
     }
 
     private func modeId(for mode: Mode) -> String {
         switch mode {
         case .error(let m): return "error:\(m)"
-        case .action(let m): return "action:\(m)"
+        case .action(let m, let isWarning): return "action:\(isWarning ? "warning" : "success"):\(m)"
         case .update(let m, _): return "update:\(m)"
-        case .stale: return "stale"
+        case .stale(let seconds): return "stale:\(seconds)"
         case .idle: return "idle"
+        }
+    }
+
+    private func roll(to mode: Mode) {
+        guard visibleMode != nil else {
+            visibleMode = mode
+            incomingMode = nil
+            rollProgress = 1
+            return
+        }
+
+        if let visibleMode, modeId(for: visibleMode) == modeId(for: mode), incomingMode == nil {
+            return
+        }
+
+        rollGeneration += 1
+        let generation = rollGeneration
+
+        if let incomingMode {
+            visibleMode = incomingMode
+        }
+        incomingMode = mode
+        rollProgress = 0
+
+        withAnimation(.easeInOut(duration: rollDuration)) {
+            rollProgress = 1
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + rollDuration) {
+            guard rollGeneration == generation else { return }
+            visibleMode = mode
+            incomingMode = nil
+            rollProgress = 1
         }
     }
 }
@@ -540,9 +608,10 @@ private struct FooterActionButton: View {
     var role: Role = .normal
     let action: () -> Void
     @State private var hovering = false
+    @Environment(\.cchTheme) private var theme
 
     var color: Color {
-        role == .destructive ? .red : .blue
+        role == .destructive ? theme.accentRed : theme.accentBlue
     }
 
     var body: some View {
@@ -555,12 +624,12 @@ private struct FooterActionButton: View {
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .background(hovering ? color.opacity(0.16) : Color(nsColor: .controlBackgroundColor).opacity(0.52))
+            .background(hovering ? color.opacity(0.16) : theme.control)
             .clipShape(Capsule())
             .overlay(Capsule().stroke(color.opacity(hovering ? 0.35 : 0.12), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .foregroundStyle(role == .destructive ? color : (hovering ? color : .secondary))
+        .foregroundStyle(role == .destructive ? color : (hovering ? color : theme.textSecondary))
         .onHover { isHovering in
             hovering = isHovering
             if isHovering {
@@ -574,9 +643,10 @@ private struct FooterActionButton: View {
 
 private struct DashboardTabView: View {
     @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
 
     private var cacheMetricColor: Color {
-        state.hasCacheAlert ? .red : .mint
+        state.hasCacheAlert ? theme.accentRed : theme.accentMint
     }
 
     private var cacheMetricDetail: String {
@@ -588,9 +658,9 @@ private struct DashboardTabView: View {
             RunningRequestsPanel(state: state)
 
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
-                MetricCard(title: "成本", value: MoneyValue(value: state.overview.todayCost, majorSize: 23, minorSize: 12, weight: .bold), detail: "今日", color: .green, icon: "dollarsign.circle")
-                MetricCard(title: "请求", value: compactNumber(state.overview.todayRequests), detail: "\(state.overview.recentMinuteRequests)/分钟", color: .cyan, icon: "bolt.horizontal.circle")
-                MetricCard(title: "会话", value: "\(state.overview.concurrentSessions)", detail: "\(state.menuBarRunningLogs.count) 运行中", color: .purple, icon: "play.circle")
+                MetricCard(title: "成本", value: MoneyValue(value: state.overview.todayCost, majorSize: 23, minorSize: 12, weight: .bold), detail: "今日", color: theme.accentGreen, icon: "dollarsign.circle")
+                MetricCard(title: "请求", value: compactNumber(state.overview.todayRequests), detail: "\(state.overview.recentMinuteRequests)/分钟", color: theme.accentBlue, icon: "bolt.horizontal.circle")
+                MetricCard(title: "会话", value: "\(state.overview.concurrentSessions)", detail: "\(state.menuBarRunningLogs.count) 运行中", color: theme.accentPurple, icon: "play.circle")
                 MetricCard(title: "缓存", value: formatPercent(cacheHitRate(cacheReadTokens: state.logSummary.cacheReadTokens, inputTokens: state.logSummary.inputTokens)), detail: cacheMetricDetail, color: cacheMetricColor, icon: "memorychip")
             }
 
@@ -604,6 +674,7 @@ private struct DashboardTabView: View {
 
 private struct RunningRequestsPanel: View {
     @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -615,21 +686,21 @@ private struct RunningRequestsPanel: View {
 
             if state.menuBarRunningLogs.isEmpty {
                 HStack(spacing: 10) {
-                    StatusDot(color: .secondary)
+                    StatusDot(color: theme.textTertiary)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("空闲")
                             .font(.system(size: 13, weight: .semibold))
                         HStack(spacing: 4) {
                             Text("今日 \(compactNumber(state.overview.todayRequests)) 次请求 ·")
-                            MoneyValue(value: state.overview.todayCost, majorSize: 11, minorSize: 6.5, weight: .semibold, color: .secondary)
+                            MoneyValue(value: state.overview.todayCost, majorSize: 11, minorSize: 6.5, weight: .semibold, color: theme.textSecondary)
                         }
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(theme.textSecondary)
                     }
                     Spacer()
                 }
                 .padding(11)
-                .background(Color.cchGlassRow)
+                .cchSurface(.row)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else {
                 ForEach(state.menuBarRunningLogs.prefix(4)) { log in
@@ -639,15 +710,16 @@ private struct RunningRequestsPanel: View {
             }
         }
         .padding(11)
-        .background(Color.cchGlassPanel)
+        .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.green.opacity(0.22), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.accentGreen.opacity(0.22), lineWidth: 1))
     }
 }
 
 private struct RunningRequestRow: View {
     @ObservedObject var state: MonitorState
     let log: CCHLogEntry
+    @Environment(\.cchTheme) private var theme
 
     var model: String {
         log.model.isEmpty ? log.originalModel : log.model
@@ -662,10 +734,10 @@ private struct RunningRequestRow: View {
         HStack(spacing: 10) {
             ZStack {
                 Circle()
-                    .stroke(Color.green.opacity(0.22), lineWidth: 2)
+                    .stroke(theme.accentGreen.opacity(0.22), lineWidth: 2)
                     .frame(width: 18, height: 18)
                 CCHTriangleMark()
-                    .fill(Color.green)
+                    .fill(theme.accentGreen)
                     .frame(width: 8.8, height: 8.8)
             }
 
@@ -687,13 +759,13 @@ private struct RunningRequestRow: View {
                     Text("·")
                         .fixedSize(horizontal: true, vertical: false)
                     Text(log.userName.isEmpty ? "-" : log.userName)
-                        .foregroundStyle(Color.cchUserAccent)
+                        .cchUserAccent()
                         .fixedSize(horizontal: true, vertical: false)
                     Text("· 序号 \(log.requestSequence) · 已运行 \(runningDurationText(log))")
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
                 .lineLimit(1)
             }
             .layoutPriority(1)
@@ -702,14 +774,14 @@ private struct RunningRequestRow: View {
 
             Text("请求中")
                 .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(.green)
+                .foregroundStyle(theme.accentGreen)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
-                .background(Color.green.opacity(0.13))
+                .background(theme.accentGreen.opacity(0.13))
                 .clipShape(Capsule())
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+        .cchSurface(.control)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -736,19 +808,20 @@ private struct RecentRequestsPanel: View {
         }
         .padding(11)
         .frame(maxWidth: .infinity)
-        .background(Color.cchGlassPanel)
+        .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
 private struct DashboardLeaderboardPanel: View {
     @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
 
     var accent: Color {
         switch state.leaderboardScope {
-        case .user: return .orange
-        case .provider: return .purple
-        case .model: return .blue
+        case .user: return theme.accentOrange
+        case .provider: return theme.accentPurple
+        case .model: return theme.accentBlue
         }
     }
 
@@ -779,16 +852,16 @@ private struct DashboardLeaderboardPanel: View {
                 HStack(spacing: 4) {
                     ForEach(scopes) { scope in
                         let selected = state.leaderboardScope == scope
-                        let scopeColor = leaderboardScopeColor(scope)
+                        let scopeColor = leaderboardScopeColor(scope, theme: theme)
                         Button {
                             setScope(scope)
                         } label: {
                             Text(scope.title)
                                 .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(selected ? scopeColor : Color.secondary)
+                                .foregroundStyle(selected ? scopeColor : theme.textSecondary)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 4)
-                                .background(selected ? scopeColor.opacity(0.16) : Color.white.opacity(0.045))
+                                .background(selected ? scopeColor.opacity(0.16) : theme.control)
                                 .clipShape(Capsule())
                                 .overlay(Capsule().stroke(scopeColor.opacity(selected ? 0.38 : 0.12), lineWidth: 0.8))
                         }
@@ -821,17 +894,21 @@ private struct DashboardLeaderboardPanel: View {
         }
         .padding(14)
         .frame(width: 292)
-        .background(Color.cchGlassPanel)
+        .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(accent.opacity(0.18), lineWidth: 1))
     }
 }
 
 private func leaderboardScopeColor(_ scope: CCHLeaderboardScope) -> Color {
+    leaderboardScopeColor(scope, theme: .liquidGlass)
+}
+
+private func leaderboardScopeColor(_ scope: CCHLeaderboardScope, theme: CCHThemePalette) -> Color {
     switch scope {
-    case .user: return .orange
-    case .provider: return .purple
-    case .model: return .blue
+    case .user: return theme.accentOrange
+    case .provider: return theme.accentPurple
+    case .model: return theme.accentBlue
     }
 }
 
@@ -842,12 +919,13 @@ private struct DashboardLeaderboardRow: View {
     let maxCost: Double
     let cacheHitRate: Double?
     let showsCache: Bool
+    @Environment(\.cchTheme) private var theme
 
     var rankColor: Color {
         switch rank {
-        case 1: return .orange
-        case 2: return .secondary
-        default: return .red
+        case 1: return theme.accentOrange
+        case 2: return theme.textSecondary
+        default: return theme.accentRed
         }
     }
 
@@ -879,7 +957,7 @@ private struct DashboardLeaderboardRow: View {
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
                         Capsule()
-                            .fill(Color.white.opacity(0.12))
+                            .fill(theme.control)
                         Capsule()
                             .fill(accent)
                             .frame(width: proxy.size.width * progress)
@@ -892,7 +970,7 @@ private struct DashboardLeaderboardRow: View {
                     Spacer()
                     if showsCache, let cacheHitRate {
                         Text("缓存 \(formatPercent(cacheHitRate))")
-                            .foregroundStyle(cacheRateColor(cacheHitRate))
+                            .foregroundStyle(cacheRateColor(cacheHitRate, theme: theme))
                     }
                 }
                 .font(.system(size: 9, weight: .medium))
@@ -904,9 +982,10 @@ private struct DashboardLeaderboardRow: View {
 
 private struct LeaderboardTabView: View {
     @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
 
     var accent: Color {
-        leaderboardScopeColor(state.leaderboardScope)
+        leaderboardScopeColor(state.leaderboardScope, theme: theme)
     }
 
     var body: some View {
@@ -984,16 +1063,17 @@ private struct LeaderboardTabView: View {
 
 private struct LogsTabView: View {
     @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Label("近 1 小时", systemImage: "clock")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
-                    .background(Color.secondary.opacity(0.12))
+                    .background(theme.control)
                     .clipShape(Capsule())
                 TextField("模型", text: $state.logModelFilter)
                     .textFieldStyle(.roundedBorder)
@@ -1053,12 +1133,12 @@ private struct LogsTabView: View {
                                             .font(.system(size: 11, weight: .semibold))
                                         Text("\(state.logs.count)/\(state.logTotal)")
                                             .font(.system(size: 10, weight: .medium, design: .rounded))
-                                            .foregroundStyle(.secondary)
+                                            .foregroundStyle(theme.textSecondary)
                                             .monospacedDigit()
                                     }
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 7)
-                                    .background(Color.cchGlassPanelSoft)
+                                    .cchSurface(.panelSoft)
                                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 }
                                 .buttonStyle(.plain)
@@ -1123,12 +1203,13 @@ private struct ProvidersTabView: View {
 
 private struct ProviderGroupChips: View {
     @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         HStack(spacing: 8) {
             Text("分组")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 7) {
                     ForEach(state.providerGroups, id: \.self) { group in
@@ -1138,7 +1219,7 @@ private struct ProviderGroupChips: View {
                             }
                         } label: {
                             let selected = state.isProviderGroupSelected(group)
-                            let color = group == "全部" ? Color.blue : providerGroupColor(group)
+                            let color = group == "全部" ? theme.accentBlue : providerGroupColor(group, theme: theme)
                             HStack(spacing: 4) {
                                 if selected {
                                     Image(systemName: "checkmark")
@@ -1177,6 +1258,7 @@ private struct MetricCard: View {
     let detail: String
     let color: Color
     let icon: String
+    @Environment(\.cchTheme) private var theme
 
     init(title: String, value: String, detail: String, color: Color, icon: String) {
         self.title = title
@@ -1206,15 +1288,15 @@ private struct MetricCard: View {
                 Spacer()
                 Text(title.uppercased())
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
             }
             value
             Text(detail)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
         }
         .padding(12)
-        .background(Color.cchGlassPanel)
+        .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.22), lineWidth: 1))
     }
@@ -1223,6 +1305,7 @@ private struct MetricCard: View {
 private struct MiniStat: View {
     let title: String
     let value: AnyView
+    @Environment(\.cchTheme) private var theme
 
     init(title: String, value: String) {
         self.title = title
@@ -1242,12 +1325,12 @@ private struct MiniStat: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased())
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
             value
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(Color.cchGlassPanel)
+        .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -1257,17 +1340,18 @@ private struct UsageMetricColumn: View {
     let bottom: Int
     let topColor: Color
     let bottomColor: Color
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 1) {
             Text(top > 0 ? compactNumber(top) : "-")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(top > 0 ? topColor : .secondary)
+                .foregroundStyle(top > 0 ? topColor : theme.textTertiary)
                 .monospacedDigit()
                 .frame(maxWidth: .infinity, alignment: .trailing)
             Text(bottom > 0 ? compactNumber(bottom) : "-")
                 .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                .foregroundStyle(bottom > 0 ? bottomColor : .secondary)
+                .foregroundStyle(bottom > 0 ? bottomColor : theme.textTertiary)
                 .monospacedDigit()
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -1280,19 +1364,20 @@ private struct CompactUsageMetric: View {
     let bottom: Int
     let topColor: Color
     let bottomColor: Color
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 1) {
             Text(title)
                 .font(.system(size: 7.5, weight: .bold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
             Text(top > 0 ? compactNumber(top) : "-")
                 .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                .foregroundStyle(top > 0 ? topColor : .secondary)
+                .foregroundStyle(top > 0 ? topColor : theme.textTertiary)
                 .monospacedDigit()
             Text(bottom > 0 ? compactNumber(bottom) : "-")
                 .font(.system(size: 9, weight: .medium, design: .rounded))
-                .foregroundStyle(bottom > 0 ? bottomColor : .secondary.opacity(0.7))
+                .foregroundStyle(bottom > 0 ? bottomColor : theme.textTertiary.opacity(0.82))
                 .monospacedDigit()
         }
         .frame(width: 42, alignment: .trailing)
@@ -1324,12 +1409,13 @@ private extension View {
 private struct MultiplierBadge: View {
     let value: Double
     var compact = false
+    @Environment(\.cchTheme) private var theme
 
     var color: Color {
         switch multiplierLevel(value) {
-        case 0, 1: return .green
-        case 2: return .orange
-        default: return .red
+        case 0, 1: return theme.accentGreen
+        case 2: return theme.accentOrange
+        default: return theme.accentRed
         }
     }
 
@@ -1364,17 +1450,19 @@ private struct StatusCapsule: View {
 }
 
 private struct FastTierBadge: View {
+    @Environment(\.cchTheme) private var theme
+
     var body: some View {
         Text("FAST")
             .font(.system(size: 8.5, weight: .bold, design: .rounded))
-            .foregroundStyle(.orange)
+            .foregroundStyle(theme.accentOrange)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
-            .background(Color.orange.opacity(0.14))
+            .background(theme.accentOrange.opacity(0.14))
             .clipShape(Capsule())
-            .overlay(Capsule().stroke(Color.orange.opacity(0.24), lineWidth: 0.7))
+            .overlay(Capsule().stroke(theme.accentOrange.opacity(0.24), lineWidth: 0.7))
     }
 }
 
@@ -1406,6 +1494,7 @@ private struct HoverLink: View {
     let icon: String
     let url: URL
     @State private var isHovering = false
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         Button {
@@ -1420,11 +1509,11 @@ private struct HoverLink: View {
             }
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .background(isHovering ? Color.blue.opacity(0.16) : Color.clear)
+            .background(isHovering ? theme.accentBlue.opacity(0.16) : Color.clear)
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(isHovering ? .blue : Color.blue.opacity(0.88))
+        .foregroundStyle(isHovering ? theme.accentBlue : theme.accentBlue.opacity(0.88))
         .onHover { hovering in
             isHovering = hovering
             if hovering {
@@ -1462,10 +1551,11 @@ private struct SectionHeader: View {
 
 private struct ActiveSessionRow: View {
     let session: CCHActiveSession
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         HStack(spacing: 10) {
-            StatusDot(color: session.concurrentCount > 0 ? .green : .secondary)
+            StatusDot(color: session.concurrentCount > 0 ? theme.accentGreen : theme.textTertiary)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     ModelBrandIcon(model: session.model.isEmpty ? session.apiType : session.model, provider: session.providerName, size: 13)
@@ -1475,19 +1565,19 @@ private struct ActiveSessionRow: View {
                 }
                 Text("\(session.userName) · \(session.keyName) · \(session.providerName)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
             }
             Spacer()
             Text("\(session.requestCount)x")
                 .font(.caption)
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
             MoneyValue(value: session.costUsd, majorSize: 12, minorSize: 7, weight: .semibold)
                 .frame(width: 62, alignment: .trailing)
         }
         .padding(9)
-        .background(Color.cchGlassRow)
+        .cchSurface(.row)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -1499,6 +1589,7 @@ private struct LeaderboardRow: View {
     let cacheHitRate: Double?
     let showsCache: Bool
     let accent: Color
+    @Environment(\.cchTheme) private var theme
 
     var isExpanded: Bool {
         state.expandedLeaderboardEntryId == entry.id
@@ -1531,19 +1622,19 @@ private struct LeaderboardRow: View {
                             }
                             Text(entry.title)
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.primary)
+                                .foregroundStyle(theme.textPrimary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             if canExpand {
                                 Image(systemName: "chevron.right")
                                     .font(.system(size: 8.5, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(theme.textSecondary)
                                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
                             }
                         }
                         Text(entry.subtitle)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
@@ -1551,18 +1642,18 @@ private struct LeaderboardRow: View {
                     Spacer()
                     Text("\(compactNumber(entry.requests)) 次")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                         .monospacedDigit()
                         .frame(width: 64, alignment: .trailing)
                     Text(compactNumber(entry.tokens))
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                         .monospacedDigit()
                         .frame(width: 70, alignment: .trailing)
                     if showsCache, let cacheHitRate {
                         Text(formatPercent(cacheHitRate))
                             .font(.caption)
-                            .foregroundStyle(cacheRateColor(cacheHitRate))
+                            .foregroundStyle(cacheRateColor(cacheHitRate, theme: theme))
                             .monospacedDigit()
                             .frame(width: 58, alignment: .trailing)
                     }
@@ -1574,7 +1665,7 @@ private struct LeaderboardRow: View {
                     LinearGradient(
                         colors: [
                             accent.opacity(0.16),
-                            Color.white.opacity(0.050)
+                            theme.panelSoft
                         ],
                         startPoint: .leading,
                         endPoint: .trailing
@@ -1596,7 +1687,7 @@ private struct LeaderboardRow: View {
             }
         }
         .frame(width: CCHPanelLayout.contentWidth, alignment: .leading)
-        .background(Color.cchGlassRow)
+        .cchSurface(.row)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.16), lineWidth: 1))
         .animation(.easeInOut(duration: 0.16), value: isExpanded)
@@ -1605,6 +1696,7 @@ private struct LeaderboardRow: View {
 
 private struct LeaderboardModelStatRow: View {
     let stat: CCHLeaderboardModelStat
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1618,18 +1710,18 @@ private struct LeaderboardModelStatRow: View {
             Spacer()
             Text("\(compactNumber(stat.requests)) 次")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
                 .monospacedDigit()
                 .frame(width: 56, alignment: .trailing)
             Text(compactNumber(stat.tokens))
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
                 .monospacedDigit()
                 .frame(width: 62, alignment: .trailing)
             if let cacheHitRate = stat.cacheHitRate {
                 Text(formatPercent(cacheHitRate))
                     .font(.caption2)
-                    .foregroundStyle(cacheRateColor(cacheHitRate))
+                    .foregroundStyle(cacheRateColor(cacheHitRate, theme: theme))
                     .monospacedDigit()
                     .frame(width: 52, alignment: .trailing)
             }
@@ -1641,8 +1733,8 @@ private struct LeaderboardModelStatRow: View {
         .background(
             LinearGradient(
                 colors: [
-                    Color.white.opacity(0.08),
-                    Color.white.opacity(0.04)
+                    theme.row,
+                    theme.panelSoft
                 ],
                 startPoint: .leading,
                 endPoint: .trailing
@@ -1657,12 +1749,13 @@ private struct LogRow: View {
     let isSelected: Bool
     let cacheStatus: CCHCacheStatusContext
     let isNew: Bool
+    @Environment(\.cchTheme) private var theme
 
     var statusColor: Color {
-        guard let code = log.statusCode else { return .secondary }
-        if (200..<300).contains(code) { return .green }
-        if code >= 500 { return .red }
-        return .orange
+        guard let code = log.statusCode else { return theme.textTertiary }
+        if (200..<300).contains(code) { return theme.accentGreen }
+        if code >= 500 { return theme.accentRed }
+        return theme.accentOrange
     }
 
     var throughput: Double? {
@@ -1697,7 +1790,7 @@ private struct LogRow: View {
                 }
                 HStack(spacing: 4) {
                     Text(log.userName.isEmpty ? "-" : log.userName)
-                        .foregroundStyle(Color.cchUserAccent)
+                        .cchUserAccent()
                         .fixedSize(horizontal: true, vertical: false)
                     Text("·")
                         .fixedSize(horizontal: true, vertical: false)
@@ -1709,7 +1802,7 @@ private struct LogRow: View {
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
                 .lineLimit(1)
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -1718,15 +1811,15 @@ private struct LogRow: View {
             UsageMetricColumn(
                 top: log.outputTokens,
                 bottom: log.inputTokens,
-                topColor: .primary,
-                bottomColor: .secondary
+                topColor: theme.textPrimary,
+                bottomColor: theme.textSecondary
             )
             .frame(width: 48, alignment: .trailing)
             UsageMetricColumn(
                 top: log.cacheCreationTokens,
                 bottom: log.cacheReadTokens,
-                topColor: cacheCreationDisplayColor(cacheStatus),
-                bottomColor: cacheReadDisplayColor(cacheStatus)
+                topColor: cacheCreationDisplayColor(cacheStatus, theme: theme),
+                bottomColor: cacheReadDisplayColor(cacheStatus, theme: theme)
             )
             .frame(width: 56, alignment: .trailing)
             MoneyValue(value: log.costUsd, majorSize: 11.5, minorSize: 6.8, weight: .semibold)
@@ -1734,21 +1827,21 @@ private struct LogRow: View {
             VStack(alignment: .trailing, spacing: 1) {
                 Text(formatMillisecondsAsSeconds(log.durationMs))
                     .font(.caption)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(theme.textPrimary)
                     .monospacedDigit()
                 Text("TTFB \(formatMillisecondsAsSeconds(log.ttfbMs))")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                     .monospacedDigit()
                 Text(formatTokensPerSecond(throughput))
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                     .monospacedDigit()
             }
             .frame(width: 76, alignment: .trailing)
         }
         .padding(8)
-        .background(isSelected ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .background(isSelected ? theme.rowSelected : theme.control)
         .overlay(alignment: .leading) {
             NewLogEdgeFlash(active: isNew)
         }
@@ -1760,12 +1853,13 @@ private struct CompactLogRow: View {
     let log: CCHLogEntry
     let cacheStatus: CCHCacheStatusContext
     let isNew: Bool
+    @Environment(\.cchTheme) private var theme
 
     var statusColor: Color {
-        guard let code = log.statusCode else { return .green }
-        if (200..<300).contains(code) { return .green }
-        if code >= 500 { return .red }
-        return .orange
+        guard let code = log.statusCode else { return theme.accentGreen }
+        if (200..<300).contains(code) { return theme.accentGreen }
+        if code >= 500 { return theme.accentRed }
+        return theme.accentOrange
     }
 
     var statusText: String {
@@ -1801,7 +1895,7 @@ private struct CompactLogRow: View {
                 }
                 HStack(spacing: 4) {
                     Text(log.userName.isEmpty ? "-" : log.userName)
-                        .foregroundStyle(Color.cchUserAccent)
+                        .cchUserAccent()
                         .fixedSize(horizontal: true, vertical: false)
                         .layoutPriority(3)
                     Text("·")
@@ -1816,7 +1910,7 @@ private struct CompactLogRow: View {
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
                 .lineLimit(1)
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -1826,15 +1920,15 @@ private struct CompactLogRow: View {
                 title: "TOK",
                 top: log.outputTokens,
                 bottom: log.inputTokens,
-                topColor: .primary,
-                bottomColor: .secondary
+                topColor: theme.textPrimary,
+                bottomColor: theme.textSecondary
             )
             CompactUsageMetric(
                 title: "CACHE",
                 top: log.cacheCreationTokens,
                 bottom: log.cacheReadTokens,
-                topColor: cacheCreationDisplayColor(cacheStatus),
-                bottomColor: cacheReadDisplayColor(cacheStatus)
+                topColor: cacheCreationDisplayColor(cacheStatus, theme: theme),
+                bottomColor: cacheReadDisplayColor(cacheStatus, theme: theme)
             )
             StatusCapsule(text: statusText, color: statusColor)
                 .frame(width: 50, alignment: .trailing)
@@ -1844,12 +1938,12 @@ private struct CompactLogRow: View {
                 Text(formatTokensPerSecond(throughput))
             }
             .font(.caption2)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(theme.textSecondary)
             .monospacedDigit()
             .frame(width: 58, alignment: .trailing)
         }
         .padding(8)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .cchSurface(.control)
         .overlay(alignment: .leading) {
             NewLogEdgeFlash(active: isNew)
         }
@@ -1859,11 +1953,12 @@ private struct CompactLogRow: View {
 
 private struct CompactProviderRow: View {
     let provider: CCHProvider
+    @Environment(\.cchTheme) private var theme
 
     var healthColor: Color {
-        if provider.health.circuitState.lowercased() == "open" { return .red }
-        if provider.health.failureCount > 0 { return .orange }
-        return provider.isEnabled ? .green : .secondary
+        if provider.health.circuitState.lowercased() == "open" { return theme.accentRed }
+        if provider.health.failureCount > 0 { return theme.accentOrange }
+        return provider.isEnabled ? theme.accentGreen : theme.textTertiary
     }
 
     var body: some View {
@@ -1882,20 +1977,21 @@ private struct CompactProviderRow: View {
                 }
                 Text(provider.isEnabled ? "\(provider.health.circuitState) · 失败 \(provider.health.failureCount)" : "已停用")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
             }
             Spacer()
             MultiplierBadge(value: provider.costMultiplier, compact: true)
         }
         .padding(8)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .cchSurface(.control)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
 private struct LogDetailView: View {
     let log: CCHLogEntry?
+    @Environment(\.cchTheme) private var theme
 
     func throughput(_ log: CCHLogEntry) -> Double? {
         normalizedTokensPerSecond(
@@ -1920,27 +2016,27 @@ private struct LogDetailView: View {
                 if !log.errorMessage.isEmpty {
                     Text(log.errorMessage)
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(theme.accentRed)
                         .lineLimit(4)
                 }
                 Divider().opacity(0.35)
                 HStack {
                     Text("供应商决策链")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                     Spacer()
                     Text("\(attemptCount(log.providerChain))次")
                         .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
-                        .background(Color.cchGlassRow)
+                        .cchSurface(.row)
                         .clipShape(Capsule())
                 }
                 if log.providerChain.isEmpty {
                     Text("-")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                 } else {
                     ForEach(log.providerChain.prefix(6)) { item in
                         ProviderChainRow(item: item)
@@ -1952,21 +2048,22 @@ private struct LogDetailView: View {
             Spacer()
         }
         .padding(10)
-        .background(Color.cchGlassPanel)
+        .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
 private struct ProviderChainRow: View {
     let item: CCHProviderChainItem
+    @Environment(\.cchTheme) private var theme
 
     var statusColor: Color {
         guard let code = item.statusCode else {
-            return item.reason.contains("error") || item.reason.contains("fail") ? .red : .secondary
+            return item.reason.contains("error") || item.reason.contains("fail") ? theme.accentRed : theme.textTertiary
         }
-        if (200..<300).contains(code) { return .green }
-        if code == 429 || code >= 500 { return .red }
-        return .orange
+        if (200..<300).contains(code) { return theme.accentGreen }
+        if code == 429 || code >= 500 { return theme.accentRed }
+        return theme.accentOrange
     }
 
     var statusText: String {
@@ -1995,12 +2092,12 @@ private struct ProviderChainRow: View {
                 }
                 Text(detail)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
                 if !item.errorMessage.isEmpty {
                     Text(item.errorMessage)
                         .font(.caption2)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(theme.accentRed)
                         .lineLimit(2)
                 }
             }
@@ -2008,11 +2105,11 @@ private struct ProviderChainRow: View {
             if let attempt = item.attemptNumber {
                 Text("#\(attempt)")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
             }
         }
         .padding(8)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+        .cchSurface(.control)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -2022,11 +2119,12 @@ private struct ProviderRow: View {
     let setEnabled: (Bool) -> Void
     let probe: () -> Void
     let resetCircuit: () -> Void
+    @Environment(\.cchTheme) private var theme
 
     var healthColor: Color {
-        if provider.health.circuitState.lowercased() == "open" { return .red }
-        if provider.health.failureCount > 0 { return .orange }
-        return provider.isEnabled ? .green : .secondary
+        if provider.health.circuitState.lowercased() == "open" { return theme.accentRed }
+        if provider.health.failureCount > 0 { return theme.accentOrange }
+        return provider.isEnabled ? theme.accentGreen : theme.textTertiary
     }
 
     var websiteURL: URL? {
@@ -2053,12 +2151,12 @@ private struct ProviderRow: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .lineLimit(1)
                             ForEach(providerGroupTitles(provider.groupTag).prefix(2), id: \.self) { group in
-                                ProviderTag(group, color: providerGroupColor(group))
+                                ProviderTag(group, color: providerGroupColor(group, theme: theme))
                             }
                         }
                         HStack(spacing: 6) {
-                            ProviderTag("优先级 \(provider.priority)", color: .secondary)
-                            ProviderTag("权重 \(provider.weight)", color: .secondary)
+                            ProviderTag("优先级 \(provider.priority)", color: theme.textSecondary)
+                            ProviderTag("权重 \(provider.weight)", color: theme.textSecondary)
                             MultiplierBadge(value: provider.costMultiplier, compact: true)
                         }
                     }
@@ -2067,7 +2165,7 @@ private struct ProviderRow: View {
                         Text("\(provider.todayCalls) 次")
                             .font(.system(size: 12, weight: .semibold, design: .rounded))
                             .monospacedDigit()
-                        MoneyValue(value: provider.todayCost, majorSize: 10.5, minorSize: 6.2, weight: .semibold, color: .secondary)
+                        MoneyValue(value: provider.todayCost, majorSize: 10.5, minorSize: 6.2, weight: .semibold, color: theme.textSecondary)
                     }
                     .frame(width: 64, alignment: .trailing)
                     Toggle("", isOn: Binding(
@@ -2089,16 +2187,22 @@ private struct ProviderRow: View {
                     }
                     Text("失败 \(provider.health.failureCount)")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                     Text(provider.limitText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
                     Spacer()
-                    Button("测速") {
+                    Button {
                         probe()
+                    } label: {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 18, height: 18)
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(theme.accentOrange)
+                    .help("测速")
                     if provider.health.circuitState.lowercased() == "open" {
                         Button("重置") {
                             resetCircuit()
@@ -2110,7 +2214,7 @@ private struct ProviderRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
-        .background(Color.cchGlassRow)
+        .cchSurface(.row)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -2118,6 +2222,7 @@ private struct ProviderRow: View {
 private struct DetailLine: View {
     let title: String
     let value: String
+    @Environment(\.cchTheme) private var theme
 
     init(_ title: String, value: String) {
         self.title = title
@@ -2128,7 +2233,7 @@ private struct DetailLine: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased())
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
             Text(value)
                 .font(.caption)
                 .lineLimit(2)
@@ -2152,9 +2257,10 @@ private struct LogStatusIndicator: View {
     let color: Color
     let isRunning: Bool
     @State private var pulse = false
+    @Environment(\.cchTheme) private var theme
 
     var runningColor: Color {
-        .blue
+        theme.accentBlue
     }
 
     var body: some View {
@@ -2187,17 +2293,18 @@ private struct LogStatusIndicator: View {
 
 private struct EmptyStateView: View {
     let text: String
+    @Environment(\.cchTheme) private var theme
 
     var body: some View {
         HStack {
             Spacer()
             Text(text)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
                 .padding(.vertical, 18)
             Spacer()
         }
-        .background(Color.cchGlassRow)
+        .cchSurface(.row)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -2212,21 +2319,52 @@ private func logProviderMultiplier(_ log: CCHLogEntry) -> Double {
     return 1
 }
 
-private func cacheCreationDisplayColor(_ status: CCHCacheStatusContext) -> Color {
-    switch status.state {
-    case .rebuilding:
-        return .red
-    case .normal:
-        return status.createdTokens > 0 ? .green : .secondary
+private func cacheRateColor(_ rate: Double?, theme: CCHThemePalette) -> Color {
+    guard let rate else { return theme.textTertiary }
+    switch rate {
+    case let value where value >= 0.85:
+        return theme.accentGreen
+    case let value where value >= 0.6:
+        return theme.accentOrange
+    default:
+        return theme.accentRed
     }
 }
 
-private func cacheReadDisplayColor(_ status: CCHCacheStatusContext) -> Color {
+private func providerGroupColor(_ group: String, theme: CCHThemePalette) -> Color {
+    let normalized = group.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if normalized.isEmpty || normalized == "全部" || normalized == "默认" || normalized == "default" {
+        return theme.textSecondary
+    }
+
+    let palette = [
+        theme.accentBlue,
+        theme.accentGreen,
+        theme.accentOrange,
+        theme.accentPurple,
+        theme.accentMint
+    ]
+    let hash = normalized.unicodeScalars.reduce(5381) { partial, scalar in
+        ((partial << 5) &+ partial) &+ Int(scalar.value)
+    }
+    return palette[abs(hash) % palette.count]
+}
+
+private func cacheCreationDisplayColor(_ status: CCHCacheStatusContext, theme: CCHThemePalette) -> Color {
     switch status.state {
     case .rebuilding:
-        return .red
+        return theme.accentRed
     case .normal:
-        return status.readTokens > 0 ? .green : .secondary
+        return status.createdTokens > 0 ? theme.accentGreen : theme.textTertiary
+    }
+}
+
+private func cacheReadDisplayColor(_ status: CCHCacheStatusContext, theme: CCHThemePalette) -> Color {
+    switch status.state {
+    case .rebuilding:
+        return theme.accentRed
+    case .normal:
+        return status.readTokens > 0 ? theme.accentGreen : theme.textTertiary
     }
 }
 

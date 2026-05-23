@@ -1,9 +1,15 @@
 import AppKit
 import Combine
+import QuartzCore
 import SwiftUI
 
 @MainActor
 final class CCHStatusItemController: NSObject, NSPopoverDelegate {
+    private enum PopoverFade {
+        static let fadeInDuration: TimeInterval = 0.07
+        static let fadeOutDuration: TimeInterval = 0.20
+    }
+
     private let state = MonitorState()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let statusView = CCHStatusBarView(frame: NSRect(x: 0, y: 0, width: CCHStatusBarView.fixedWidth(showDetails: true), height: 22))
@@ -20,6 +26,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private var lastPayload: CCHStatusBarView.Payload?
     private var lastTooltip: String?
     private var lastLength: CGFloat = 0
+    private var isClosingPopover = false
 
     override init() {
         super.init()
@@ -54,7 +61,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private func configurePopover() {
         popover.behavior = .applicationDefined
         popover.delegate = self
-        popover.animates = true
+        popover.animates = false
         popover.contentSize = NSSize(width: 760, height: 630)
         let host = NSHostingController(rootView: MenuBarView(state: state))
         host.view.wantsLayer = true
@@ -214,21 +221,59 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private func togglePopover() {
         guard let button = statusItem.button else { return }
         if popover.isShown {
-            popover.performClose(nil)
+            closePopoverLightly()
         } else {
-            state.setPanelVisible(true)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            if let window = popover.contentViewController?.view.window {
-                window.appearance = NSAppearance(named: .darkAqua)
-                window.backgroundColor = .clear
-                window.isOpaque = false
-                window.hasShadow = true
-                window.makeKey()
-            }
-            if let contentView = popover.contentViewController?.view {
-                forceActiveMaterial(in: contentView)
-            }
+            showPopoverLightly(relativeTo: button.bounds, of: button)
+        }
+    }
+
+    private func showPopoverLightly(relativeTo rect: NSRect, of button: NSView) {
+        isClosingPopover = false
+        state.setPanelVisible(true)
+        popover.contentViewController?.view.alphaValue = 0
+        popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
+
+        guard let window = popover.contentViewController?.view.window else {
+            popover.contentViewController?.view.alphaValue = 1
             startOutsideClickMonitor()
+            return
+        }
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = true
+        window.alphaValue = 0
+        window.makeKey()
+        popover.contentViewController?.view.alphaValue = 1
+
+        if let contentView = popover.contentViewController?.view {
+            forceActiveMaterial(in: contentView)
+        }
+        startOutsideClickMonitor()
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = PopoverFade.fadeInDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 1
+        }
+    }
+
+    private func closePopoverLightly() {
+        guard popover.isShown, !isClosingPopover else { return }
+        isClosingPopover = true
+
+        guard let window = popover.contentViewController?.view.window else {
+            popover.performClose(nil)
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = PopoverFade.fadeOutDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            guard let self else { return }
+            self.popover.performClose(nil)
         }
     }
 
@@ -247,7 +292,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] _ in
             guard let self = self, self.popover.isShown else { return }
-            self.popover.performClose(nil)
+            self.closePopoverLightly()
         }
     }
 
@@ -259,6 +304,9 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
+        isClosingPopover = false
+        popover.contentViewController?.view.window?.alphaValue = 1
+        popover.contentViewController?.view.alphaValue = 1
         stopOutsideClickMonitor()
         state.setPanelVisible(false)
     }
