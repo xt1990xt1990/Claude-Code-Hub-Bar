@@ -129,6 +129,8 @@ final class MonitorState: ObservableObject {
     @Published var logPage = 1
     @Published var isLoadingMoreLogs = false
     @Published var providers: [CCHProvider] = []
+    @Published private(set) var assignableProviderGroups: [CCHProviderGroup] = []
+    @Published private var providerGroupAssignmentOverrides: [Int: Set<String>] = [:]
     @Published private(set) var highlightedLogIds: Set<Int> = []
 
     @Published var lastRefresh: Date?
@@ -181,7 +183,9 @@ final class MonitorState: ObservableObject {
     private var cachedMenuBarRunningLogs: [CCHLogEntry] = []
     private var refreshTasks: [CCHRefreshKey: CCHRefreshTaskSlot] = [:]
     private var lastProviderUsageRefresh: Date?
+    private var lastProviderGroupsRefresh: Date?
     private var lastLogSummaryRefresh: Date?
+    private var officialProviderGroups: [CCHProviderGroup] = []
 
     var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
@@ -386,6 +390,55 @@ final class MonitorState: ObservableObject {
         }
         selectedProviderGroups = next
         rebuildProviderFilterSnapshot()
+    }
+
+    func assignedGroupNames(for provider: CCHProvider) -> Set<String> {
+        providerGroupAssignmentOverrides[provider.id] ?? storedGroupNames(for: provider)
+    }
+
+    func displayGroupTitles(for provider: CCHProvider) -> [String] {
+        let groups = assignedGroupNames(for: provider)
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        return groups.isEmpty ? ["默认"] : groups
+    }
+
+    func toggleProviderGroupAssignment(_ group: CCHProviderGroup, for provider: CCHProvider) async {
+        let groupName = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !groupName.isEmpty, !isDefaultProviderGroup(groupName) else { return }
+
+        actionMessageDismissTask?.cancel()
+        actionMessage = nil
+        actionMessageIsWarning = false
+
+        var nextGroups = assignedGroupNames(for: provider)
+        let didRemove = nextGroups.contains(groupName)
+        if didRemove {
+            nextGroups.remove(groupName)
+        } else {
+            nextGroups.insert(groupName)
+        }
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
+            providerGroupAssignmentOverrides[provider.id] = nextGroups
+            let allGroups = computedProviderGroups()
+            selectedProviderGroups = selectedProviderGroups.intersection(Set(allGroups))
+            rebuildProviderFilterSnapshot(groups: allGroups)
+        }
+
+        do {
+            try await api.setProviderGroups(
+                config: config,
+                providerId: provider.id,
+                groupTag: providerGroupTag(from: nextGroups)
+            )
+            flashActionMessage(didRemove ? "已移出分组 \(groupName)" : "已加入分组 \(groupName)")
+            _ = await loadProviders()
+        } catch {
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
+                providerGroupAssignmentOverrides[provider.id] = storedGroupNames(for: provider)
+                rebuildProviderFilterSnapshot()
+            }
+            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+        }
     }
 
     func startRefreshTimer() {
@@ -633,6 +686,11 @@ final class MonitorState: ObservableObject {
         return now.timeIntervalSince(lastProviderUsageRefresh) >= 30
     }
 
+    private func shouldRefreshProviderGroups(now: Date = Date()) -> Bool {
+        guard let lastProviderGroupsRefresh else { return true }
+        return now.timeIntervalSince(lastProviderGroupsRefresh) >= 60
+    }
+
     private func shouldRefreshLogSummary(now: Date = Date()) -> Bool {
         guard let lastLogSummaryRefresh else { return true }
         return now.timeIntervalSince(lastLogSummaryRefresh) >= 15
@@ -741,9 +799,17 @@ final class MonitorState: ObservableObject {
     private func loadProviders(includeUsage: Bool = true) async -> String? {
         do {
             providers = try await api.fetchProviders(config: config, includeUsage: includeUsage)
+            if shouldRefreshProviderGroups() {
+                if let groups = try? await api.fetchProviderGroups(config: config) {
+                    officialProviderGroups = groups
+                    lastProviderGroupsRefresh = Date()
+                }
+            }
+            assignableProviderGroups = mergedAssignableProviderGroups(officialProviderGroups)
             if includeUsage {
                 lastProviderUsageRefresh = Date()
             }
+            reconcileProviderGroupAssignmentOverrides()
             rebuildProviderLookup()
             let allGroups = computedProviderGroups()
             selectedProviderGroups = selectedProviderGroups.intersection(Set(allGroups))
@@ -832,8 +898,55 @@ final class MonitorState: ObservableObject {
     }
 
     private func computedProviderGroups() -> [String] {
-        let groups = Set(providers.flatMap { providerGroupTitles($0.groupTag) })
+        let groups = Set(providers.flatMap { displayGroupTitles(for: $0) })
         return ["全部"] + groups.filter { $0 != "全部" }.sorted()
+    }
+
+    private func mergedAssignableProviderGroups(_ officialGroups: [CCHProviderGroup]) -> [CCHProviderGroup] {
+        var seen = Set<String>()
+        var merged: [CCHProviderGroup] = []
+
+        for group in officialGroups {
+            let name = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = name.lowercased()
+            guard !name.isEmpty, !isDefaultProviderGroup(name), seen.insert(key).inserted else { continue }
+            merged.append(group)
+        }
+
+        let existingGroups = providers
+            .flatMap { providerGroupTitles($0.groupTag) }
+            .filter { !isDefaultProviderGroup($0) }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+
+        for name in existingGroups {
+            let key = name.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            merged.append(CCHProviderGroup(id: name, name: name, providerCount: nil, costMultiplier: nil))
+        }
+
+        return merged.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func providerGroupTag(from groups: Set<String>) -> String? {
+        let values = groups
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !isDefaultProviderGroup($0) }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        return values.isEmpty ? nil : values.joined(separator: ",")
+    }
+
+    private func storedGroupNames(for provider: CCHProvider) -> Set<String> {
+        Set(providerGroupTitles(provider.groupTag).filter { !isDefaultProviderGroup($0) })
+    }
+
+    private func reconcileProviderGroupAssignmentOverrides() {
+        var nextOverrides = providerGroupAssignmentOverrides
+        for provider in providers where nextOverrides[provider.id] == storedGroupNames(for: provider) {
+            nextOverrides[provider.id] = nil
+        }
+        let providerIds = Set(providers.map(\.id))
+        nextOverrides = nextOverrides.filter { providerIds.contains($0.key) }
+        providerGroupAssignmentOverrides = nextOverrides
     }
 
     private func rebuildProviderFilterSnapshot(groups: [String]? = nil) {
@@ -843,7 +956,7 @@ final class MonitorState: ObservableObject {
             filtered = providers
         } else {
             filtered = providers.filter { provider in
-                !Set(providerGroupTitles(provider.groupTag)).isDisjoint(with: selectedProviderGroups)
+                !Set(displayGroupTitles(for: provider)).isDisjoint(with: selectedProviderGroups)
             }
         }
         providerFilterSnapshot = CCHProviderFilterSnapshot(
@@ -1295,17 +1408,22 @@ func providerGroupTitle(_ value: String) -> String {
 
 func providerGroupTitles(_ value: String) -> [String] {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return ["默认"] }
+    guard !trimmed.isEmpty, !isDefaultProviderGroup(trimmed) else { return ["默认"] }
     let groups = trimmed
         .split(separator: ",")
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
+        .filter { !$0.isEmpty && !isDefaultProviderGroup($0) }
     return groups.isEmpty ? ["默认"] : groups
+}
+
+func isDefaultProviderGroup(_ value: String) -> Bool {
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty || normalized == "默认" || normalized == "default"
 }
 
 func providerGroupColor(_ group: String) -> Color {
     let normalized = group.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    if normalized.isEmpty || normalized == "全部" || normalized == "默认" || normalized == "default" {
+    if normalized == "全部" || isDefaultProviderGroup(normalized) {
         return .secondary
     }
 

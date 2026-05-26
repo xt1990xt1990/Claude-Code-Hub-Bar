@@ -213,6 +213,13 @@ struct CCHProvider: Identifiable {
     let health: CCHProviderHealth
 }
 
+struct CCHProviderGroup: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let providerCount: Int?
+    let costMultiplier: Double?
+}
+
 struct CCHProviderEndpoint: Identifiable {
     let id: Int
     let label: String
@@ -497,7 +504,7 @@ actor APIService {
                 isEnabled: boolValue(row["isEnabled"]),
                 priority: intValue(row["priority"]),
                 weight: intValue(row["weight"]),
-                groupTag: stringValue(row["groupTag"], fallback: "default"),
+                groupTag: firstStringValue(row, keys: ["groupTag", "group_tag", "providerGroup"], fallback: "default"),
                 costMultiplier: doubleValue(row["costMultiplier"], fallback: 1),
                 todayCalls: usage?.requests ?? intValue(row["todayCallCount"]),
                 todayCost: usage?.cost ?? doubleValue(row["todayTotalCostUsd"]),
@@ -510,6 +517,23 @@ actor APIService {
                 health: health
             )
         }
+    }
+
+    func fetchProviderGroups(config: CCHConfig) async throws -> [CCHProviderGroup] {
+        let data = try await getV1(config: config, path: "/api/v1/provider-groups")
+        if let values = providerGroupStringRows(from: data) {
+            return values.compactMap(parseProviderGroup)
+        }
+        return itemRows(from: data).compactMap(parseProviderGroup)
+    }
+
+    func setProviderGroups(config: CCHConfig, providerId: Int, groupTag: String?) async throws {
+        let bodyValue: Any = groupTag ?? NSNull()
+        _ = try await patchV1(
+            config: config,
+            path: "/api/v1/providers/\(providerId)",
+            body: ["group_tag": bodyValue]
+        )
     }
 
     func setProviderEnabled(config: CCHConfig, providerId: Int, enabled: Bool) async throws {
@@ -1179,6 +1203,41 @@ private func optionalCacheHitRate(_ row: [String: Any]) -> Double? {
     return nil
 }
 
+private func parseProviderGroup(_ value: String) -> CCHProviderGroup? {
+    let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty else { return nil }
+    return CCHProviderGroup(id: name, name: name, providerCount: nil, costMultiplier: nil)
+}
+
+private func parseProviderGroup(_ row: [String: Any]) -> CCHProviderGroup? {
+    let name = firstStringValue(row, keys: ["name", "group", "groupTag", "group_tag", "title"], fallback: "默认")
+    let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedName.isEmpty else { return nil }
+    let id = firstStringValue(row, keys: ["id", "name", "group", "groupTag", "group_tag"], fallback: trimmedName)
+    return CCHProviderGroup(
+        id: id,
+        name: trimmedName,
+        providerCount: firstOptionalInt(row, keys: ["providerCount", "count"]),
+        costMultiplier: firstOptionalDouble(row, keys: ["costMultiplier", "cost_multiplier"])
+    )
+}
+
+private func providerGroupStringRows(from value: Any) -> [String]? {
+    if let rows = value as? [String] {
+        return rows
+    }
+    guard let dict = value as? [String: Any] else { return nil }
+    for key in ["items", "groups", "data"] {
+        if let rows = dict[key] as? [String] {
+            return rows
+        }
+    }
+    if let data = dict["data"] as? [String: Any] {
+        return providerGroupStringRows(from: data)
+    }
+    return nil
+}
+
 private func normalizedCacheHitRate(cacheReadTokens: Int, cacheCreationTokens: Int, inputTokens: Int) -> Double? {
     let totalCacheableInput = inputTokens + cacheCreationTokens + cacheReadTokens
     guard totalCacheableInput > 0 else { return nil }
@@ -1190,7 +1249,7 @@ private func itemRows(from value: Any) -> [[String: Any]] {
         return rows
     }
     guard let dict = value as? [String: Any] else { return [] }
-    for key in ["items", "logs", "data"] {
+    for key in ["items", "logs", "data", "groups"] {
         if let rows = dict[key] as? [[String: Any]] {
             return rows
         }

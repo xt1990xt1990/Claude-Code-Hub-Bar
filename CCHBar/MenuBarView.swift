@@ -1202,8 +1202,14 @@ private struct ProvidersTabView: View {
                     ForEach(state.filteredProviders) { provider in
                         ProviderRow(
                             provider: provider,
+                            assignableGroups: state.assignableProviderGroups,
+                            assignedGroupNames: state.assignedGroupNames(for: provider),
+                            displayGroupTitles: state.displayGroupTitles(for: provider),
                             setEnabled: { value in
                                 Task { await state.setProvider(provider, enabled: value) }
+                            },
+                            toggleGroup: { group in
+                                Task { await state.toggleProviderGroupAssignment(group, for: provider) }
                             },
                             probe: {
                                 Task { await state.probe(provider) }
@@ -1214,9 +1220,9 @@ private struct ProvidersTabView: View {
                         )
                     }
                 }
-                .transaction { transaction in
-                    transaction.animation = nil
-                }
+                .animation(.spring(response: 0.24, dampingFraction: 0.86), value: state.filteredProviders.map { provider in
+                    "\(provider.id):\(state.displayGroupTitles(for: provider).joined(separator: ","))"
+                })
             }
         }
     }
@@ -1507,6 +1513,37 @@ private struct ProviderTag: View {
             .background(color.opacity(0.18))
             .overlay(Capsule().stroke(color.opacity(0.26), lineWidth: 1))
             .clipShape(Capsule())
+    }
+}
+
+private struct ProviderAssignmentChip: View {
+    let title: String
+    let selected: Bool
+    let color: Color
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 3) {
+            if selected {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 7, weight: .black))
+                    .transition(.scale.combined(with: .opacity))
+            }
+            Text(title)
+                .lineLimit(1)
+        }
+        .font(.system(size: 9.5, weight: selected ? .bold : .semibold))
+        .foregroundStyle(selected ? color : theme.textSecondary)
+        .padding(.horizontal, selected ? 7 : 6)
+        .padding(.vertical, 2.5)
+        .background(
+            Capsule()
+                .fill(selected ? color.opacity(0.18) : theme.panelSoft.opacity(0.72))
+        )
+        .overlay(
+            Capsule()
+                .stroke(selected ? color.opacity(0.62) : theme.border.opacity(0.55), lineWidth: 0.8)
+        )
     }
 }
 
@@ -2139,7 +2176,11 @@ private struct ProviderChainRow: View {
 
 private struct ProviderRow: View {
     let provider: CCHProvider
+    let assignableGroups: [CCHProviderGroup]
+    let assignedGroupNames: Set<String>
+    let displayGroupTitles: [String]
     let setEnabled: (Bool) -> Void
+    let toggleGroup: (CCHProviderGroup) -> Void
     let probe: () -> Void
     let resetCircuit: () -> Void
     @Environment(\.cchTheme) private var theme
@@ -2173,10 +2214,12 @@ private struct ProviderRow: View {
                             Text(provider.name)
                                 .font(.system(size: 12, weight: .semibold))
                                 .lineLimit(1)
-                            ForEach(providerGroupTitles(provider.groupTag).prefix(2), id: \.self) { group in
+                            ForEach(displayGroupTitles.prefix(2), id: \.self) { group in
                                 ProviderTag(group, color: providerGroupColor(group, theme: theme))
+                                    .transition(.scale(scale: 0.86).combined(with: .opacity))
                             }
                         }
+                        .animation(.spring(response: 0.22, dampingFraction: 0.84), value: displayGroupTitles)
                         HStack(spacing: 6) {
                             ProviderTag("优先级 \(provider.priority)", color: theme.textSecondary)
                             ProviderTag("权重 \(provider.weight)", color: theme.textSecondary)
@@ -2232,6 +2275,35 @@ private struct ProviderRow: View {
                         }
                         .buttonStyle(.borderless)
                     }
+                }
+                if !assignableGroups.isEmpty {
+                    HStack(spacing: 7) {
+                        Text("分组")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(theme.textTertiary)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(assignableGroups) { group in
+                                    let selected = assignedGroupNames.contains(group.name)
+                                    Button {
+                                        withAnimation(.spring(response: 0.2, dampingFraction: 0.82)) {
+                                            toggleGroup(group)
+                                        }
+                                    } label: {
+                                        ProviderAssignmentChip(
+                                            title: group.name,
+                                            selected: selected,
+                                            color: providerGroupColor(group.name, theme: theme)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(selected ? "移出 \(group.name)" : "加入 \(group.name)")
+                                }
+                            }
+                        }
+                        .frame(height: 21)
+                    }
+                    .animation(.spring(response: 0.2, dampingFraction: 0.86), value: assignedGroupNames)
                 }
             }
         }
