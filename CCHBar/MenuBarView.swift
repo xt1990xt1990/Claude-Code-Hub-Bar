@@ -2427,18 +2427,7 @@ private struct RunningSessionIndicator: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(
-                    AngularGradient(
-                        colors: [
-                            theme.accentGreen.opacity(0.16),
-                            theme.accentGreen.opacity(0.72),
-                            theme.accentGreen.opacity(0.16)
-                        ],
-                        center: .center
-                    ),
-                    lineWidth: 1.6
-                )
-                .opacity(pulse ? 0 : 1)
+                .stroke(theme.accentGreen.opacity(pulse ? 0 : 0.52), lineWidth: 1.6)
                 .frame(width: 20, height: 20)
                 .scaleEffect(pulse ? 1.24 : 1)
             CCHTriangleMark()
