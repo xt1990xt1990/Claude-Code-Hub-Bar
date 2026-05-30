@@ -15,14 +15,19 @@ Private configuration should be entered locally and should not be committed to t
 ## Features
 
 - Menu bar summary for today’s cost and request activity.
-- Running-request mode with provider, billing model, multiplier, and elapsed time.
-- Rotation for multiple running requests.
+- Idle menu bar state shows today’s cost and request count, with cost rounded to three decimals.
+- Running-request mode with provider, billing model, multiplier, elapsed time, and concurrent count.
+- Rotation for multiple running requests, capped at 3 items in the menu bar to reduce jumping under higher concurrency.
+- Running requests panel shows up to 3 rows and keeps the rest scrollable inside the list.
 - Breathing cache indicator in the menu bar — slow green pulse, fast red flash on rebuild.
+- Recent requests, log details, and running requests use the current provider multiplier consistently.
 - Dashboard, leaderboard, logs, and providers panels with a sliding-pill tab switcher.
+- Top-right navigation actions use button styling with hover feedback.
 - Liquid Glass translucent panel on macOS 26, with an `ultraThinMaterial` fallback on older systems.
+- Liquid Glass and Endless Dark themes.
 - Log details with provider chain, TTFB, throughput, and cache tokens.
 - Cache hit-rate display for logs and leaderboards.
-- Provider group filters, enable/disable, probe, and circuit reset controls.
+- Provider group filters, provider group assignment, enable/disable, probe, and circuit reset controls.
 - Launch at login support.
 
 ## Build
