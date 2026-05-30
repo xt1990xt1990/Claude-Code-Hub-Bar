@@ -694,6 +694,9 @@ private struct DashboardTabView: View {
 private struct RunningRequestsPanel: View {
     @ObservedObject var state: MonitorState
     @Environment(\.cchTheme) private var theme
+    private let maxVisibleRows = 3
+    private let rowHeight: CGFloat = 58
+    private let rowSpacing: CGFloat = 8
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -722,9 +725,24 @@ private struct RunningRequestsPanel: View {
                 .cchSurface(.row)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else {
-                ForEach(state.menuBarRunningLogs.prefix(4)) { log in
-                    RunningRequestRow(state: state, log: log)
-                        .transition(.opacity)
+                VStack(alignment: .leading, spacing: 6) {
+                    ScrollView(.vertical, showsIndicators: state.menuBarRunningLogs.count > maxVisibleRows) {
+                        LazyVStack(spacing: rowSpacing) {
+                            ForEach(state.menuBarRunningLogs) { log in
+                                RunningRequestRow(state: state, log: log)
+                                    .frame(height: rowHeight)
+                                    .transition(.opacity)
+                            }
+                        }
+                    }
+                    .frame(height: runningListHeight)
+
+                    if state.menuBarRunningLogs.count > maxVisibleRows {
+                        Text("还有 \(state.menuBarRunningLogs.count - maxVisibleRows) 个运行中，请在列表内滚动查看")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(theme.textTertiary)
+                            .lineLimit(1)
+                    }
                 }
             }
         }
@@ -732,6 +750,12 @@ private struct RunningRequestsPanel: View {
         .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.accentGreen.opacity(0.22), lineWidth: 1))
+    }
+
+    private var runningListHeight: CGFloat {
+        let visibleRows = min(maxVisibleRows, state.menuBarRunningLogs.count)
+        let spacing = max(0, visibleRows - 1)
+        return CGFloat(visibleRows) * rowHeight + CGFloat(spacing) * rowSpacing
     }
 }
 
@@ -751,14 +775,7 @@ private struct RunningRequestRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .stroke(theme.accentGreen.opacity(0.22), lineWidth: 2)
-                    .frame(width: 18, height: 18)
-                CCHTriangleMark()
-                    .fill(theme.accentGreen)
-                    .frame(width: 8.8, height: 8.8)
-            }
+            RunningSessionIndicator()
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 7) {
@@ -818,6 +835,7 @@ private struct RecentRequestsPanel: View {
                 ForEach(state.recentLogs.prefix(5)) { log in
                     CompactLogRow(
                         log: log,
+                        providerMultiplier: state.providerMultiplier(for: log.providerName),
                         cacheStatus: state.cacheStatus(for: log),
                         isNew: state.highlightedLogIds.contains(log.id),
                         isActive: state.panelVisible && state.selectedTab == .dashboard
@@ -1034,8 +1052,9 @@ private struct LeaderboardTabView: View {
                 }
 
                 Spacer()
-                Button("打开") { state.openCCH("/zh-CN/dashboard/leaderboard") }
-                    .buttonStyle(.borderless)
+                PanelLinkButton(title: "打开") {
+                    state.openCCH("/zh-CN/dashboard/leaderboard")
+                }
             }
 
             HStack(spacing: 10) {
@@ -1117,8 +1136,9 @@ private struct LogsTabView: View {
                 MiniStat(title: "缓存", value: Text(formatPercent(cacheHitRate(cacheReadTokens: state.logSummary.cacheReadTokens, inputTokens: state.logSummary.inputTokens))).font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
                 MiniStat(title: "已载入", value: Text("\(state.logs.count)/\(state.logTotal)").font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
                 Spacer()
-                Button("打开") { state.openCCH("/zh-CN/dashboard/logs") }
-                    .buttonStyle(.borderless)
+                PanelLinkButton(title: "打开") {
+                    state.openCCH("/zh-CN/dashboard/logs")
+                }
             }
 
             HStack(alignment: .top, spacing: 12) {
@@ -1130,6 +1150,7 @@ private struct LogsTabView: View {
                             ForEach(state.logs) { log in
                                 LogRow(
                                     log: log,
+                                    providerMultiplier: state.providerMultiplier(for: log.providerName),
                                     isSelected: state.selectedLog?.id == log.id,
                                     cacheStatus: state.cacheStatus(for: log),
                                     isNew: state.highlightedLogIds.contains(log.id),
@@ -1172,7 +1193,11 @@ private struct LogsTabView: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 346)
 
-                LogDetailView(log: state.selectedLog ?? state.logs.first)
+                let detailLog = state.selectedLog ?? state.logs.first
+                LogDetailView(
+                    log: detailLog,
+                    providerMultiplier: detailLog.map { state.providerMultiplier(for: $0.providerName) }
+                )
                     .frame(width: 230)
             }
         }
@@ -1189,8 +1214,9 @@ private struct ProvidersTabView: View {
                 MiniStat(title: "启用", value: Text("\(state.filteredEnabledProviderCount)").font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
                 MiniStat(title: "异常", value: Text("\(state.filteredUnhealthyProviderCount)").font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
                 Spacer()
-                Button("打开") { state.openCCH("/zh-CN/dashboard/providers") }
-                    .buttonStyle(.borderless)
+                PanelLinkButton(title: "打开") {
+                    state.openCCH("/zh-CN/dashboard/providers")
+                }
             }
 
             ProviderGroupChips(state: state)
@@ -1600,8 +1626,51 @@ private struct SectionHeader: View {
                 .font(.system(size: 13, weight: .semibold))
             Spacer()
             if let actionTitle, let action {
-                Button(actionTitle, action: action)
-                    .buttonStyle(.borderless)
+                PanelLinkButton(title: actionTitle, action: action)
+            }
+        }
+    }
+}
+
+private struct PanelLinkButton: View {
+    let title: String
+    let action: () -> Void
+    @State private var isHovering = false
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(title)
+                    .lineLimit(1)
+                Image(systemName: "arrow.up.forward")
+                    .font(.system(size: 8.5, weight: .black))
+                    .offset(x: isHovering ? 1 : 0, y: isHovering ? -1 : 0)
+            }
+            .font(.system(size: 10.5, weight: .bold, design: .rounded))
+            .foregroundStyle(isHovering ? theme.backgroundBottom : theme.accentBlue)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4.5)
+            .background(
+                Capsule()
+                    .fill(isHovering ? theme.accentBlue : theme.accentBlue.opacity(0.13))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(theme.accentBlue.opacity(isHovering ? 0.85 : 0.36), lineWidth: 1)
+            )
+            .shadow(color: theme.accentBlue.opacity(isHovering ? 0.24 : 0), radius: 5, y: 1)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("打开对应页面")
+        .animation(.easeInOut(duration: 0.14), value: isHovering)
+        .onHover { hovering in
+            isHovering = hovering
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
             }
         }
     }
@@ -1804,6 +1873,7 @@ private struct LeaderboardModelStatRow: View {
 
 private struct LogRow: View {
     let log: CCHLogEntry
+    let providerMultiplier: Double
     let isSelected: Bool
     let cacheStatus: CCHCacheStatusContext
     let isNew: Bool
@@ -1844,7 +1914,7 @@ private struct LogRow: View {
                     if log.isFastTier {
                         FastTierBadge()
                     }
-                    MultiplierBadge(value: logProviderMultiplier(log), compact: true)
+                    MultiplierBadge(value: providerMultiplier, compact: true)
                     StatusCapsule(text: log.statusCode.map(String.init) ?? "请求中", color: statusColor)
                 }
                 HStack(spacing: 4) {
@@ -1910,6 +1980,7 @@ private struct LogRow: View {
 
 private struct CompactLogRow: View {
     let log: CCHLogEntry
+    let providerMultiplier: Double
     let cacheStatus: CCHCacheStatusContext
     let isNew: Bool
     let isActive: Bool
@@ -1948,7 +2019,7 @@ private struct CompactLogRow: View {
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
                         .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 150, compactThreshold: 18)
-                    MultiplierBadge(value: logProviderMultiplier(log), compact: true)
+                    MultiplierBadge(value: providerMultiplier, compact: true)
                     if log.isFastTier {
                         FastTierBadge()
                     }
@@ -2051,6 +2122,7 @@ private struct CompactProviderRow: View {
 
 private struct LogDetailView: View {
     let log: CCHLogEntry?
+    let providerMultiplier: Double?
     @Environment(\.cchTheme) private var theme
 
     func throughput(_ log: CCHLogEntry) -> Double? {
@@ -2069,7 +2141,7 @@ private struct LogDetailView: View {
             if let log {
                 DetailLine("Session ID", value: log.sessionId.isEmpty ? "-" : log.sessionId)
                 DetailLine("端点", value: log.endpoint.isEmpty ? "-" : log.endpoint)
-                DetailLine("倍率", value: formatMultiplier(logProviderMultiplier(log)))
+                DetailLine("倍率", value: formatMultiplier(providerMultiplier ?? logProviderMultiplier(log)))
                 DetailLine("Tokens", value: "\(compactNumber(log.totalTokens))  in \(compactNumber(log.inputTokens)) / out \(compactNumber(log.outputTokens))")
                 DetailLine("缓存", value: "\(compactNumber(log.cacheCreationTokens)) 写 / \(compactNumber(log.cacheReadTokens)) 读")
                 DetailLine("性能", value: "\(formatMillisecondsAsSeconds(log.durationMs)) · TTFB \(formatMillisecondsAsSeconds(log.ttfbMs)) · \(formatTokensPerSecond(throughput(log)))")
@@ -2345,6 +2417,44 @@ private struct StatusDot: View {
             .fill(color)
             .frame(width: 8, height: 8)
             .shadow(color: color.opacity(0.35), radius: 3)
+    }
+}
+
+private struct RunningSessionIndicator: View {
+    @State private var pulse = false
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(
+                    AngularGradient(
+                        colors: [
+                            theme.accentGreen.opacity(0.16),
+                            theme.accentGreen.opacity(0.72),
+                            theme.accentGreen.opacity(0.16)
+                        ],
+                        center: .center
+                    ),
+                    lineWidth: 1.6
+                )
+                .opacity(pulse ? 0 : 1)
+                .frame(width: 20, height: 20)
+                .scaleEffect(pulse ? 1.24 : 1)
+            CCHTriangleMark()
+                .fill(theme.accentGreen)
+                .frame(width: 8.8, height: 8.8)
+        }
+        .frame(width: 26, height: 26)
+        .onAppear {
+            pulse = false
+            withAnimation(.easeOut(duration: 1.15).repeatForever(autoreverses: false)) {
+                pulse = true
+            }
+        }
+        .onDisappear {
+            pulse = false
+        }
     }
 }
 

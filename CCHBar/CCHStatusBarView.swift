@@ -2,8 +2,15 @@ import AppKit
 import QuartzCore
 
 final class CCHStatusBarView: NSView {
+    private enum Metrics {
+        static let collapsedWidth: CGFloat = 92
+        static let idleExpandedWidth: CGFloat = 116
+        static let minRunningWidth: CGFloat = 116
+        static let maxRunningWidth: CGFloat = 168
+    }
+
     static func fixedWidth(showDetails: Bool) -> CGFloat {
-        showDetails ? 116 : 92
+        showDetails ? Metrics.idleExpandedWidth : Metrics.collapsedWidth
     }
 
     enum Payload: Equatable {
@@ -51,7 +58,18 @@ final class CCHStatusBarView: NSView {
     private var lastMarqueeConfiguration: (text: String, textWidth: CGFloat, textRunWidth: CGFloat)?
 
     var preferredWidth: CGFloat {
-        Self.fixedWidth(showDetails: showsDetails)
+        guard showsDetails else { return Metrics.collapsedWidth }
+        switch payload {
+        case .idle:
+            return Metrics.idleExpandedWidth
+        case .running(let provider, _, _, _, let sessionCount, _):
+            let providerWidth = (provider as NSString).size(withAttributes: [
+                .font: NSFont.systemFont(ofSize: 8.5, weight: .semibold)
+            ]).width
+            let countReserve: CGFloat = sessionCount > 1 ? 19 : 0
+            let width = textLeading + ceil(providerWidth) + countReserve + 32
+            return min(Metrics.maxRunningWidth, max(Metrics.minRunningWidth, width))
+        }
     }
 
     var visibleProviderCharacters: Int {
@@ -244,6 +262,9 @@ final class CCHStatusBarView: NSView {
             marqueeText = nextText
             marqueeStartTime = CACurrentMediaTime()
             lastMarqueeConfiguration = nil
+            primaryLabel.layer?.removeAnimation(forKey: "marquee")
+            primaryLabel.frame.origin.x = 0
+            primaryLabel.layer?.transform = CATransform3DIdentity
         }
         primaryLabel.stringValue = nextText
         marqueeCloneLabel.stringValue = nextText

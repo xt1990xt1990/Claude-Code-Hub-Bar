@@ -18,8 +18,12 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private var rotationTimer: AnyCancellable?
     private var tickCounter = 0
     private var runningItemIndex = 0
+    private var currentRunningItemId: String?
     private var lastRunningItems: [CCHStatusRunningItem] = []
+    private var lastRunningItemIds: [String] = []
+    private var lastRunningItemTotalCount = 0
     private var lastRunningItemsSeenAt: Date?
+    private let maxRotatingRunningItems = 3
     private let runningSessionHoldDuration: TimeInterval = 5
     private var outsideClickMonitor: Any?
     private var lastAppliedSnapshot: CCHStatusBarSnapshot?
@@ -116,18 +120,24 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             let provider = compactProviderName(item.providerName)
             let billing = item.model.trimmingCharacters(in: .whitespacesAndNewlines)
             let billingText = billing.isEmpty ? "model" : billing
+            let totalCount = max(lastRunningItemTotalCount, items.count)
+            let hiddenCount = max(0, totalCount - items.count)
 
             payload = .running(
                 provider: provider,
                 detail: "\(item.isRetrying ? "retrying " : "")\(billingText) \(formatMultiplier(item.multiplier))",
                 elapsed: elapsedText(for: item),
                 isRetrying: item.isRetrying,
-                sessionCount: items.count,
+                sessionCount: totalCount,
                 cacheState: item.cacheState
             )
-            tooltip = "\(provider) · \(billingText) · \(formatMultiplier(item.multiplier))"
+            tooltip = hiddenCount > 0
+                ? "\(provider) · \(billingText) · \(formatMultiplier(item.multiplier)) · 另有 \(hiddenCount) 个运行中"
+                : "\(provider) · \(billingText) · \(formatMultiplier(item.multiplier))"
+            currentRunningItemId = item.id
         } else {
             runningItemIndex = 0
+            currentRunningItemId = nil
             payload = .idle(
                 primary: snapshot.idlePrimary,
                 detail: snapshot.idleDetail,
@@ -175,13 +185,13 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private func visibleMenuBarItems(from snapshot: CCHStatusBarSnapshot) -> [CCHStatusRunningItem] {
-        let items = snapshot.runningItems
-        if !items.isEmpty {
+        if !snapshot.runningItems.isEmpty {
+            let items = Array(snapshot.runningItems.prefix(maxRotatingRunningItems))
+            reconcileRunningItemIndex(for: items)
             lastRunningItems = items
+            lastRunningItemIds = items.map(\.id)
+            lastRunningItemTotalCount = snapshot.runningItems.count
             lastRunningItemsSeenAt = snapshot.generatedAt
-            if runningItemIndex >= items.count {
-                runningItemIndex = 0
-            }
             return items
         }
 
@@ -191,8 +201,11 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             shouldHoldLastRunningSessions(since: seenAt)
         else {
             lastRunningItems = []
+            lastRunningItemIds = []
+            lastRunningItemTotalCount = 0
             lastRunningItemsSeenAt = nil
             runningItemIndex = 0
+            currentRunningItemId = nil
             return []
         }
 
@@ -200,6 +213,25 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             runningItemIndex = 0
         }
         return lastRunningItems
+    }
+
+    private func reconcileRunningItemIndex(for items: [CCHStatusRunningItem]) {
+        let ids = items.map(\.id)
+        defer { lastRunningItemIds = ids }
+
+        guard ids != lastRunningItemIds else {
+            if runningItemIndex >= items.count {
+                runningItemIndex = 0
+            }
+            return
+        }
+
+        if let currentRunningItemId,
+           let stableIndex = items.firstIndex(where: { $0.id == currentRunningItemId }) {
+            runningItemIndex = stableIndex
+        } else if runningItemIndex >= items.count {
+            runningItemIndex = 0
+        }
     }
 
     private func shouldHoldLastRunningSessions(since seenAt: Date) -> Bool {

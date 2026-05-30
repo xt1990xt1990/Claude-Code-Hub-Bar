@@ -205,7 +205,7 @@ final class MonitorState: ObservableObject {
     }
 
     var menuBarText: String {
-        "TTL \(formatMoney(overview.todayCost))"
+        "TTL \(formatStatusBarMoney(overview.todayCost))"
     }
 
     var menuBarIdleDetail: String {
@@ -1235,6 +1235,11 @@ private func menuBarActivityScore(_ session: CCHActiveSession) -> Int {
 func formatMoney(_ value: Double) -> String {
     let parts = moneyDisplayParts(value)
     return parts.major + (parts.minor ?? "")
+}
+
+func formatStatusBarMoney(_ value: Double) -> String {
+    guard value.isFinite else { return "$0.000" }
+    return String(format: "$%.3f", value)
 }
 
 func moneyParts(_ value: Double) -> (major: String, minor: String?) {

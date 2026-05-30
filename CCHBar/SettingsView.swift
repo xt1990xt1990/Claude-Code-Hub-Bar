@@ -335,7 +335,7 @@ struct SettingsView: View {
         SettingsCard(
             icon: "info.circle.fill",
             title: "关于",
-            subtitle: "版权、许可证和项目致谢。",
+            subtitle: "Claude Code Hub 的轻量菜单栏看板。",
             accent: theme.accentMint
         ) {
             VStack(alignment: .leading, spacing: 8) {
@@ -345,11 +345,12 @@ struct SettingsView: View {
                     Spacer()
                 }
 
-                Text("Copyright (c) 2026 xt1990xt1990")
+                Text("用于快速查看 Claude Code Hub 的运行中请求、最近日志、排行和渠道状态，并提供轻量入口打开主项目页面。")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                Text("如果复制、分发、修改或基于本项目进行二次开发，请保留原始版权声明、MIT 许可证文本和 NOTICE 中的署名与致谢信息。")
+                Text("Copyright (c) 2026 xt1990xt1990。复制、分发、修改或二次开发时，请保留原始版权声明、MIT 许可证文本和 NOTICE 中的署名信息。")
                     .font(.caption)
                     .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -366,7 +367,7 @@ struct SettingsView: View {
                 SettingsLinkRow(
                     icon: "server.rack",
                     title: "Claude Code Hub",
-                    subtitle: "本客户端适配的主项目",
+                    subtitle: "打开主项目",
                     url: URL(string: "https://github.com/ding113/claude-code-hub")!,
                     accent: theme.accentBlue
                 )

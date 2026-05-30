@@ -37,7 +37,7 @@ xcodebuild -project CCHBar.xcodeproj -scheme CCHBar -configuration Release build
 
 ## Credits
 
-- Respect and thanks to the authors of [Claude Code Hub](https://github.com/ding113/claude-code-hub).
+- Respect and thanks to `ding113`, author of [Claude Code Hub](https://github.com/ding113/claude-code-hub).
 - Thanks to `mbot6183` for Codex-related support.
 - Model icons are provided by [LobeHub Icons](https://github.com/lobehub/lobe-icons).
 
