@@ -25,6 +25,7 @@ struct SettingsView: View {
                     appearanceCard
                     updateCard
                     systemCard
+                    aboutCard
                 }
                 .padding(18)
             }
@@ -326,6 +327,56 @@ struct SettingsView: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private var aboutCard: some View {
+        SettingsCard(
+            icon: "info.circle.fill",
+            title: "关于",
+            subtitle: "版权、许可证和项目致谢。",
+            accent: theme.accentMint
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    SettingsInfoPill(icon: "app.badge", title: "版本", value: "v\(state.appVersion)")
+                    SettingsInfoPill(icon: "doc.text", title: "许可证", value: "MIT")
+                    Spacer()
+                }
+
+                Text("Copyright (c) 2026 xt1990xt1990")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.textPrimary)
+
+                Text("如果复制、分发、修改或基于本项目进行二次开发，请保留原始版权声明、MIT 许可证文本和 NOTICE 中的署名与致谢信息。")
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                SettingsLinkRow(
+                    icon: "shippingbox.fill",
+                    title: "Claude Code Hub Bar",
+                    subtitle: "原项目与 MIT 署名说明",
+                    url: URL(string: "https://github.com/xt1990xt1990/Claude-Code-Hub-Bar")!,
+                    accent: theme.accentMint
+                )
+                SettingsLinkRow(
+                    icon: "server.rack",
+                    title: "Claude Code Hub",
+                    subtitle: "本客户端适配的主项目",
+                    url: URL(string: "https://github.com/ding113/claude-code-hub")!,
+                    accent: theme.accentBlue
+                )
+                SettingsLinkRow(
+                    icon: "sparkles",
+                    title: "LobeHub Icons",
+                    subtitle: "模型图标来源",
+                    url: URL(string: "https://github.com/lobehub/lobe-icons")!,
+                    accent: theme.accentPurple
+                )
             }
         }
     }
@@ -662,6 +713,54 @@ private struct SettingsInfoPill: View {
         .padding(.vertical, 5)
         .cchSurface(.control)
         .clipShape(Capsule())
+    }
+}
+
+private struct SettingsLinkRow: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let url: URL
+    let accent: Color
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        Button {
+            NSWorkspace.shared.open(url)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(accent)
+                    .frame(width: 24, height: 24)
+                    .background(accent.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.textPrimary)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "arrow.up.forward")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(theme.textTertiary)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .cchSurface(.control)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(theme.borderSubtle, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 
