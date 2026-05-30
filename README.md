@@ -52,3 +52,7 @@ xcodebuild -project CCHBar.xcodeproj -scheme CCHBar -configuration Release build
 ## 许可证
 
 MIT
+
+Copyright (c) 2026 xt1990xt1990
+
+如果你复制、分发、修改或基于本项目进行二次开发，请保留原始版权声明、MIT 许可证文本和 [NOTICE](./NOTICE) 中的署名与致谢信息。

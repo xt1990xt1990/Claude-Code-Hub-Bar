@@ -44,3 +44,9 @@ xcodebuild -project CCHBar.xcodeproj -scheme CCHBar -configuration Release build
 ## License
 
 MIT
+
+Copyright (c) 2026 xt1990xt1990
+
+If you copy, distribute, modify, fork, or build upon this project, please retain
+the original copyright notice, the MIT License text, and the attribution and
+acknowledgement information in [NOTICE](./NOTICE).
