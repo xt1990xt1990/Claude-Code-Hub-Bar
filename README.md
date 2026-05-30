@@ -25,6 +25,14 @@
 - 渠道页支持分组筛选、启用/停用、测速、熔断重置。
 - 支持开机启动。
 
+## 演示
+
+- 状态栏 空闲-请求中
+<img width="284" height="62" alt="Kapture 2026-05-30 at 14 17 56" src="https://github.com/user-attachments/assets/8e3baef7-782a-4caa-b8cf-5d7fe572f653" />
+
+- 抽屉部分功能演示
+<img width="1524" height="1328" alt="Kapture 2026-05-30 at 14 23 09" src="https://github.com/user-attachments/assets/8f198750-2728-492f-baa1-acfe7caca03b" />
+
 ## 构建
 
 ```bash
