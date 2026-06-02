@@ -45,8 +45,9 @@ final class CCHStatusBarView: NSView {
     private let iconCenter = NSPoint(x: 7.0, y: 11)
     private let textLeading: CGFloat = 18
     private let primaryClipView = NSView()
-    private let primaryLabel = NSTextField(labelWithString: "")
-    private let marqueeCloneLabel = NSTextField(labelWithString: "")
+    private let primaryTextLayer = CATextLayer()
+    private var primaryTextFont = NSFont.systemFont(ofSize: 8.8, weight: .semibold)
+    private var primaryTextColor = NSColor.labelColor
     private let detailLabel = NSTextField(labelWithString: "")
     private let countLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")
@@ -166,7 +167,23 @@ final class CCHStatusBarView: NSView {
         primaryClipView.layer?.masksToBounds = true
         addSubview(primaryClipView)
 
-        for label in [primaryLabel, marqueeCloneLabel, detailLabel, countLabel, elapsedLabel] {
+        primaryTextLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        primaryTextLayer.backgroundColor = NSColor.clear.cgColor
+        primaryTextLayer.alignmentMode = .left
+        primaryTextLayer.truncationMode = .none
+        primaryTextLayer.isWrapped = false
+        primaryTextLayer.masksToBounds = false
+        primaryTextLayer.frame = CGRect(x: 0, y: 0, width: 98, height: 11)
+        primaryTextLayer.actions = [
+            "bounds": NSNull(),
+            "contents": NSNull(),
+            "frame": NSNull(),
+            "position": NSNull(),
+            "transform": NSNull()
+        ]
+        primaryClipView.layer?.addSublayer(primaryTextLayer)
+
+        for label in [detailLabel, countLabel, elapsedLabel] {
             label.wantsLayer = true
             label.isBezeled = false
             label.drawsBackground = false
@@ -174,16 +191,16 @@ final class CCHStatusBarView: NSView {
             label.isSelectable = false
             label.lineBreakMode = .byClipping
             label.maximumNumberOfLines = 1
+            if let cell = label.cell as? NSTextFieldCell {
+                cell.usesSingleLineMode = true
+                cell.wraps = false
+                cell.lineBreakMode = .byClipping
+            }
         }
-        primaryClipView.addSubview(primaryLabel)
-        primaryClipView.addSubview(marqueeCloneLabel)
         for label in [detailLabel, countLabel, elapsedLabel] {
             addSubview(label)
         }
         primaryClipView.frame = NSRect(x: textLeading, y: 0, width: 98, height: 11)
-        primaryLabel.frame = NSRect(x: 0, y: 0, width: 98, height: 11)
-        marqueeCloneLabel.frame = NSRect(x: 0, y: 0, width: 98, height: 11)
-        marqueeCloneLabel.isHidden = true
         detailLabel.frame = NSRect(x: textLeading, y: 10, width: 106, height: 11)
         countLabel.frame = NSRect(x: 104, y: 1.0, width: 18, height: 13)
         elapsedLabel.frame = NSRect(x: 119, y: 1.2, width: 42, height: 14)
@@ -202,12 +219,9 @@ final class CCHStatusBarView: NSView {
     private func updateLabels() {
         switch payload {
         case .idle(let primary, let detail, let cacheState):
+            primaryTextFont = NSFont.systemFont(ofSize: 8.8, weight: .semibold)
+            primaryTextColor = .labelColor
             setPrimaryText(primary, shouldMarquee: false)
-            primaryLabel.font = NSFont.systemFont(ofSize: 8.8, weight: .semibold)
-            primaryLabel.textColor = .labelColor
-            marqueeCloneLabel.font = primaryLabel.font
-            marqueeCloneLabel.textColor = primaryLabel.textColor
-            marqueeCloneLabel.isHidden = true
 
             detailLabel.stringValue = detail
             detailLabel.font = NSFont.monospacedSystemFont(ofSize: 8, weight: .medium)
@@ -218,11 +232,9 @@ final class CCHStatusBarView: NSView {
             updateCacheIndicator(state: cacheState, isRunning: false)
         case .running(let provider, let detail, let elapsed, let isRetrying, let sessionCount, let cacheState):
             let accent = isRetrying ? NSColor.systemOrange : NSColor.systemBlue
+            primaryTextFont = NSFont.systemFont(ofSize: 8.5, weight: .semibold)
+            primaryTextColor = .labelColor
             setPrimaryText(provider, shouldMarquee: true)
-            primaryLabel.font = NSFont.systemFont(ofSize: 8.5, weight: .semibold)
-            primaryLabel.textColor = .labelColor
-            marqueeCloneLabel.font = primaryLabel.font
-            marqueeCloneLabel.textColor = primaryLabel.textColor
 
             detailLabel.stringValue = detail
             detailLabel.font = NSFont.monospacedSystemFont(ofSize: 8, weight: .medium)
@@ -249,45 +261,71 @@ final class CCHStatusBarView: NSView {
             marqueeText = nextText
             marqueeStartTime = CACurrentMediaTime()
             lastMarqueeConfiguration = nil
-            primaryLabel.layer?.removeAnimation(forKey: "marquee")
-            primaryLabel.frame.origin.x = 0
-            primaryLabel.layer?.transform = CATransform3DIdentity
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            primaryTextLayer.removeAnimation(forKey: "marquee")
+            primaryTextLayer.transform = CATransform3DIdentity
+            primaryTextLayer.frame.origin.x = 0
+            CATransaction.commit()
         }
-        primaryLabel.stringValue = nextText
-        marqueeCloneLabel.stringValue = nextText
         if shouldMarqueePrimaryText != shouldMarquee {
             shouldMarqueePrimaryText = shouldMarquee
             lastMarqueeConfiguration = nil
         }
-        marqueeCloneLabel.isHidden = true
+        updatePrimaryTextLayer()
         needsLayout = true
     }
 
     private func layoutPrimaryText(textWidth: CGFloat) {
-        let primarySize = primaryLabel.intrinsicContentSize.width
+        let primarySize = measuredPrimaryTextWidth()
         let shouldMarquee = shouldMarqueePrimaryText && primarySize > textWidth + 2
         guard shouldMarquee else {
-            primaryLabel.layer?.removeAnimation(forKey: "marquee")
+            primaryTextLayer.removeAnimation(forKey: "marquee")
             lastMarqueeConfiguration = nil
-            primaryLabel.frame = NSRect(x: 0, y: 0, width: textWidth, height: 11)
-            marqueeCloneLabel.isHidden = true
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            primaryTextLayer.transform = CATransform3DIdentity
+            primaryTextLayer.frame = CGRect(x: 0, y: 0, width: textWidth, height: 11)
+            CATransaction.commit()
+            updatePrimaryTextLayer()
             return
         }
 
-        marqueeCloneLabel.isHidden = true
         let textRunWidth = ceil(primarySize)
-        primaryLabel.frame = NSRect(x: 0, y: 0, width: textRunWidth, height: 11)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        primaryTextLayer.frame = CGRect(x: 0, y: 0, width: textRunWidth, height: 11)
+        CATransaction.commit()
+        updatePrimaryTextLayer()
         let nextConfiguration = (text: marqueeText, textWidth: textWidth, textRunWidth: textRunWidth)
         if let lastMarqueeConfiguration,
            lastMarqueeConfiguration.text == nextConfiguration.text,
            abs(lastMarqueeConfiguration.textWidth - nextConfiguration.textWidth) < 0.5,
            abs(lastMarqueeConfiguration.textRunWidth - nextConfiguration.textRunWidth) < 0.5,
-           primaryLabel.layer?.animation(forKey: "marquee") != nil {
+           primaryTextLayer.animation(forKey: "marquee") != nil {
             return
         }
-        primaryLabel.layer?.removeAnimation(forKey: "marquee")
+        primaryTextLayer.removeAnimation(forKey: "marquee")
         lastMarqueeConfiguration = nextConfiguration
         applyMarqueeAnimation(textWidth: textWidth, textRunWidth: textRunWidth)
+    }
+
+    private func measuredPrimaryTextWidth() -> CGFloat {
+        let measured = (marqueeText as NSString).size(withAttributes: [.font: primaryTextFont]).width
+        return ceil(measured) + 2
+    }
+
+    private func updatePrimaryTextLayer() {
+        primaryTextLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        primaryTextLayer.foregroundColor = primaryTextColor.cgColor
+        primaryTextLayer.fontSize = primaryTextFont.pointSize
+        primaryTextLayer.string = NSAttributedString(
+            string: marqueeText,
+            attributes: [
+                .font: primaryTextFont,
+                .foregroundColor: primaryTextColor
+            ]
+        )
     }
 
     private func updateCacheIndicator(state: CCHCacheVisibilityState, isRunning: Bool) {
@@ -449,7 +487,7 @@ final class CCHStatusBarView: NSView {
             CAMediaTimingFunction(name: .linear),
             CAMediaTimingFunction(name: .easeInEaseOut)
         ]
-        primaryLabel.layer?.add(animation, forKey: "marquee")
+        primaryTextLayer.add(animation, forKey: "marquee")
     }
 
     private func beginIdleTransition() {
