@@ -300,6 +300,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private func closePopoverLightly() {
         guard popover.isShown, !isClosingPopover else { return }
         isClosingPopover = true
+        stopOutsideClickMonitor()
 
         guard let window = popover.contentViewController?.view.window else {
             popover.performClose(nil)
@@ -343,11 +344,14 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
+        let wasClosingPopover = isClosingPopover
         isClosingPopover = false
-        popover.contentViewController?.view.window?.alphaValue = 1
-        popover.contentViewController?.view.alphaValue = 1
         stopOutsideClickMonitor()
         state.setPanelVisible(false)
+        if !wasClosingPopover {
+            popover.contentViewController?.view.window?.alphaValue = 1
+            popover.contentViewController?.view.alphaValue = 1
+        }
         popover.contentViewController = nil
     }
 }

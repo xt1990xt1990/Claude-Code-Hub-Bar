@@ -132,6 +132,9 @@ final class MonitorState: ObservableObject {
     @Published private(set) var assignableProviderGroups: [CCHProviderGroup] = []
     @Published private var providerGroupAssignmentOverrides: [Int: Set<String>] = [:]
     @Published private(set) var highlightedLogIds: Set<Int> = []
+    @Published private(set) var modelTestingProviderIds: Set<Int> = []
+    @Published private(set) var providerModelTestResults: [Int: CCHProviderModelTestResult] = [:]
+    @Published private(set) var providerMultiplierUpdatingIds: Set<Int> = []
 
     @Published var lastRefresh: Date?
     @Published var isLoading = false
@@ -637,6 +640,88 @@ final class MonitorState: ObservableObject {
             _ = await loadProviders()
         } catch {
             flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+        }
+    }
+
+    func isProviderModelTesting(_ provider: CCHProvider) -> Bool {
+        modelTestingProviderIds.contains(provider.id)
+    }
+
+    func providerModelTestResult(for provider: CCHProvider) -> CCHProviderModelTestResult? {
+        providerModelTestResults[provider.id]
+    }
+
+    func isProviderMultiplierUpdating(_ provider: CCHProvider) -> Bool {
+        providerMultiplierUpdatingIds.contains(provider.id)
+    }
+
+    func updateProviderMultiplier(_ provider: CCHProvider, multiplier: Double) async {
+        guard multiplier >= 0 else {
+            flashActionMessage("倍率不能为负数", duration: 4, isWarning: true)
+            return
+        }
+        if providerMultiplierUpdatingIds.contains(provider.id) {
+            return
+        }
+
+        let normalized = (multiplier * 10_000).rounded() / 10_000
+        actionMessageDismissTask?.cancel()
+        actionMessage = "更新倍率 \(provider.name): \(formatMultiplier(normalized))..."
+        actionMessageIsWarning = false
+        providerMultiplierUpdatingIds.insert(provider.id)
+        defer {
+            providerMultiplierUpdatingIds.remove(provider.id)
+        }
+
+        do {
+            try await api.setProviderMultiplier(config: config, providerId: provider.id, multiplier: normalized)
+            flashActionMessage("倍率已更新 \(provider.name): \(formatMultiplier(normalized))")
+            _ = await loadProviders()
+        } catch {
+            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+        }
+    }
+
+    func testProviderModel(_ provider: CCHProvider, model: String? = nil) async {
+        if modelTestingProviderIds.contains(provider.id) {
+            return
+        }
+        let requestedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        actionMessageDismissTask?.cancel()
+        actionMessage = "模型测试 \(provider.name): \(requestedModel?.isEmpty == false ? requestedModel! : provider.testModel)..."
+        actionMessageIsWarning = false
+        providerModelTestResults[provider.id] = nil
+        modelTestingProviderIds.insert(provider.id)
+        defer {
+            modelTestingProviderIds.remove(provider.id)
+        }
+
+        do {
+            let result = try await api.testProviderModel(config: config, provider: provider, model: requestedModel)
+            let latency = result.latencyMs.map(formatProbeLatency) ?? "-"
+            let displayModel = result.model.isEmpty ? (requestedModel?.isEmpty == false ? requestedModel! : provider.testModel) : result.model
+            let status = result.status.lowercased()
+            providerModelTestResults[provider.id] = result
+            if result.success || status == "green" {
+                flashActionMessage("模型测试 \(provider.name): 可用 \(latency) · \(displayModel)")
+            } else if status == "yellow" {
+                flashActionMessage("模型测试 \(provider.name): 波动 \(latency) · \(displayModel)", duration: 5, isWarning: true)
+            } else {
+                let detail = result.errorMessage.isEmpty ? result.message : result.errorMessage
+                flashActionMessage("模型测试 \(provider.name): \(detail)", duration: 6, isWarning: true)
+            }
+            _ = await loadProviders()
+        } catch {
+            providerModelTestResults[provider.id] = CCHProviderModelTestResult(
+                success: false,
+                status: "red",
+                message: "模型测试失败",
+                latencyMs: nil,
+                model: requestedModel?.isEmpty == false ? requestedModel! : provider.testModel,
+                httpStatusCode: nil,
+                errorMessage: error.localizedDescription
+            )
+            flashActionMessage(error.localizedDescription, duration: 6, isWarning: true)
         }
     }
 

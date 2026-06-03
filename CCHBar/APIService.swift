@@ -209,6 +209,11 @@ struct CCHProvider: Identifiable {
     let allowedModels: String
     let allowedClients: String
     let modelRedirects: String
+    let testModel: String
+    let testModelOptions: [String]
+    let proxyURL: String
+    let proxyFallbackToDirect: Bool
+    let customHeaders: [String: String]?
     let limitText: String
     let health: CCHProviderHealth
 }
@@ -237,6 +242,16 @@ struct CCHProbeResult {
     let method: String
     let statusCode: Int?
     let latencyMs: Double?
+    let errorMessage: String
+}
+
+struct CCHProviderModelTestResult {
+    let success: Bool
+    let status: String
+    let message: String
+    let latencyMs: Double?
+    let model: String
+    let httpStatusCode: Int?
     let errorMessage: String
 }
 
@@ -484,6 +499,7 @@ actor APIService {
         return rows.map { row in
             let id = intValue(row["id"])
             let name = stringValue(row["name"], fallback: "Provider")
+            let providerType = stringValue(row["providerType"])
             let usage = usageById["provider-\(id)"] ?? usageByName[name.lowercased()]
             let healthDict = healthMap[String(id)] as? [String: Any] ?? [:]
             let health = CCHProviderHealth(
@@ -497,7 +513,7 @@ actor APIService {
             return CCHProvider(
                 id: id,
                 name: name,
-                providerType: stringValue(row["providerType"]),
+                providerType: providerType,
                 vendorId: firstOptionalInt(row, keys: ["providerVendorId", "vendorId"]),
                 apiURL: firstStringValue(row, keys: ["url", "endpointUrl", "apiUrl", "apiURL"]),
                 websiteURL: firstStringValue(row, keys: ["websiteUrl", "websiteURL", "homepageUrl", "homepageURL"]),
@@ -513,6 +529,11 @@ actor APIService {
                 allowedModels: compactArrayDescription(row["allowedModels"]),
                 allowedClients: compactArrayDescription(row["allowedClients"]),
                 modelRedirects: compactArrayDescription(row["modelRedirects"]),
+                testModel: preferredProviderTestModel(row, providerType: providerType),
+                testModelOptions: providerTestModelOptions(row, providerType: providerType),
+                proxyURL: firstStringValue(row, keys: ["proxyUrl", "proxy_url"]),
+                proxyFallbackToDirect: boolValue(row["proxyFallbackToDirect"] ?? row["proxy_fallback_to_direct"]),
+                customHeaders: providerCustomHeaders(row),
                 limitText: buildLimitText(row),
                 health: health
             )
@@ -549,6 +570,29 @@ actor APIService {
         }
     }
 
+    func setProviderMultiplier(config: CCHConfig, providerId: Int, multiplier: Double) async throws {
+        do {
+            _ = try await patchV1(
+                config: config,
+                path: "/api/v1/providers/\(providerId)",
+                body: ["cost_multiplier": multiplier]
+            )
+        } catch APIError.httpError(let code) where code == 400 || code == 422 {
+            _ = try await patchV1(
+                config: config,
+                path: "/api/v1/providers/\(providerId)",
+                body: ["costMultiplier": multiplier]
+            )
+        } catch where shouldFallbackToActions(error) {
+            _ = try await postAction(
+                config: config,
+                module: "providers",
+                action: "editProvider",
+                body: ["providerId": providerId, "costMultiplier": multiplier]
+            )
+        }
+    }
+
     func resetProviderCircuit(config: CCHConfig, providerId: Int) async throws {
         do {
             _ = try await postV1(config: config, path: "/api/v1/providers/\(providerId)/circuit:reset", body: [:])
@@ -560,6 +604,52 @@ actor APIService {
                 body: ["providerId": providerId]
             )
         }
+    }
+
+    func testProviderModel(config: CCHConfig, provider: CCHProvider, model: String? = nil) async throws -> CCHProviderModelTestResult {
+        guard let providerURL = normalizedProviderTestURL(provider.apiURL) else {
+            throw APIError.actionError("渠道地址无效，无法进行模型测试")
+        }
+
+        let apiKey = try await revealProviderKey(config: config, providerId: provider.id)
+        let providerType = normalizedProviderType(provider.providerType)
+        let isGemini = providerType == "gemini" || providerType == "gemini-cli"
+        let testModel = normalizedTestModel(model) ?? provider.testModel
+
+        var body: [String: Any] = [
+            "providerUrl": providerURL,
+            "apiKey": apiKey,
+            "model": testModel,
+            "timeoutMs": providerModelTestTimeoutMs(providerType)
+        ]
+
+        let proxyURL = provider.proxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !proxyURL.isEmpty {
+            body["proxyUrl"] = proxyURL
+            body["proxyFallbackToDirect"] = provider.proxyFallbackToDirect
+        }
+
+        let path: String
+        if isGemini {
+            path = "/api/v1/providers/test:gemini"
+        } else {
+            path = "/api/v1/providers/test:unified"
+            body["providerType"] = providerType
+            if let customHeaders = provider.customHeaders, !customHeaders.isEmpty {
+                body["customHeaders"] = customHeaders
+            }
+        }
+
+        let data = try await postV1(config: config, path: path, body: body)
+        return parseProviderModelTestResult(data)
+    }
+
+    private func revealProviderKey(config: CCHConfig, providerId: Int) async throws -> String {
+        let data = try await getV1(config: config, path: "/api/v1/providers/\(providerId)/key:reveal")
+        guard let dict = data as? [String: Any] else { throw APIError.parseError }
+        let key = stringValue(dict["key"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw APIError.actionError("渠道 API Key 为空") }
+        return key
     }
 
     func probeFirstEndpoint(config: CCHConfig, provider: CCHProvider) async throws -> CCHProbeResult {
@@ -899,6 +989,7 @@ actor APIService {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(token, forHTTPHeaderField: "X-Api-Key")
+        request.setValue("1", forHTTPHeaderField: "X-CCH-Dashboard-Compat")
         request.setValue("auth-token=\(token)", forHTTPHeaderField: "Cookie")
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1035,6 +1126,30 @@ private func firstStringValue(_ row: [String: Any], keys: [String], fallback: St
     return fallback
 }
 
+private func stringDictionary(_ value: Any?) -> [String: String]? {
+    if let dict = value as? [String: String] {
+        return dict
+    }
+    guard let dict = value as? [String: Any] else { return nil }
+    let mapped = dict.reduce(into: [String: String]()) { partial, item in
+        let key = item.key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = stringValue(item.value).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !value.isEmpty else { return }
+        partial[key] = value
+    }
+    return mapped.isEmpty ? nil : mapped
+}
+
+private func providerCustomHeaders(_ row: [String: Any]) -> [String: String]? {
+    guard let headers = stringDictionary(row["customHeaders"] ?? row["custom_headers"]) else {
+        return nil
+    }
+    let filtered = headers.filter { _, value in
+        !value.contains("[REDACTED]")
+    }
+    return filtered.isEmpty ? nil : filtered
+}
+
 private func intValue(_ value: Any?, fallback: Int = 0) -> Int {
     switch value {
     case let n as Int: return n
@@ -1072,6 +1187,34 @@ private func firstOptionalDouble(_ row: [String: Any], keys: [String]) -> Double
         }
     }
     return nil
+}
+
+private func parseProviderModelTestResult(_ value: Any) -> CCHProviderModelTestResult {
+    let dict = value as? [String: Any] ?? [:]
+    let details = dict["details"] as? [String: Any] ?? [:]
+    let validation = dict["validationDetails"] as? [String: Any] ?? [:]
+    let success = boolValue(dict["success"])
+    let status = stringValue(dict["status"], fallback: success ? "green" : "red")
+    let message = stringValue(dict["message"], fallback: success ? "模型测试成功" : "模型测试失败")
+    let latencyMs = firstOptionalDouble(dict, keys: ["latencyMs", "responseTime"])
+        ?? firstOptionalDouble(details, keys: ["responseTime", "latencyMs"])
+    let model = firstStringValue(dict, keys: ["model"], fallback: firstStringValue(details, keys: ["model"]))
+    let httpStatusCode = firstOptionalInt(dict, keys: ["httpStatusCode", "statusCode"])
+        ?? firstOptionalInt(validation, keys: ["httpStatusCode", "statusCode"])
+    let errorMessage = firstStringValue(
+        dict,
+        keys: ["errorMessage", "error"],
+        fallback: firstStringValue(details, keys: ["error"])
+    )
+    return CCHProviderModelTestResult(
+        success: success,
+        status: status,
+        message: message,
+        latencyMs: latencyMs,
+        model: model,
+        httpStatusCode: httpStatusCode,
+        errorMessage: errorMessage
+    )
 }
 
 private func doubleValue(_ value: Any?, fallback: Double = 0) -> Double {
@@ -1557,6 +1700,98 @@ private func compactArrayDescription(_ value: Any?) -> String {
         return rows.isEmpty ? "none" : "\(rows.count) items"
     }
     return "none"
+}
+
+private func preferredProviderTestModel(_ row: [String: Any], providerType: String) -> String {
+    providerTestModelOptions(row, providerType: providerType).first ?? defaultProviderTestModel(providerType)
+}
+
+private func providerTestModelOptions(_ row: [String: Any], providerType: String) -> [String] {
+    var values = allowedExactModels(row["allowedModels"] ?? row["allowed_models"])
+    let lastCallModel = stringValue(row["lastCallModel"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    if !lastCallModel.isEmpty {
+        values.append(lastCallModel)
+    }
+    values.append(defaultProviderTestModel(providerType))
+    return uniqueTrimmedStrings(values)
+}
+
+private func allowedExactModels(_ value: Any?) -> [String] {
+    if let strings = value as? [String] {
+        return uniqueTrimmedStrings(strings)
+    }
+    if let rows = value as? [[String: Any]] {
+        var values: [String] = []
+        for row in rows {
+            let matchType = stringValue(row["matchType"] ?? row["match_type"]).lowercased()
+            guard matchType.isEmpty || matchType == "exact" else { continue }
+            let model = firstStringValue(row, keys: ["pattern", "model", "name", "value"])
+            if !model.isEmpty {
+                values.append(model)
+            }
+        }
+        return uniqueTrimmedStrings(values)
+    }
+    let raw = stringValue(value).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !raw.isEmpty, raw != "all", raw != "none" else { return [] }
+    return [raw]
+}
+
+private func uniqueTrimmedStrings(_ values: [String]) -> [String] {
+    var seen = Set<String>()
+    var result: [String] = []
+    for value in values {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { continue }
+        let key = trimmed.lowercased()
+        guard !seen.contains(key) else { continue }
+        seen.insert(key)
+        result.append(trimmed)
+    }
+    return result
+}
+
+private func defaultProviderTestModel(_ providerType: String) -> String {
+    switch normalizedProviderType(providerType) {
+    case "codex":
+        return "gpt-5.5"
+    case "openai-compatible":
+        return "gpt-4.1-mini"
+    case "gemini", "gemini-cli":
+        return "gemini-2.5-flash"
+    default:
+        return "claude-haiku-4-5-20251001"
+    }
+}
+
+private func normalizedProviderType(_ providerType: String) -> String {
+    let normalized = providerType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty ? "claude" : normalized
+}
+
+private func providerModelTestTimeoutMs(_ providerType: String) -> Int {
+    let normalized = normalizedProviderType(providerType)
+    return normalized == "gemini" || normalized == "gemini-cli" ? 60_000 : 15_000
+}
+
+private func normalizedTestModel(_ model: String?) -> String? {
+    guard let model else { return nil }
+    let normalized = model.trimmingCharacters(in: .whitespacesAndNewlines)
+    return normalized.isEmpty ? nil : normalized
+}
+
+private func normalizedProviderTestURL(_ value: String) -> String? {
+    let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !raw.isEmpty else { return nil }
+    let normalized = raw.hasPrefix("http://") || raw.hasPrefix("https://") ? raw : "https://\(raw)"
+    guard let url = URL(string: normalized),
+          let scheme = url.scheme?.lowercased(),
+          ["http", "https"].contains(scheme),
+          url.host != nil
+    else {
+        return nil
+    }
+    return url.absoluteString
 }
 
 private func buildLimitText(_ row: [String: Any]) -> String {

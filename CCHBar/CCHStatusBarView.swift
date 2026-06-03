@@ -4,7 +4,7 @@ import QuartzCore
 final class CCHStatusBarView: NSView {
     private enum Metrics {
         static let collapsedWidth: CGFloat = 92
-        static let expandedWidth: CGFloat = 116
+        static let expandedWidth: CGFloat = 124
     }
 
     static func fixedWidth(showDetails: Bool) -> CGFloat {
@@ -85,22 +85,26 @@ final class CCHStatusBarView: NSView {
         let shouldShowElapsed = isRunning && showsDetails
         let shouldShowCount = isRunning && sessionCount > 1
         let elapsedWidth: CGFloat = shouldShowElapsed ? 27 : 0
-        let countWidth: CGFloat = shouldShowCount ? 17 : 0
+        let countWidth: CGFloat = shouldShowCount ? 13 : 0
+        let countElapsedGap: CGFloat = shouldShowElapsed && shouldShowCount ? 3 : 0
+        let countPrimaryGap: CGFloat = shouldShowCount ? 3 : 0
         let rightPadding: CGFloat = showsDetails ? 0 : 1
-        let rightReserve = elapsedWidth + countWidth + (shouldShowElapsed && shouldShowCount ? 2 : 0) + rightPadding
-        let textWidth = max(34, width - textLeading - rightReserve)
+        let primaryRightReserve = elapsedWidth + countWidth + countElapsedGap + countPrimaryGap + rightPadding
+        let detailRightReserve = elapsedWidth + rightPadding
+        let primaryTextWidth = max(34, width - textLeading - primaryRightReserve)
+        let detailTextWidth = max(34, width - textLeading - detailRightReserve)
 
-        primaryClipView.frame = NSRect(x: textLeading, y: 0, width: textWidth, height: 11)
-        layoutPrimaryText(textWidth: textWidth)
-        detailLabel.frame = NSRect(x: textLeading, y: 10, width: textWidth, height: 11)
+        primaryClipView.frame = NSRect(x: textLeading, y: 0, width: primaryTextWidth, height: 11)
+        layoutPrimaryText(textWidth: primaryTextWidth)
+        detailLabel.frame = NSRect(x: textLeading, y: 10, width: detailTextWidth, height: 11)
 
         let elapsedX = width - elapsedWidth - rightPadding
         elapsedLabel.frame = NSRect(x: elapsedX, y: 0.8, width: elapsedWidth, height: 14)
         elapsedLabel.alignment = .center
 
-        let countX = shouldShowElapsed ? elapsedX - countWidth - 2 : width - countWidth - rightPadding
-        countLabel.frame = NSRect(x: countX, y: 1.0, width: countWidth, height: 13)
-        countLabel.alignment = .right
+        let countX = shouldShowElapsed ? elapsedX - countWidth - countElapsedGap : width - countWidth - rightPadding
+        countLabel.frame = NSRect(x: countX, y: 0.0, width: countWidth, height: 10)
+        countLabel.alignment = .center
 
         let detailCenterX = shouldShowElapsed ? elapsedLabel.frame.midX : width - rightPadding - 14
         cacheIndicatorLayer.frame = CGRect(
@@ -246,7 +250,7 @@ final class CCHStatusBarView: NSView {
             elapsedLabel.isHidden = !showsDetails
 
             countLabel.stringValue = "×\(sessionCount)"
-            countLabel.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .bold)
+            countLabel.font = NSFont.monospacedSystemFont(ofSize: 8, weight: .bold)
             countLabel.textColor = accent
             countLabel.isHidden = sessionCount <= 1
 
