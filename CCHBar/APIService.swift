@@ -255,6 +255,12 @@ struct CCHProviderModelTestResult {
     let errorMessage: String
 }
 
+struct CCHProviderModelTestProgress {
+    let completed: Int
+    let total: Int
+    let currentModel: String
+}
+
 struct CCHGitHubRelease {
     let tag: String
     let name: String

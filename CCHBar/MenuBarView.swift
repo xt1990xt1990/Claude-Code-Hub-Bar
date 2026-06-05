@@ -1247,8 +1247,20 @@ private struct ProvidersTabView: View {
                             testModel: { model in
                                 Task { await state.testProviderModel(provider, model: model) }
                             },
+                            testModels: { models in
+                                Task { await state.testProviderModels(provider, models: models) }
+                            },
                             isModelTesting: state.isProviderModelTesting(provider),
                             modelTestResult: state.providerModelTestResult(for: provider),
+                            modelTestResultsByModel: state.providerModelTestResults(for: provider),
+                            modelTestProgress: state.providerModelTestProgress(for: provider),
+                            customTestModels: state.customTestModels(for: provider),
+                            addCustomTestModel: { model in
+                                state.addCustomTestModel(model, for: provider)
+                            },
+                            removeCustomTestModel: { model in
+                                state.removeCustomTestModel(model, for: provider)
+                            },
                             resetCircuit: {
                                 Task { await state.resetCircuit(provider) }
                             }
@@ -2266,14 +2278,25 @@ private struct ProviderRow: View {
     let isMultiplierUpdating: Bool
     let probe: () -> Void
     let testModel: (String) -> Void
+    let testModels: ([String]) -> Void
     let isModelTesting: Bool
     let modelTestResult: CCHProviderModelTestResult?
+    let modelTestResultsByModel: [String: CCHProviderModelTestResult]
+    let modelTestProgress: CCHProviderModelTestProgress?
+    let customTestModels: [String]
+    let addCustomTestModel: (String) -> Void
+    let removeCustomTestModel: (String) -> Void
     let resetCircuit: () -> Void
-    @State private var modelTestPopoverPresented = false
     @State private var modelTestInput = ""
-    @State private var multiplierPopoverPresented = false
     @State private var multiplierInput = ""
+    @State private var renderedEditor: ProviderEditor?
+    @State private var editorRevealHeight: CGFloat = 0
     @Environment(\.cchTheme) private var theme
+
+    private enum ProviderEditor: Equatable {
+        case multiplier
+        case modelTest
+    }
 
     var healthColor: Color {
         if provider.health.circuitState.lowercased() == "open" { return theme.accentRed }
@@ -2315,7 +2338,7 @@ private struct ProviderRow: View {
                             ProviderTag("权重 \(provider.weight)", color: theme.textSecondary)
                             Button {
                                 multiplierInput = multiplierInputString(provider.costMultiplier)
-                                multiplierPopoverPresented = true
+                                toggleEditor(.multiplier)
                             } label: {
                                 Group {
                                     if isMultiplierUpdating {
@@ -2330,16 +2353,6 @@ private struct ProviderRow: View {
                             .buttonStyle(.plain)
                             .disabled(isMultiplierUpdating)
                             .help("编辑倍率")
-                            .popover(isPresented: $multiplierPopoverPresented, arrowEdge: .bottom) {
-                                ProviderMultiplierPopover(
-                                    provider: provider,
-                                    multiplier: $multiplierInput,
-                                    isUpdating: isMultiplierUpdating
-                                ) { value in
-                                    multiplierPopoverPresented = false
-                                    setMultiplier(value)
-                                }
-                            }
                         }
                     }
                     Spacer(minLength: 6)
@@ -2379,7 +2392,7 @@ private struct ProviderRow: View {
                         modelTestInput = modelTestInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             ? provider.testModel
                             : modelTestInput
-                        modelTestPopoverPresented = true
+                        toggleEditor(.modelTest)
                     } label: {
                         Group {
                             if isModelTesting {
@@ -2396,16 +2409,6 @@ private struct ProviderRow: View {
                     .foregroundStyle(theme.accentOrange)
                     .disabled(isModelTesting)
                     .help("供应商模型测试")
-                    .popover(isPresented: $modelTestPopoverPresented, arrowEdge: .trailing) {
-                        ProviderModelTestPopover(
-                            provider: provider,
-                            model: $modelTestInput,
-                            isTesting: isModelTesting,
-                            result: modelTestResult
-                        ) { model in
-                            testModel(model)
-                        }
-                    }
                     Button {
                         probe()
                     } label: {
@@ -2421,6 +2424,40 @@ private struct ProviderRow: View {
                             resetCircuit()
                         }
                         .buttonStyle(.borderless)
+                    }
+                }
+                if let renderedEditor {
+                    ProviderEditorReveal(
+                        revealHeight: editorRevealHeight,
+                        contentHeight: editorHeight(renderedEditor)
+                    ) {
+                        ProviderInlineEditorContainer {
+                            switch renderedEditor {
+                            case .multiplier:
+                                ProviderMultiplierPopover(
+                                    provider: provider,
+                                    multiplier: $multiplierInput,
+                                    isUpdating: isMultiplierUpdating
+                                ) { value in
+                                    closeEditor()
+                                    setMultiplier(value)
+                                }
+                            case .modelTest:
+                                ProviderModelTestPopover(
+                                    provider: provider,
+                                    model: $modelTestInput,
+                                    isTesting: isModelTesting,
+                                    result: modelTestResult,
+                                    resultsByModel: modelTestResultsByModel,
+                                    progress: modelTestProgress,
+                                    customModels: customTestModels,
+                                    addModel: addCustomTestModel,
+                                    removeModel: removeCustomTestModel,
+                                    runSingle: testModel,
+                                    runBatch: testModels
+                                )
+                            }
+                        }
                     }
                 }
                 if !assignableGroups.isEmpty {
@@ -2458,6 +2495,102 @@ private struct ProviderRow: View {
         .padding(.vertical, 9)
         .cchSurface(.row)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onChange(of: customTestModels) {
+            guard renderedEditor == .modelTest else { return }
+            withAnimation(editorSwitchAnimation) {
+                editorRevealHeight = editorHeight(.modelTest)
+            }
+        }
+    }
+
+    private func toggleEditor(_ editor: ProviderEditor) {
+        if renderedEditor == editor, editorRevealHeight > 0 {
+            closeEditor()
+            return
+        }
+
+        let targetHeight = editorHeight(editor)
+        if renderedEditor == nil {
+            renderedEditor = editor
+            editorRevealHeight = 0
+            DispatchQueue.main.async {
+                withAnimation(editorOpenAnimation) {
+                    editorRevealHeight = targetHeight
+                }
+            }
+        } else {
+            renderedEditor = editor
+            withAnimation(editorSwitchAnimation) {
+                editorRevealHeight = targetHeight
+            }
+        }
+    }
+
+    private func closeEditor() {
+        let closingEditor = renderedEditor
+        withAnimation(editorCloseAnimation) {
+            editorRevealHeight = 0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            if renderedEditor == closingEditor, editorRevealHeight == 0 {
+                renderedEditor = nil
+            }
+        }
+    }
+
+    private func editorHeight(_ editor: ProviderEditor) -> CGFloat {
+        switch editor {
+        case .multiplier:
+            return 70
+        case .modelTest:
+            return customTestModels.isEmpty ? 76 : 112
+        }
+    }
+
+    private var editorOpenAnimation: Animation {
+        .timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.24)
+    }
+
+    private var editorSwitchAnimation: Animation {
+        .timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.2)
+    }
+
+    private var editorCloseAnimation: Animation {
+        .easeInOut(duration: 0.2)
+    }
+}
+
+private struct ProviderEditorReveal<Content: View>: View {
+    let revealHeight: CGFloat
+    let contentHeight: CGFloat
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            content
+                .frame(height: contentHeight, alignment: .top)
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(height: revealHeight, alignment: .top)
+        .clipped()
+    }
+}
+
+private struct ProviderInlineEditorContainer<Content: View>: View {
+    @ViewBuilder var content: Content
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        content
+            .cchSurface(.control)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(theme.borderSubtle, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -2475,20 +2608,7 @@ private struct ProviderMultiplierPopover: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "slider.horizontal.3")
-                    .foregroundStyle(theme.accentGreen)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("渠道倍率")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(provider.name)
-                        .font(.caption)
-                        .foregroundStyle(theme.textSecondary)
-                        .lineLimit(1)
-                }
-            }
-
+        VStack(alignment: .leading, spacing: 8) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(quickValues, id: \.self) { value in
@@ -2517,16 +2637,19 @@ private struct ProviderMultiplierPopover: View {
             }
             .frame(height: 26)
 
-            TextField("倍率", text: $multiplier)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, weight: .medium))
-                .onSubmit {
-                    if let normalizedMultiplier, !isUpdating {
-                        apply(normalizedMultiplier)
+            HStack(spacing: 8) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.accentGreen)
+                    .frame(width: 18)
+                TextField("倍率", text: $multiplier)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, weight: .medium))
+                    .onSubmit {
+                        if let normalizedMultiplier, !isUpdating {
+                            apply(normalizedMultiplier)
+                        }
                     }
-                }
-
-            HStack {
                 Spacer()
                 Button {
                     if let normalizedMultiplier {
@@ -2546,8 +2669,8 @@ private struct ProviderMultiplierPopover: View {
                 .disabled(isUpdating || normalizedMultiplier == nil)
             }
         }
-        .padding(12)
-        .frame(width: 292)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
             if multiplier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 multiplier = multiplierInputString(provider.costMultiplier)
@@ -2561,11 +2684,32 @@ private struct ProviderModelTestPopover: View {
     @Binding var model: String
     let isTesting: Bool
     let result: CCHProviderModelTestResult?
-    let run: (String) -> Void
+    let resultsByModel: [String: CCHProviderModelTestResult]
+    let progress: CCHProviderModelTestProgress?
+    let customModels: [String]
+    let addModel: (String) -> Void
+    let removeModel: (String) -> Void
+    let runSingle: (String) -> Void
+    let runBatch: ([String]) -> Void
     @Environment(\.cchTheme) private var theme
 
     private var normalizedModel: String {
         model.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var testQueue: [String] {
+        let models = normalizedProviderTestModels(customModels)
+        return models.isEmpty ? normalizedProviderTestModels([normalizedModel]) : models
+    }
+
+    private var canAddModel: Bool {
+        !normalizedModel.isEmpty
+            && customModels.count < 8
+            && !customModels.contains { $0.caseInsensitiveCompare(normalizedModel) == .orderedSame }
+    }
+
+    private var canRun: Bool {
+        !testQueue.isEmpty
     }
 
     private var resultColor: Color {
@@ -2585,7 +2729,7 @@ private struct ProviderModelTestPopover: View {
     }
 
     private var resultDetail: String {
-        guard let result else { return "选择模型后开始测试" }
+        guard let result else { return "输入模型名称后开始测试" }
         let latency = result.latencyMs.map(formatProbeLatency) ?? "-"
         let displayModel = result.model.isEmpty ? normalizedModel : result.model
         let detail = result.errorMessage.isEmpty ? result.message : result.errorMessage
@@ -2601,77 +2745,101 @@ private struct ProviderModelTestPopover: View {
         return "\(result.status)-\(result.success)-\(result.model)-\(result.errorMessage)-\(result.latencyMs ?? -1)"
     }
 
+    private var progressValue: Double {
+        guard let progress, progress.total > 0 else { return 0 }
+        return min(1, max(0, Double(progress.completed) / Double(progress.total)))
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "waveform.path.ecg")
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(theme.accentOrange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("供应商模型测试")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(provider.name)
-                        .font(.caption)
-                        .foregroundStyle(theme.textSecondary)
-                        .lineLimit(1)
-                }
-            }
-
-            if !provider.testModelOptions.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(provider.testModelOptions.prefix(10), id: \.self) { option in
-                            Button {
-                                model = option
-                            } label: {
-                                ProviderModelOptionChip(
-                                    title: option,
-                                    selected: normalizedModel == option
-                                )
+                    .frame(width: 18)
+                TextField("模型", text: $model)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, weight: .medium))
+                    .onSubmit {
+                        if !normalizedModel.isEmpty, !isTesting {
+                            if customModels.isEmpty {
+                                runSingle(normalizedModel)
+                            } else {
+                                addModel(normalizedModel)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
+                Button {
+                    addModel(normalizedModel)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .frame(width: 22, height: 22)
                 }
-                .frame(height: 26)
-            }
-
-            TextField("模型", text: $model)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, weight: .medium))
-                .onSubmit {
-                    if !normalizedModel.isEmpty, !isTesting {
-                        run(normalizedModel)
-                    }
-                }
-
-            HStack(spacing: 10) {
-                ProviderModelTestStatusView(
-                    id: statusId,
-                    title: resultTitle,
-                    detail: resultDetail,
-                    color: result == nil ? theme.textSecondary : resultColor,
-                    isTesting: isTesting
+                .buttonStyle(.plain)
+                .foregroundStyle(canAddModel ? theme.accentGreen : theme.textTertiary)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(canAddModel ? theme.accentGreen.opacity(0.18) : theme.textTertiary.opacity(0.1))
                 )
+                .disabled(!canAddModel || isTesting)
+                .help("加入此渠道的测试模型")
                 Spacer()
                 Button {
-                    run(normalizedModel)
+                    if customModels.isEmpty {
+                        runSingle(normalizedModel)
+                    } else {
+                        runBatch(testQueue)
+                    }
                 } label: {
                     if isTesting {
                         ProgressView()
                             .scaleEffect(0.55)
-                            .frame(width: 18, height: 18)
+                            .frame(width: 24, height: 24)
                     } else {
-                        Label("测试", systemImage: "play.fill")
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .frame(width: 24, height: 24)
                     }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(theme.accentOrange)
-                .disabled(isTesting || normalizedModel.isEmpty)
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(!canRun || isTesting ? theme.accentOrange.opacity(0.36) : theme.accentOrange)
+                )
+                .disabled(isTesting || !canRun)
             }
-            .frame(minHeight: 36)
+            .frame(height: 30)
+
+            if !customModels.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(customModels, id: \.self) { testModel in
+                            ProviderModelTestChip(
+                                model: testModel,
+                                result: resultsByModel[testModel],
+                                isCurrent: isTesting && (progress?.currentModel.caseInsensitiveCompare(testModel) == .orderedSame)
+                            ) {
+                                removeModel(testModel)
+                            }
+                        }
+                    }
+                }
+                .frame(height: 24)
+            }
+
+            ProviderModelTestStatusView(
+                id: statusId,
+                title: progress.map { "\($0.completed)/\($0.total)" } ?? resultTitle,
+                detail: progress.map { "正在测试 \($0.currentModel)" } ?? resultDetail,
+                color: result == nil ? theme.textSecondary : resultColor,
+                isTesting: isTesting,
+                progress: progressValue
+            )
         }
-        .padding(12)
-        .frame(width: 300)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
             if normalizedModel.isEmpty {
                 model = provider.testModel
@@ -2686,64 +2854,98 @@ private struct ProviderModelTestStatusView: View {
     let detail: String
     let color: Color
     let isTesting: Bool
+    let progress: Double
     @Environment(\.cchTheme) private var theme
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            VStack(alignment: .leading, spacing: 5) {
-                if isTesting {
-                    Text("测试中...")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(theme.accentOrange)
-                } else {
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(color)
-                            .frame(width: 6, height: 6)
-                        Text(title)
-                            .font(.system(size: 10, weight: .bold, design: .rounded))
-                            .foregroundStyle(color)
-                    }
-                    Text(detail)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(theme.textSecondary)
-                        .lineLimit(1)
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(isTesting ? theme.accentOrange : color)
+                    .frame(width: 6, height: 6)
+                Text(isTesting ? title : title)
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(isTesting ? theme.accentOrange : color)
+                Text("·")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(theme.textTertiary)
+                Text(detail)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
             }
-            .id(id)
-            .transition(
-                .asymmetric(
-                    insertion: .move(edge: .bottom).combined(with: .opacity),
-                    removal: .move(edge: .top).combined(with: .opacity)
-                )
-            )
+            if isTesting {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(theme.textTertiary.opacity(0.16))
+                        Capsule()
+                            .fill(theme.accentOrange.opacity(0.78))
+                            .frame(width: max(8, proxy.size.width * progress))
+                    }
+                }
+                .frame(height: 3)
+            }
         }
-        .frame(width: 172, height: 36, alignment: .leading)
-        .clipped()
-        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: id)
+        .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
     }
 }
 
-private struct ProviderModelOptionChip: View {
-    let title: String
-    let selected: Bool
+private struct ProviderModelTestChip: View {
+    let model: String
+    let result: CCHProviderModelTestResult?
+    let isCurrent: Bool
+    let remove: () -> Void
     @Environment(\.cchTheme) private var theme
 
+    private var color: Color {
+        if isCurrent { return theme.accentOrange }
+        guard let result else { return theme.textTertiary }
+        let status = result.status.lowercased()
+        if result.success || status == "green" { return theme.accentGreen }
+        if status == "yellow" { return theme.accentOrange }
+        return theme.accentRed
+    }
+
+    private var detail: String? {
+        guard let result else { return nil }
+        if result.success || result.status.lowercased() == "green" || result.status.lowercased() == "yellow" {
+            return result.latencyMs.map(formatProbeLatency)
+        }
+        return "失败"
+    }
+
     var body: some View {
-        Text(title)
-            .font(.system(size: 10.5, weight: selected ? .bold : .semibold))
-            .lineLimit(1)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                Capsule()
-                    .fill(selected ? theme.accentOrange.opacity(0.24) : theme.textTertiary.opacity(0.12))
-            )
-            .foregroundStyle(selected ? theme.accentOrange : theme.textSecondary)
-            .overlay(
-                Capsule()
-                    .stroke(selected ? theme.accentOrange.opacity(0.75) : theme.textTertiary.opacity(0.24), lineWidth: 1)
-            )
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 5, height: 5)
+            Text(model)
+                .font(.system(size: 10, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(theme.textPrimary)
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+            }
+            Button {
+                remove()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 7.5, weight: .bold))
+                    .frame(width: 12, height: 12)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(theme.textTertiary)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(color.opacity(isCurrent ? 0.18 : 0.12))
+        .overlay(Capsule().stroke(color.opacity(isCurrent ? 0.42 : 0.22), lineWidth: 1))
+        .clipShape(Capsule())
     }
 }
 

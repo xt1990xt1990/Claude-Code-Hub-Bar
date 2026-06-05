@@ -96,6 +96,11 @@ private enum CCHRetentionLimits {
     static let parsedDateCache = 1_500
 }
 
+private enum CCHProviderModelTestLimits {
+    static let maxCustomModels = 8
+    static let storageKey = "provider_custom_test_models_v1"
+}
+
 @MainActor
 final class MonitorState: ObservableObject {
     @AppStorage("cch_base_url") var cchBaseURL = ""
@@ -134,6 +139,9 @@ final class MonitorState: ObservableObject {
     @Published private(set) var highlightedLogIds: Set<Int> = []
     @Published private(set) var modelTestingProviderIds: Set<Int> = []
     @Published private(set) var providerModelTestResults: [Int: CCHProviderModelTestResult] = [:]
+    @Published private(set) var providerModelTestResultsByModel: [Int: [String: CCHProviderModelTestResult]] = [:]
+    @Published private(set) var providerModelTestProgress: [Int: CCHProviderModelTestProgress] = [:]
+    @Published private(set) var providerCustomTestModels: [Int: [String]] = [:]
     @Published private(set) var providerMultiplierUpdatingIds: Set<Int> = []
 
     @Published var lastRefresh: Date?
@@ -297,6 +305,7 @@ final class MonitorState: ObservableObject {
     }
 
     init() {
+        providerCustomTestModels = Self.loadProviderCustomTestModels()
         startRefreshTimer()
         startActiveSessionTimer()
         startUpdateCheckTimer()
@@ -651,6 +660,50 @@ final class MonitorState: ObservableObject {
         providerModelTestResults[provider.id]
     }
 
+    func providerModelTestResults(for provider: CCHProvider) -> [String: CCHProviderModelTestResult] {
+        providerModelTestResultsByModel[provider.id] ?? [:]
+    }
+
+    func providerModelTestProgress(for provider: CCHProvider) -> CCHProviderModelTestProgress? {
+        providerModelTestProgress[provider.id]
+    }
+
+    func customTestModels(for provider: CCHProvider) -> [String] {
+        providerCustomTestModels[provider.id] ?? []
+    }
+
+    func addCustomTestModel(_ model: String, for provider: CCHProvider) {
+        let normalized = normalizedProviderTestModel(model)
+        guard !normalized.isEmpty else {
+            flashActionMessage("模型名称不能为空", duration: 3, isWarning: true)
+            return
+        }
+
+        var models = providerCustomTestModels[provider.id] ?? []
+        models = normalizedProviderTestModels(models + [normalized])
+        if models.count > CCHProviderModelTestLimits.maxCustomModels {
+            models = Array(models.prefix(CCHProviderModelTestLimits.maxCustomModels))
+            flashActionMessage("最多保存 \(CCHProviderModelTestLimits.maxCustomModels) 个测试模型", duration: 4, isWarning: true)
+        } else {
+            flashActionMessage("已添加测试模型 \(normalized)")
+        }
+        providerCustomTestModels[provider.id] = models
+        saveProviderCustomTestModels()
+    }
+
+    func removeCustomTestModel(_ model: String, for provider: CCHProvider) {
+        let normalized = normalizedProviderTestModel(model)
+        var models = providerCustomTestModels[provider.id] ?? []
+        models.removeAll { $0.caseInsensitiveCompare(normalized) == .orderedSame }
+        providerCustomTestModels[provider.id] = models
+        if models.isEmpty {
+            providerModelTestResultsByModel[provider.id] = nil
+        } else {
+            providerModelTestResultsByModel[provider.id]?.removeValue(forKey: normalized)
+        }
+        saveProviderCustomTestModels()
+    }
+
     func isProviderMultiplierUpdating(_ provider: CCHProvider) -> Bool {
         providerMultiplierUpdatingIds.contains(provider.id)
     }
@@ -683,25 +736,86 @@ final class MonitorState: ObservableObject {
     }
 
     func testProviderModel(_ provider: CCHProvider, model: String? = nil) async {
+        let requestedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        await testProviderModels(provider, models: [requestedModel?.isEmpty == false ? requestedModel! : provider.testModel])
+    }
+
+    func testProviderModels(_ provider: CCHProvider, models: [String]) async {
         if modelTestingProviderIds.contains(provider.id) {
             return
         }
-        let requestedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let requestedModels = normalizedProviderTestModels(models)
+        let testModels = requestedModels.isEmpty ? [provider.testModel] : requestedModels
+        guard !testModels.isEmpty else {
+            flashActionMessage("模型名称不能为空", duration: 4, isWarning: true)
+            return
+        }
+
         actionMessageDismissTask?.cancel()
-        actionMessage = "模型测试 \(provider.name): \(requestedModel?.isEmpty == false ? requestedModel! : provider.testModel)..."
+        actionMessage = testModels.count > 1
+            ? "模型测试 \(provider.name): 0/\(testModels.count)..."
+            : "模型测试 \(provider.name): \(testModels[0])..."
         actionMessageIsWarning = false
         providerModelTestResults[provider.id] = nil
+        providerModelTestResultsByModel[provider.id] = [:]
         modelTestingProviderIds.insert(provider.id)
         defer {
             modelTestingProviderIds.remove(provider.id)
+            providerModelTestProgress[provider.id] = nil
         }
 
-        do {
-            let result = try await api.testProviderModel(config: config, provider: provider, model: requestedModel)
+        for (index, testModel) in testModels.enumerated() {
+            providerModelTestProgress[provider.id] = CCHProviderModelTestProgress(
+                completed: index,
+                total: testModels.count,
+                currentModel: testModel
+            )
+
+            do {
+                let result = try await api.testProviderModel(config: config, provider: provider, model: testModel)
+                providerModelTestResults[provider.id] = result
+                providerModelTestResultsByModel[provider.id, default: [:]][testModel] = result
+            } catch {
+                let failedResult = CCHProviderModelTestResult(
+                    success: false,
+                    status: "red",
+                    message: "模型测试失败",
+                    latencyMs: nil,
+                    model: testModel,
+                    httpStatusCode: nil,
+                    errorMessage: error.localizedDescription
+                )
+                providerModelTestResults[provider.id] = failedResult
+                providerModelTestResultsByModel[provider.id, default: [:]][testModel] = failedResult
+            }
+
+            providerModelTestProgress[provider.id] = CCHProviderModelTestProgress(
+                completed: index + 1,
+                total: testModels.count,
+                currentModel: testModel
+            )
+            if testModels.count > 1 {
+                actionMessage = "模型测试 \(provider.name): \(index + 1)/\(testModels.count)"
+            }
+        }
+
+        let results = providerModelTestResultsByModel[provider.id] ?? [:]
+        let availableCount = results.values.filter { result in
+            result.success || result.status.lowercased() == "green"
+        }.count
+        let warningCount = results.values.filter { $0.status.lowercased() == "yellow" }.count
+        if testModels.count > 1 {
+            let failedCount = max(0, testModels.count - availableCount - warningCount)
+            flashActionMessage(
+                "模型测试 \(provider.name): 可用 \(availableCount) · 波动 \(warningCount) · 失败 \(failedCount)",
+                duration: failedCount > 0 ? 6 : 4,
+                isWarning: failedCount > 0
+            )
+        } else if let result = providerModelTestResults[provider.id] {
             let latency = result.latencyMs.map(formatProbeLatency) ?? "-"
-            let displayModel = result.model.isEmpty ? (requestedModel?.isEmpty == false ? requestedModel! : provider.testModel) : result.model
+            let displayModel = result.model.isEmpty ? testModels[0] : result.model
             let status = result.status.lowercased()
-            providerModelTestResults[provider.id] = result
             if result.success || status == "green" {
                 flashActionMessage("模型测试 \(provider.name): 可用 \(latency) · \(displayModel)")
             } else if status == "yellow" {
@@ -710,19 +824,8 @@ final class MonitorState: ObservableObject {
                 let detail = result.errorMessage.isEmpty ? result.message : result.errorMessage
                 flashActionMessage("模型测试 \(provider.name): \(detail)", duration: 6, isWarning: true)
             }
-            _ = await loadProviders()
-        } catch {
-            providerModelTestResults[provider.id] = CCHProviderModelTestResult(
-                success: false,
-                status: "red",
-                message: "模型测试失败",
-                latencyMs: nil,
-                model: requestedModel?.isEmpty == false ? requestedModel! : provider.testModel,
-                httpStatusCode: nil,
-                errorMessage: error.localizedDescription
-            )
-            flashActionMessage(error.localizedDescription, duration: 6, isWarning: true)
         }
+        _ = await loadProviders()
     }
 
     private func flashActionMessage(_ message: String, duration: TimeInterval = 2.6, isWarning: Bool = false) {
@@ -1225,6 +1328,38 @@ final class MonitorState: ObservableObject {
 
 }
 
+private extension MonitorState {
+    static func loadProviderCustomTestModels() -> [Int: [String]] {
+        guard
+            let data = UserDefaults.standard.data(forKey: CCHProviderModelTestLimits.storageKey),
+            let decoded = try? JSONDecoder().decode([String: [String]].self, from: data)
+        else { return [:] }
+
+        var result: [Int: [String]] = [:]
+        for (key, models) in decoded {
+            guard let providerId = Int(key) else { continue }
+            let normalized = normalizedProviderTestModels(models)
+            if !normalized.isEmpty {
+                result[providerId] = Array(normalized.prefix(CCHProviderModelTestLimits.maxCustomModels))
+            }
+        }
+        return result
+    }
+
+    func saveProviderCustomTestModels() {
+        var encodable: [String: [String]] = [:]
+        for (providerId, models) in providerCustomTestModels {
+            let normalized = Array(normalizedProviderTestModels(models).prefix(CCHProviderModelTestLimits.maxCustomModels))
+            if !normalized.isEmpty {
+                encodable[String(providerId)] = normalized
+            }
+        }
+        if let data = try? JSONEncoder().encode(encodable) {
+            UserDefaults.standard.set(data, forKey: CCHProviderModelTestLimits.storageKey)
+        }
+    }
+}
+
 private func buildCacheStatusMap(for logs: [CCHLogEntry]) -> [Int: CCHCacheStatusContext] {
     var result: [Int: CCHCacheStatusContext] = [:]
     for group in Dictionary(grouping: logs, by: cacheSessionKey).values {
@@ -1393,6 +1528,26 @@ func formatProbeLatency(_ value: Double?) -> String {
         return value < 10 ? String(format: "%.1fms", value) : String(format: "%.0fms", value)
     }
     return String(format: "%.2fs", value / 1000)
+}
+
+func normalizedProviderTestModel(_ value: String) -> String {
+    value.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func normalizedProviderTestModels(_ values: [String]) -> [String] {
+    var seen = Set<String>()
+    var result: [String] = []
+    for value in values {
+        let normalized = normalizedProviderTestModel(value)
+        guard !normalized.isEmpty else { continue }
+        let key = normalized.lowercased()
+        guard seen.insert(key).inserted else { continue }
+        result.append(normalized)
+        if result.count >= CCHProviderModelTestLimits.maxCustomModels {
+            break
+        }
+    }
+    return result
 }
 
 func formatTokensPerSecond(_ value: Double?) -> String {
