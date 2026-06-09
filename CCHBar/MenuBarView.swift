@@ -46,6 +46,8 @@ struct MoneyValue: View {
         .foregroundStyle(color)
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
+        .contentTransition(.numericText())
+        .animation(.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.24), value: value)
     }
 }
 
@@ -161,10 +163,87 @@ private struct NewLogEdgeFlash: View {
     }
 }
 
+private struct CCHMicroRevealModifier: ViewModifier {
+    let active: Bool
+    @State private var visible = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(active ? (visible ? 1 : 0.72) : 1)
+            .offset(y: active ? (visible ? 0 : 4) : 0)
+            .scaleEffect(active ? (visible ? 1 : 0.985) : 1)
+            .onAppear {
+                guard active else {
+                    visible = true
+                    return
+                }
+                play()
+            }
+            .onChange(of: active) { _, newValue in
+                if newValue {
+                    play()
+                } else {
+                    visible = true
+                }
+            }
+    }
+
+    private func play() {
+        visible = false
+        withAnimation(.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.28)) {
+            visible = true
+        }
+    }
+}
+
+private struct CCHProgressShimmer: View {
+    let color: Color
+    @State private var phase: CGFloat = -1
+
+    var body: some View {
+        GeometryReader { proxy in
+            LinearGradient(
+                colors: [
+                    Color.clear,
+                    Color.white.opacity(0.0),
+                    Color.white.opacity(0.52),
+                    color.opacity(0.92),
+                    Color.white.opacity(0.52),
+                    Color.white.opacity(0.0),
+                    Color.clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: max(54, proxy.size.width * 0.42), height: proxy.size.height)
+            .offset(x: phase * proxy.size.width)
+            .blendMode(.screen)
+        }
+        .clipShape(Capsule())
+        .allowsHitTesting(false)
+        .onAppear {
+            phase = -0.55
+            withAnimation(.linear(duration: 0.92).repeatForever(autoreverses: false)) {
+                phase = 1.18
+            }
+        }
+        .onDisappear {
+            phase = -0.55
+        }
+    }
+}
+
+extension View {
+    func cchMicroReveal(active: Bool = true) -> some View {
+        modifier(CCHMicroRevealModifier(active: active))
+    }
+}
+
 private struct CCHSegmentedTabBar: View {
     @Binding var selection: CCHPanelTab
     @Namespace private var indicatorNamespace
     @Environment(\.cchTheme) private var theme
+    private let tabAnimation = Animation.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.34)
 
     var body: some View {
         HStack(spacing: 4) {
@@ -172,7 +251,7 @@ private struct CCHSegmentedTabBar: View {
                 let isActive = selection == tab
                 Button {
                     guard selection != tab else { return }
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                    withAnimation(tabAnimation) {
                         selection = tab
                     }
                 } label: {
@@ -182,17 +261,18 @@ private struct CCHSegmentedTabBar: View {
                         Text(tab.rawValue)
                             .font(.system(size: 12, weight: .medium))
                     }
-                    .foregroundStyle(isActive ? theme.textPrimary : theme.textSecondary)
+                    .foregroundStyle(isActive && theme.prefersGlassEffects ? Color.white : (isActive ? theme.textPrimary : theme.textSecondary))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
                     .contentShape(Rectangle())
                     .background {
                         if isActive {
                             if #available(macOS 26.0, *), theme.prefersGlassEffects {
-                                Color.clear
-                                    .glassEffect(
-                                        .regular.interactive(),
-                                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(theme.accentBlue)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .stroke(Color.white.opacity(0.22), lineWidth: 0.6)
                                     )
                                     .matchedGeometryEffect(id: "cchTabIndicator", in: indicatorNamespace)
                             } else {
@@ -226,11 +306,15 @@ private struct CCHSegmentedTabBar: View {
 struct MenuBarView: View {
     @ObservedObject var state: MonitorState
     @State private var builtTabs: Set<CCHPanelTab>
+    @State private var previousTab: CCHPanelTab
+    @State private var transitioningTab: CCHPanelTab?
     private var theme: CCHThemePalette { state.selectedTheme.palette }
+    private let pageTransitionAnimation = Animation.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.34)
 
     init(state: MonitorState) {
         self.state = state
-        _builtTabs = State(initialValue: [.dashboard, state.selectedTab])
+        _builtTabs = State(initialValue: Set(CCHPanelTab.allCases))
+        _previousTab = State(initialValue: state.selectedTab)
     }
 
     var body: some View {
@@ -269,18 +353,28 @@ struct MenuBarView: View {
                         }
                     }
                     .frame(width: CCHPanelLayout.width, height: CCHPanelLayout.scrollHeight)
-                    .opacity(state.selectedTab == tab ? 1 : 0)
+                    .opacity(tabOpacity(for: tab))
                     .offset(x: tabSlideOffset(for: tab))
                     .allowsHitTesting(state.selectedTab == tab)
                 }
             }
             .frame(width: CCHPanelLayout.width, height: CCHPanelLayout.scrollHeight)
-            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: state.selectedTab)
-            .onChange(of: state.selectedTab) { _, newTab in
-                builtTabs.insert(newTab)
+            .clipped()
+            .animation(pageTransitionAnimation, value: state.selectedTab)
+            .animation(pageTransitionAnimation, value: transitioningTab)
+            .onChange(of: state.selectedTab) { oldTab, newTab in
+                previousTab = oldTab
+                transitioningTab = oldTab
                 Task {
-                    try? await Task.sleep(nanoseconds: 220_000_000)
+                    try? await Task.sleep(nanoseconds: 340_000_000)
                     await state.refreshFocusedView()
+                }
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 340_000_000)
+                    if state.selectedTab == newTab {
+                        transitioningTab = nil
+                        previousTab = newTab
+                    }
                 }
             }
 
@@ -354,12 +448,23 @@ struct MenuBarView: View {
         }
     }
 
+    private func tabOpacity(for tab: CCHPanelTab) -> Double {
+        if tab == state.selectedTab { return 1 }
+        if tab == transitioningTab { return 0 }
+        return 0
+    }
+
     private func tabSlideOffset(for tab: CCHPanelTab) -> CGFloat {
         let order = CCHPanelTab.allCases
-        guard let current = order.firstIndex(of: state.selectedTab),
+        guard let previous = order.firstIndex(of: previousTab),
+              let current = order.firstIndex(of: state.selectedTab),
               let target = order.firstIndex(of: tab) else { return 0 }
         if target == current { return 0 }
-        return target < current ? -8 : 8
+        let direction: CGFloat = current >= previous ? 1 : -1
+        if tab == transitioningTab {
+            return -44 * direction
+        }
+        return 44 * direction
     }
 }
 
@@ -380,11 +485,6 @@ private struct HeaderView: View {
             .opacity(hoveringProjectLink ? 0.86 : 1)
             .onHover { hovering in
                 hoveringProjectLink = hovering
-                if hovering {
-                    NSCursor.pointingHand.push()
-                } else {
-                    NSCursor.pop()
-                }
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Claude Code Hub")
@@ -651,11 +751,6 @@ private struct FooterActionButton: View {
         .foregroundStyle(role == .destructive ? color : (hovering ? color : theme.textSecondary))
         .onHover { isHovering in
             hovering = isHovering
-            if isHovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
-            }
         }
     }
 }
@@ -731,7 +826,8 @@ private struct RunningRequestsPanel: View {
                             ForEach(state.menuBarRunningLogs) { log in
                                 RunningRequestRow(state: state, log: log)
                                     .frame(height: rowHeight)
-                                    .transition(.opacity)
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                                    .cchMicroReveal(active: true)
                             }
                         }
                     }
@@ -749,7 +845,7 @@ private struct RunningRequestsPanel: View {
         .padding(11)
         .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.accentGreen.opacity(0.22), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.borderSubtle, lineWidth: 1))
     }
 
     private var runningListHeight: CGFloat {
@@ -783,7 +879,7 @@ private struct RunningRequestRow: View {
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                         .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 160, compactThreshold: 18)
-                    MultiplierBadge(value: state.providerMultiplier(for: log.providerName))
+                    MultiplierBadge(value: log.costMultiplier)
                 }
                 HStack(spacing: 4) {
                     ModelBrandIcon(model: model, provider: log.providerName, size: 12)
@@ -835,7 +931,7 @@ private struct RecentRequestsPanel: View {
                 ForEach(state.recentLogs.prefix(5)) { log in
                     CompactLogRow(
                         log: log,
-                        providerMultiplier: state.providerMultiplier(for: log.providerName),
+                        providerMultiplier: log.costMultiplier,
                         cacheStatus: state.cacheStatus(for: log),
                         isNew: state.highlightedLogIds.contains(log.id),
                         isActive: state.panelVisible && state.selectedTab == .dashboard
@@ -934,7 +1030,7 @@ private struct DashboardLeaderboardPanel: View {
         .frame(width: 292)
         .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(accent.opacity(0.18), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.borderSubtle, lineWidth: 1))
     }
 }
 
@@ -1150,7 +1246,7 @@ private struct LogsTabView: View {
                             ForEach(state.logs) { log in
                                 LogRow(
                                     log: log,
-                                    providerMultiplier: state.providerMultiplier(for: log.providerName),
+                                    providerMultiplier: log.costMultiplier,
                                     isSelected: state.selectedLog?.id == log.id,
                                     cacheStatus: state.cacheStatus(for: log),
                                     isNew: state.highlightedLogIds.contains(log.id),
@@ -1196,7 +1292,7 @@ private struct LogsTabView: View {
                 let detailLog = state.selectedLog ?? state.logs.first
                 LogDetailView(
                     log: detailLog,
-                    providerMultiplier: detailLog.map { state.providerMultiplier(for: $0.providerName) }
+                    providerMultiplier: detailLog.map(\.costMultiplier)
                 )
                     .frame(width: 230)
             }
@@ -1340,6 +1436,8 @@ private struct MetricCard: View {
             Text(value)
                 .font(.system(size: 23, weight: .bold, design: .rounded))
                 .monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.24), value: value)
         )
         self.detail = detail
         self.color = color
@@ -1372,7 +1470,7 @@ private struct MetricCard: View {
         .padding(12)
         .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.22), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.borderSubtle, lineWidth: 1))
     }
 }
 
@@ -1387,6 +1485,8 @@ private struct MiniStat: View {
             Text(value)
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.22), value: value)
         )
     }
 
@@ -1524,15 +1624,16 @@ private struct StatusCapsule: View {
 }
 
 private struct FastTierBadge: View {
+    var compact = false
     @Environment(\.cchTheme) private var theme
 
     var body: some View {
         Text("FAST")
-            .font(.system(size: 8.5, weight: .bold, design: .rounded))
+            .font(.system(size: compact ? 7.8 : 8.5, weight: .bold, design: .rounded))
             .foregroundStyle(theme.accentOrange)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
-            .padding(.horizontal, 5)
+            .padding(.horizontal, compact ? 4 : 5)
             .padding(.vertical, 1)
             .background(theme.accentOrange.opacity(0.14))
             .clipShape(Capsule())
@@ -1616,16 +1717,13 @@ private struct HoverLink: View {
             .padding(.vertical, 2)
             .background(isHovering ? theme.accentBlue.opacity(0.16) : Color.clear)
             .clipShape(Capsule())
+            .offset(y: isHovering ? -0.5 : 0)
         }
         .buttonStyle(.plain)
         .foregroundStyle(isHovering ? theme.accentBlue : theme.accentBlue.opacity(0.88))
+        .animation(.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.16), value: isHovering)
         .onHover { hovering in
             isHovering = hovering
-            if hovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
-            }
         }
     }
 }
@@ -1688,11 +1786,6 @@ private struct PanelLinkButton: View {
         .animation(.easeInOut(duration: 0.14), value: isHovering)
         .onHover { hovering in
             isHovering = hovering
-            if hovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
-            }
         }
     }
 }
@@ -1837,7 +1930,7 @@ private struct LeaderboardRow: View {
         .frame(width: CCHPanelLayout.contentWidth, alignment: .leading)
         .cchSurface(.row)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.16), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.borderSubtle, lineWidth: 1))
         .animation(.easeInOut(duration: 0.16), value: isExpanded)
     }
 }
@@ -1996,6 +2089,7 @@ private struct LogRow: View {
             NewLogEdgeFlash(active: isNew && isActive)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .cchMicroReveal(active: isNew && isActive)
     }
 }
 
@@ -2035,14 +2129,15 @@ private struct CompactLogRow: View {
         HStack(spacing: 8) {
             LogStatusIndicator(color: statusColor, isRunning: log.statusCode == nil, isActive: isActive)
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     Text(log.providerName.isEmpty ? "渠道" : log.providerName)
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
-                        .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 150, compactThreshold: 18)
+                        .truncationMode(.tail)
+                        .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 128, compactThreshold: 15)
                     MultiplierBadge(value: providerMultiplier, compact: true)
                     if log.isFastTier {
-                        FastTierBadge()
+                        FastTierBadge(compact: true)
                     }
                 }
                 HStack(spacing: 4) {
@@ -2086,13 +2181,16 @@ private struct CompactLogRow: View {
                 .frame(width: 50, alignment: .trailing)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(formatMillisecondsAsSeconds(log.durationMs))
+                    .foregroundStyle(theme.textPrimary)
                 Text("TTFB \(formatMillisecondsAsSeconds(log.ttfbMs))")
                 Text(formatTokensPerSecond(throughput))
             }
             .font(.caption2)
             .foregroundStyle(theme.textSecondary)
             .monospacedDigit()
-            .frame(width: 58, alignment: .trailing)
+            .lineLimit(1)
+            .minimumScaleFactor(0.92)
+            .frame(width: 76, alignment: .trailing)
         }
         .padding(8)
         .cchSurface(.control)
@@ -2100,6 +2198,7 @@ private struct CompactLogRow: View {
             NewLogEdgeFlash(active: isNew && isActive)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .cchMicroReveal(active: isNew && isActive)
     }
 }
 
@@ -2883,6 +2982,7 @@ private struct ProviderModelTestStatusView: View {
                         Capsule()
                             .fill(theme.accentOrange.opacity(0.78))
                             .frame(width: max(8, proxy.size.width * progress))
+                        CCHProgressShimmer(color: theme.accentOrange)
                     }
                 }
                 .frame(height: 3)

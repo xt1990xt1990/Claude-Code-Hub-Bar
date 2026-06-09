@@ -178,7 +178,9 @@ final class MonitorState: ObservableObject {
     private var wakeObserver: NSObjectProtocol?
     private var refreshTask: Task<Void, Never>?
     private var isLoadingActiveSessions = false
+    private var isLoadingStatusBarData = false
     private var isLoadingFocusedView = false
+    private let statusBarPollingPolicy = CCHStatusBarPollingPolicy()
     private var lastAnnouncedCacheAlertLogId: Int?
     private var cacheAlertDismissTask: Task<Void, Never>?
     private var simulatedCacheAlertDismissTask: Task<Void, Never>?
@@ -196,6 +198,9 @@ final class MonitorState: ObservableObject {
     private var lastProviderUsageRefresh: Date?
     private var lastProviderGroupsRefresh: Date?
     private var lastLogSummaryRefresh: Date?
+    private var lastStatusBarDataRefresh: Date?
+    private var lastStatusBarOverviewRefresh: Date?
+    private var lastStatusBarRunningSeenAt: Date?
     private var officialProviderGroups: [CCHProviderGroup] = []
 
     var appVersion: String {
@@ -466,11 +471,11 @@ final class MonitorState: ObservableObject {
 
     func startActiveSessionTimer() {
         activeSessionTimer?.cancel()
-        activeSessionTimer = Timer.publish(every: 3, on: .main, in: .common)
+        activeSessionTimer = Timer.publish(every: 1, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
-                Task { await self.refreshActiveSessionsOnly() }
+                Task { await self.refreshStatusBarDataOnly() }
             }
     }
 
@@ -604,6 +609,33 @@ final class MonitorState: ObservableObject {
         let errors = await [sessionsError, overviewError, recentLogsError].compactMap { $0 }
 
         if !errors.isEmpty, activeSessions.isEmpty, recentLogs.isEmpty, errorMessage == nil {
+            errorMessage = errors.joined(separator: " · ")
+        }
+    }
+
+    func refreshStatusBarDataOnly() async {
+        if isLoadingStatusBarData { return }
+        let now = Date()
+        guard shouldRefreshStatusBarData(now: now) else { return }
+        isLoadingStatusBarData = true
+        defer { isLoadingStatusBarData = false }
+
+        var errors: [String] = []
+        let shouldRefreshOverview = shouldRefreshStatusBarOverview(now: now)
+
+        if let recentLogsError = await runRefresh(.recentLogs, operation: { await self.loadRecentLogsForStatusBar() }) {
+            errors.append(recentLogsError)
+        }
+        lastStatusBarDataRefresh = now
+
+        if shouldRefreshOverview {
+            if let overviewError = await runRefresh(.overview, operation: { await self.loadOverview() }) {
+                errors.append(overviewError)
+            }
+            lastStatusBarOverviewRefresh = now
+        }
+
+        if !errors.isEmpty, recentLogs.isEmpty, errorMessage == nil {
             errorMessage = errors.joined(separator: " · ")
         }
     }
@@ -882,6 +914,22 @@ final class MonitorState: ObservableObject {
     private func shouldRefreshLogSummary(now: Date = Date()) -> Bool {
         guard let lastLogSummaryRefresh else { return true }
         return now.timeIntervalSince(lastLogSummaryRefresh) >= 15
+    }
+
+    private func shouldRefreshStatusBarData(now: Date = Date()) -> Bool {
+        statusBarPollingPolicy.shouldRefreshData(
+            lastRefresh: lastStatusBarDataRefresh,
+            hasRunningItems: !cachedMenuBarRunningLogs.isEmpty,
+            lastRunningSeenAt: lastStatusBarRunningSeenAt,
+            now: now
+        )
+    }
+
+    private func shouldRefreshStatusBarOverview(now: Date = Date()) -> Bool {
+        statusBarPollingPolicy.shouldRefreshOverview(
+            lastRefresh: lastStatusBarOverviewRefresh,
+            now: now
+        )
     }
 
     private func loadOverview() async -> String? {
@@ -1194,24 +1242,13 @@ final class MonitorState: ObservableObject {
             guard seenSessionIds.insert(key).inserted else { return nil }
             return log
         }
+        if !cachedMenuBarRunningLogs.isEmpty {
+            lastStatusBarRunningSeenAt = Date()
+        }
     }
 
     private func updateStatusBarSnapshot() {
-        let runningItems = cachedMenuBarRunningLogs.map { log -> CCHStatusRunningItem in
-            let model = log.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? log.originalModel
-                : log.model
-            return CCHStatusRunningItem(
-                id: log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId,
-                logId: log.id,
-                providerName: log.providerName,
-                model: model,
-                multiplier: providerMultiplier(for: log.providerName),
-                isRetrying: false,
-                startedAt: parsedCCHDate(log.createdAt),
-                cacheState: cacheStatus(for: log).state
-            )
-        }
+        let runningItems = statusBarRunningItems()
 
         let next = CCHStatusBarSnapshot(
             showsDetails: showStatusBarDetails,
@@ -1226,6 +1263,25 @@ final class MonitorState: ObservableObject {
         if statusBarSnapshot != next {
             statusBarSnapshot = next
         }
+    }
+
+    private func statusBarRunningItems() -> [CCHStatusRunningItem] {
+        cachedMenuBarRunningLogs.map(statusBarRunningItem)
+    }
+
+    private func statusBarRunningItem(from log: CCHLogEntry) -> CCHStatusRunningItem {
+        let model = firstNonEmpty(log.model, log.originalModel, "model")
+        return CCHStatusRunningItem(
+            id: log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId,
+            logId: log.id,
+            providerName: firstNonEmpty(log.providerName, "Provider"),
+            model: model,
+            multiplier: log.costMultiplier,
+            isFastTier: log.isFastTier,
+            isRetrying: false,
+            startedAt: parsedCCHDate(log.createdAt),
+            cacheState: cacheStatus(for: log).state
+        )
     }
 
     private func mergeRecentLogHistory(_ values: [CCHLogEntry]) {
@@ -1445,6 +1501,16 @@ private func isRunningStatus(_ status: String) -> Bool {
         || normalized.contains("请求")
 }
 
+private func firstNonEmpty(_ values: String?...) -> String {
+    for value in values {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+    }
+    return ""
+}
+
 private func menuBarActivityScore(_ session: CCHActiveSession) -> Int {
     if session.concurrentCount > 0 { return 300 }
     if session.status.lowercased().contains("retry") { return 200 }
@@ -1621,7 +1687,9 @@ func formatMultiplier(_ value: Double) -> String {
     if value.rounded() == value {
         return String(format: "x%.0f", value)
     }
-    return String(format: "x%.2f", value)
+    let roundedToTwo = (value * 100).rounded() / 100
+    let format = abs(value - roundedToTwo) < 0.0001 ? "x%.2f" : "x%.3f"
+    return String(format: format, value)
 }
 
 func multiplierLevel(_ value: Double) -> Int {

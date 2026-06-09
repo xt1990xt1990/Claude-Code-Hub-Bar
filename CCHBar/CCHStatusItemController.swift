@@ -16,15 +16,6 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
     private var stateCancellable: AnyCancellable?
     private var rotationTimer: AnyCancellable?
-    private var tickCounter = 0
-    private var runningItemIndex = 0
-    private var currentRunningItemId: String?
-    private var lastRunningItems: [CCHStatusRunningItem] = []
-    private var lastRunningItemIds: [String] = []
-    private var lastRunningItemTotalCount = 0
-    private var lastRunningItemsSeenAt: Date?
-    private let maxRotatingRunningItems = 3
-    private let runningSessionHoldDuration: TimeInterval = 5
     private var outsideClickMonitor: Any?
     private var lastAppliedSnapshot: CCHStatusBarSnapshot?
     private var lastPayload: CCHStatusBarView.Payload?
@@ -96,13 +87,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private func handleStatusTick() {
-        tickCounter += 1
-        let items = visibleMenuBarItems(from: state.statusBarSnapshot)
-        if items.count > 1, tickCounter % 4 == 0 {
-            advanceProviderRotation()
-        } else {
-            applyStatusSnapshot(state.statusBarSnapshot, force: true)
-        }
+        applyStatusSnapshot(state.statusBarSnapshot, force: true)
     }
 
     private func updateStatusItem() {
@@ -113,31 +98,28 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         let semanticSnapshotChanged = lastAppliedSnapshot != snapshot
         lastAppliedSnapshot = snapshot
         statusView.showsDetails = snapshot.showsDetails
-        let items = visibleMenuBarItems(from: snapshot)
         let payload: CCHStatusBarView.Payload
         let tooltip: String
-        if let item = visibleItem(from: items) {
+        if let item = snapshot.runningItems.first {
             let provider = compactProviderName(item.providerName)
             let billing = item.model.trimmingCharacters(in: .whitespacesAndNewlines)
             let billingText = billing.isEmpty ? "model" : billing
-            let totalCount = max(lastRunningItemTotalCount, items.count)
-            let hiddenCount = max(0, totalCount - items.count)
+            let totalCount = max(1, snapshot.runningItems.count)
+            let hiddenCount = max(0, totalCount - 1)
 
             payload = .running(
                 provider: provider,
                 detail: "\(item.isRetrying ? "retrying " : "")\(billingText) \(formatMultiplier(item.multiplier))",
                 elapsed: elapsedText(for: item),
                 isRetrying: item.isRetrying,
+                isFastTier: item.isFastTier,
                 sessionCount: totalCount,
                 cacheState: item.cacheState
             )
             tooltip = hiddenCount > 0
                 ? "\(provider) · \(billingText) · \(formatMultiplier(item.multiplier)) · 另有 \(hiddenCount) 个运行中"
                 : "\(provider) · \(billingText) · \(formatMultiplier(item.multiplier))"
-            currentRunningItemId = item.id
         } else {
-            runningItemIndex = 0
-            currentRunningItemId = nil
             payload = .idle(
                 primary: snapshot.idlePrimary,
                 detail: snapshot.idleDetail,
@@ -159,94 +141,6 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             statusItem.length = width
             lastLength = width
         }
-    }
-
-    private func advanceProviderRotation() {
-        let items = visibleMenuBarItems(from: state.statusBarSnapshot)
-        guard !items.isEmpty else {
-            updateStatusItem()
-            return
-        }
-
-        guard items.count > 1 else {
-            resetRunningIndexIfNeeded()
-            return
-        }
-
-        runningItemIndex = (runningItemIndex + 1) % items.count
-        updateStatusItem()
-    }
-
-    private func resetRunningIndexIfNeeded() {
-        if runningItemIndex != 0 {
-            runningItemIndex = 0
-            updateStatusItem()
-        }
-    }
-
-    private func visibleMenuBarItems(from snapshot: CCHStatusBarSnapshot) -> [CCHStatusRunningItem] {
-        if !snapshot.runningItems.isEmpty {
-            let items = Array(snapshot.runningItems.prefix(maxRotatingRunningItems))
-            reconcileRunningItemIndex(for: items)
-            lastRunningItems = items
-            lastRunningItemIds = items.map(\.id)
-            lastRunningItemTotalCount = snapshot.runningItems.count
-            lastRunningItemsSeenAt = snapshot.generatedAt
-            return items
-        }
-
-        guard
-            !lastRunningItems.isEmpty,
-            let seenAt = lastRunningItemsSeenAt,
-            shouldHoldLastRunningSessions(since: seenAt)
-        else {
-            lastRunningItems = []
-            lastRunningItemIds = []
-            lastRunningItemTotalCount = 0
-            lastRunningItemsSeenAt = nil
-            runningItemIndex = 0
-            currentRunningItemId = nil
-            return []
-        }
-
-        if runningItemIndex >= lastRunningItems.count {
-            runningItemIndex = 0
-        }
-        return lastRunningItems
-    }
-
-    private func reconcileRunningItemIndex(for items: [CCHStatusRunningItem]) {
-        let ids = items.map(\.id)
-        defer { lastRunningItemIds = ids }
-
-        guard ids != lastRunningItemIds else {
-            if runningItemIndex >= items.count {
-                runningItemIndex = 0
-            }
-            return
-        }
-
-        if let currentRunningItemId,
-           let stableIndex = items.firstIndex(where: { $0.id == currentRunningItemId }) {
-            runningItemIndex = stableIndex
-        } else if runningItemIndex >= items.count {
-            runningItemIndex = 0
-        }
-    }
-
-    private func shouldHoldLastRunningSessions(since seenAt: Date) -> Bool {
-        let snapshot = state.statusBarSnapshot
-        if snapshot.hasRecentLogs, snapshot.runningItems.isEmpty { return false }
-        return Date().timeIntervalSince(seenAt) < runningSessionHoldDuration
-    }
-
-    private func visibleItem(from items: [CCHStatusRunningItem]) -> CCHStatusRunningItem? {
-        guard !items.isEmpty else { return nil }
-        return items[visibleItemIndex(for: items)]
-    }
-
-    private func visibleItemIndex(for items: [CCHStatusRunningItem]) -> Int {
-        items.count > 1 ? runningItemIndex % items.count : 0
     }
 
     private func elapsedText(for item: CCHStatusRunningItem) -> String {

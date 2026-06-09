@@ -13,7 +13,7 @@ final class CCHStatusBarView: NSView {
 
     enum Payload: Equatable {
         case idle(primary: String, detail: String, cacheState: CCHCacheVisibilityState)
-        case running(provider: String, detail: String, elapsed: String, isRetrying: Bool, sessionCount: Int, cacheState: CCHCacheVisibilityState)
+        case running(provider: String, detail: String, elapsed: String, isRetrying: Bool, isFastTier: Bool, sessionCount: Int, cacheState: CCHCacheVisibilityState)
     }
 
     var payload: Payload = .idle(primary: "TTL $0.00", detail: "0 req", cacheState: .normal) {
@@ -77,7 +77,7 @@ final class CCHStatusBarView: NSView {
         case .idle:
             isRunning = false
             sessionCount = 0
-        case .running(_, _, _, _, let count, _):
+        case .running(_, _, _, _, _, let count, _):
             isRunning = true
             sessionCount = count
         }
@@ -151,7 +151,7 @@ final class CCHStatusBarView: NSView {
                 progress: idleTransitionProgress
             )
             drawLogoTriangle(color: idleColor, center: iconCenter)
-        case .running(let provider, let detail, let elapsed, let isRetrying, _, _):
+        case .running(let provider, let detail, let elapsed, let isRetrying, _, _, _):
             wasRunning = true
             idleTransitionProgress = 0
             let accent = isRetrying ? NSColor.systemOrange : NSColor.systemBlue
@@ -234,15 +234,32 @@ final class CCHStatusBarView: NSView {
             countLabel.isHidden = true
             elapsedLabel.isHidden = true
             updateCacheIndicator(state: cacheState, isRunning: false)
-        case .running(let provider, let detail, let elapsed, let isRetrying, let sessionCount, let cacheState):
+        case .running(let provider, let detail, let elapsed, let isRetrying, let isFastTier, let sessionCount, let cacheState):
             let accent = isRetrying ? NSColor.systemOrange : NSColor.systemBlue
             primaryTextFont = NSFont.systemFont(ofSize: 8.5, weight: .semibold)
             primaryTextColor = .labelColor
             setPrimaryText(provider, shouldMarquee: true)
 
-            detailLabel.stringValue = detail
             detailLabel.font = NSFont.monospacedSystemFont(ofSize: 8, weight: .medium)
-            detailLabel.textColor = isRetrying ? accent : NSColor.labelColor.withAlphaComponent(0.68)
+            let detailColor = isRetrying ? accent : NSColor.labelColor.withAlphaComponent(0.68)
+            detailLabel.textColor = detailColor
+            if isFastTier, let multiplierRange = detail.range(of: "x", options: .backwards) {
+                let attributed = NSMutableAttributedString(
+                    string: detail,
+                    attributes: [
+                        .font: detailLabel.font as Any,
+                        .foregroundColor: detailColor
+                    ]
+                )
+                attributed.addAttribute(
+                    .foregroundColor,
+                    value: NSColor.systemOrange,
+                    range: NSRange(multiplierRange.lowerBound..<detail.endIndex, in: detail)
+                )
+                detailLabel.attributedStringValue = attributed
+            } else {
+                detailLabel.stringValue = detail
+            }
 
             elapsedLabel.stringValue = elapsed
             elapsedLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .bold)

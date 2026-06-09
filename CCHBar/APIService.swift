@@ -43,6 +43,7 @@ struct CCHStatusRunningItem: Identifiable, Equatable {
     let providerName: String
     let model: String
     let multiplier: Double
+    let isFastTier: Bool
     let isRetrying: Bool
     let startedAt: Date?
     let cacheState: CCHCacheVisibilityState
@@ -166,6 +167,7 @@ struct CCHLogEntry: Identifiable {
     let durationMs: Int?
     let ttfbMs: Int?
     let tokensPerSecond: Double?
+    let costMultiplier: Double
     let isFastTier: Bool
     let errorMessage: String
     let providerChain: [CCHProviderChainItem]
@@ -1059,6 +1061,7 @@ actor APIService {
 
     private func parseLog(_ row: [String: Any]) -> CCHLogEntry {
         let chainRows = row["providerChain"] as? [[String: Any]] ?? []
+        let isFastTier = isFastTierLog(row)
         return CCHLogEntry(
             id: intValue(row["id"]),
             createdAt: stringValue(row["createdAt"]),
@@ -1081,7 +1084,8 @@ actor APIService {
             durationMs: optionalInt(row["durationMs"]),
             ttfbMs: optionalInt(row["ttfbMs"]),
             tokensPerSecond: optionalDouble(row["tokensPerSecond"]) ?? optionalDouble(row["tokensPerSecondTokens"]) ?? optionalDouble(row["outputTokensPerSecond"]),
-            isFastTier: isFastTierLog(row),
+            costMultiplier: logCostMultiplier(row, chainRows: chainRows),
+            isFastTier: isFastTier,
             errorMessage: stringValue(row["errorMessage"]),
             providerChain: chainRows.map {
                 CCHProviderChainItem(
@@ -1249,91 +1253,130 @@ private func isEndpointEnabled(_ row: [String: Any]) -> Bool {
     return true
 }
 
+private func logCostMultiplier(_ row: [String: Any], chainRows: [[String: Any]]) -> Double {
+    if let value = costBreakdownDouble(row, keys: ["provider_multiplier", "providerMultiplier"]) {
+        return value
+    }
+    return optionalDouble(row["costMultiplier"])
+        ?? providerChainMultiplier(chainRows: chainRows, providerName: stringValue(row["providerName"]))
+}
+
+private func costBreakdownDouble(_ row: [String: Any], keys: [String]) -> Double? {
+    guard let breakdown = row["costBreakdown"] as? [String: Any] else { return nil }
+    return firstOptionalDouble(breakdown, keys: keys)
+}
+
+private func serviceTierSetting(_ value: Any?, type targetType: String) -> [String: Any]? {
+    switch value {
+    case let settings as [[String: Any]]:
+        return settings.first { stringValue($0["type"]).lowercased() == targetType }
+    case let setting as [String: Any]:
+        if stringValue(setting["type"]).lowercased() == targetType {
+            return setting
+        }
+        for nested in setting.values {
+            if let match = serviceTierSetting(nested, type: targetType) {
+                return match
+            }
+        }
+        return nil
+    case let values as [Any]:
+        for item in values {
+            if let match = serviceTierSetting(item, type: targetType) {
+                return match
+            }
+        }
+        return nil
+    case let raw as String:
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data)
+        else {
+            return nil
+        }
+        return serviceTierSetting(json, type: targetType)
+    default:
+        return nil
+    }
+}
+
 private func isFastTierLog(_ row: [String: Any]) -> Bool {
+    if let setting = serviceTierSetting(row["specialSettings"], type: "codex_service_tier_result") {
+        return boolValue(setting["effectivePriority"])
+    }
+
     let boolKeys = [
         "isFastTier",
         "fastTier",
         "isPriorityTier",
         "priorityServiceTier"
     ]
-    if boolKeys.contains(where: { boolValue(row[$0]) }) {
-        return true
+    for key in boolKeys where row[key] != nil {
+        return boolValue(row[key])
     }
 
-    let tierKeys = [
-        "serviceTier",
-        "service_tier",
-        "requestedServiceTier",
-        "resolvedServiceTier",
-        "codexServiceTier",
-        "codexServiceTierPreference",
-        "openaiServiceTier"
-    ]
-    if tierKeys.contains(where: { isFastTierText(stringValue(row[$0])) }) {
-        return true
+    if row["statusCode"] == nil || row["statusCode"] is NSNull {
+        return hasPendingPriorityServiceTier(row["specialSettings"])
     }
 
-    return hasPriorityServiceTierSpecialSetting(row["specialSettings"])
+    return false
 }
 
-private func hasPriorityServiceTierSpecialSetting(_ value: Any?) -> Bool {
+private func hasPendingPriorityServiceTier(_ value: Any?) -> Bool {
     switch value {
     case let settings as [[String: Any]]:
-        return settings.contains(where: hasPriorityServiceTierSpecialSetting)
+        return settings.contains(where: hasPendingPriorityServiceTier)
     case let setting as [String: Any]:
         let type = stringValue(setting["type"]).lowercased()
-        if type == "codex_service_tier_result" || type.contains("service_tier") || type.contains("service-tier") {
-            let tierValues = [
-                stringValue(setting["requestedServiceTier"]),
-                stringValue(setting["serviceTier"]),
-                stringValue(setting["resolvedServiceTier"]),
-                stringValue(setting["service_tier"]),
-                stringValue(setting["value"]),
-                stringValue(setting["after"])
-            ]
-            if tierValues.contains(where: isFastTierText) {
-                return true
+        guard type == "provider_parameter_override" else {
+            return setting.values.contains(where: hasPendingPriorityServiceTier)
+        }
+
+        if let changes = setting["changes"] as? [[String: Any]] {
+            return changes.contains { change in
+                let path = stringValue(change["path"]).lowercased()
+                guard path == "service_tier" || path == "service-tier" || path == "servicetier" else {
+                    return false
+                }
+                return isPriorityServiceTierText(stringValue(change["after"]))
+                    || isPriorityServiceTierText(stringValue(change["value"]))
             }
         }
-
-        if let changes = setting["changes"] as? [[String: Any]],
-           changes.contains(where: isFastTierChange) {
-            return true
-        }
-
-        return setting.values.contains(where: hasPriorityServiceTierSpecialSetting)
+        return isPriorityServiceTierText(firstStringValue(
+            setting,
+            keys: ["serviceTier", "service_tier", "requestedServiceTier", "value", "after"]
+        ))
     case let values as [Any]:
-        return values.contains(where: hasPriorityServiceTierSpecialSetting)
+        return values.contains(where: hasPendingPriorityServiceTier)
     case let raw as String:
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        if let data = trimmed.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) {
-            return hasPriorityServiceTierSpecialSetting(json)
+        guard let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data)
+        else {
+            return false
         }
-        let lower = trimmed.lowercased()
-        return (lower.contains("service_tier") || lower.contains("service-tier") || lower.contains("servicetier"))
-            && (lower.contains("priority") || lower.contains("fast"))
+        return hasPendingPriorityServiceTier(json)
     default:
         return false
     }
 }
 
-private func isFastTierChange(_ change: [String: Any]) -> Bool {
-    let path = stringValue(change["path"]).lowercased()
-    guard path == "service_tier" || path == "service-tier" || path == "servicetier" else {
-        return false
-    }
-    return isFastTierText(stringValue(change["after"]))
-        || isFastTierText(stringValue(change["value"]))
-}
-
-private func isFastTierText(_ value: String) -> Bool {
+private func isPriorityServiceTierText(_ value: String) -> Bool {
     let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     return normalized == "priority"
         || normalized == "fast"
         || normalized == "service_tier:priority"
         || normalized == "service-tier:priority"
+}
+
+private func providerChainMultiplier(chainRows: [[String: Any]], providerName: String) -> Double {
+    if let item = chainRows.reversed().first(where: { stringValue($0["name"]) == providerName }) {
+        return doubleValue(item["costMultiplier"], fallback: 1)
+    }
+    if let item = chainRows.last {
+        return doubleValue(item["costMultiplier"], fallback: 1)
+    }
+    return 1
 }
 
 private func optionalCacheHitRate(_ row: [String: Any]) -> Double? {
