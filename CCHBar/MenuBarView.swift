@@ -2024,12 +2024,15 @@ private struct LogRow: View {
                     Text(model)
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
+                        .truncationMode(.tail)
+                        .layoutPriority(0)
                     if log.isFastTier {
                         FastTierBadge()
                     }
                     MultiplierBadge(value: providerMultiplier, compact: true)
+                        .fixedSize(horizontal: true, vertical: false)
                     StatusCapsule(text: log.statusCode.map(String.init) ?? "请求中", color: statusColor)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 HStack(spacing: 4) {
                     Text(log.userName.isEmpty ? "-" : log.userName)
