@@ -343,6 +343,8 @@ struct MenuBarView: View {
                                         LogsTabView(state: state)
                                     case .providers:
                                         ProvidersTabView(state: state)
+                                    case .upstreamRates:
+                                        UpstreamRatesTabView(state: state)
                                     }
                                 }
                                 .frame(width: CCHPanelLayout.contentWidth, alignment: .topLeading)
@@ -1368,6 +1370,640 @@ private struct ProvidersTabView: View {
                 })
             }
         }
+    }
+}
+
+private struct UpstreamRatesTabView: View {
+    @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
+    @State private var editingCredential: UpstreamRateCredential?
+    @State private var didInitialRefresh = false
+    @State private var expandedUpstreamRateHosts: Set<String> = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            stats
+
+            if state.upstreamRateSites.isEmpty {
+                EmptyStateView(text: "暂无可分析的渠道")
+            } else {
+                siteSection(
+                    title: "可同步上游",
+                    subtitle: "已识别站点类型，key 匹配后可勾选同步",
+                    sites: state.upstreamRateSyncableSites,
+                    emptyText: "暂无可同步上游",
+                    collapsible: true
+                )
+
+                if !state.upstreamRateNeedsConfigurationSites.isEmpty {
+                    siteSection(
+                        title: "待配置 / 登录失效",
+                        subtitle: "识别到 Sub2API 或 new-api，但还没有可用登录态",
+                        sites: state.upstreamRateNeedsConfigurationSites,
+                        emptyText: "",
+                        showConfigure: true
+                    )
+                }
+
+                if !state.upstreamRateUnsupportedSites.isEmpty {
+                    unsupportedSection
+                }
+            }
+        }
+        .task {
+            guard !didInitialRefresh else { return }
+            didInitialRefresh = true
+            if state.upstreamRateSnapshots.isEmpty {
+                await state.refreshUpstreamRates(silent: true)
+            }
+        }
+        .sheet(item: $editingCredential) { credential in
+            UpstreamCredentialEditor(
+                credential: credential,
+                onSave: { next in
+                    if state.saveUpstreamCredential(next) {
+                        editingCredential = nil
+                        return true
+                    }
+                    return false
+                },
+                onAutoImported: { next in
+                    if state.saveUpstreamCredential(next) {
+                        editingCredential = nil
+                        return true
+                    }
+                    return false
+                },
+                onCancel: {
+                    editingCredential = nil
+                }
+            )
+            .environment(\.cchTheme, theme)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("上游倍率")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("按官网聚合同一上游；同步范围完全由勾选决定")
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                Task { await state.refreshUpstreamRates() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(theme.accentBlue)
+            .help("重新检测")
+
+            Button {
+                Task { await state.syncSelectedUpstreamRates() }
+            } label: {
+                Label("同步勾选项", systemImage: "checkmark.arrow.trianglehead.clockwise")
+                    .font(.system(size: 11, weight: .bold))
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(theme.accentBlue)
+            .disabled(state.upstreamRatePendingSyncCount == 0)
+
+            Toggle("自动", isOn: $state.upstreamRateAutoSyncEnabled)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(theme.textSecondary)
+                .help("按自定义频率检测并同步已勾选项")
+                .onChange(of: state.upstreamRateAutoSyncEnabled) { _, _ in
+                    state.startUpstreamRateAutoSyncTimer()
+                }
+
+            if state.upstreamRateAutoSyncEnabled {
+                Stepper(value: $state.upstreamRateAutoSyncIntervalHours, in: 1...72, step: 1) {
+                    Text("每 \(Int(state.upstreamRateAutoSyncIntervalHours)) 小时")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                        .monospacedDigit()
+                }
+                .controlSize(.mini)
+                .frame(width: 118)
+                .help("自动检测/同步频率")
+                .onChange(of: state.upstreamRateAutoSyncIntervalHours) { _, _ in
+                    state.startUpstreamRateAutoSyncTimer()
+                }
+            }
+        }
+    }
+
+    private var stats: some View {
+        HStack(spacing: 10) {
+            MiniStat(title: "官网", value: "\(state.upstreamRateSites.count)")
+            MiniStat(title: "可同步", value: "\(state.upstreamRateSyncableSites.count)")
+            MiniStat(title: "已勾选", value: "\(state.upstreamRateCheckedSyncCount)")
+            MiniStat(
+                title: "待同步",
+                value: Text("\(state.upstreamRatePendingSyncCount)")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(state.upstreamRatePendingSyncCount > 0 ? theme.accentOrange : theme.textPrimary)
+            )
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func siteSection(
+        title: String,
+        subtitle: String,
+        sites: [UpstreamRateSite],
+        emptyText: String,
+        showConfigure: Bool = false,
+        collapsible: Bool = false
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionTitle(title: title, subtitle: subtitle)
+            if sites.isEmpty {
+                EmptyStateView(text: emptyText)
+            } else {
+                LazyVStack(spacing: 8) {
+                    ForEach(sites) { site in
+                        UpstreamRateSiteCard(
+                            site: site,
+                            state: state,
+                            isCollapsible: collapsible,
+                            isExpanded: !collapsible || site.pendingSyncCount > 0 || expandedUpstreamRateHosts.contains(site.id),
+                            toggleExpanded: collapsible ? {
+                                withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
+                                    if expandedUpstreamRateHosts.contains(site.id) {
+                                        expandedUpstreamRateHosts.remove(site.id)
+                                    } else {
+                                        expandedUpstreamRateHosts.insert(site.id)
+                                    }
+                                }
+                            } : nil,
+                            configureCredential: showConfigure ? {
+                                editingCredential = state.draftUpstreamCredential(for: site)
+                            } : nil
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var unsupportedSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionTitle(title: "其他官网，不参与同步", subtitle: "DeepSeek、OpenAI 官方或未知类型站点只展示，不抓倍率")
+            LazyVStack(spacing: 8) {
+                ForEach(state.upstreamRateUnsupportedSites) { site in
+                    UpstreamRateUnsupportedCard(site: site, state: state)
+                }
+            }
+        }
+    }
+}
+
+private struct SectionTitle: View {
+    let title: String
+    let subtitle: String
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+            Spacer()
+            Text(subtitle)
+                .font(.caption2)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+        }
+    }
+}
+
+private struct UpstreamRateSiteCard: View {
+    let site: UpstreamRateSite
+    @ObservedObject var state: MonitorState
+    var isCollapsible = false
+    var isExpanded = true
+    var toggleExpanded: (() -> Void)?
+    var configureCredential: (() -> Void)?
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                if isCollapsible {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .black))
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 14, height: 18)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(site.displayName)
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
+                        UpstreamSourceBadge(type: site.sourceType)
+                    }
+                    Text("\(site.matchedCount)/\(site.rows.count) key 已匹配 · \(site.selectedCount) 个已勾选")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textSecondary)
+                }
+                Spacer()
+                if let configureCredential {
+                    Button {
+                        configureCredential()
+                    } label: {
+                        Label("配置登录态", systemImage: "key.fill")
+                            .font(.system(size: 10.5, weight: .bold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else if site.pendingSyncCount > 0 {
+                    StatusCapsule(text: "\(site.pendingSyncCount) 待同步", color: theme.accentOrange)
+                } else if site.status == .available {
+                    StatusCapsule(text: "已检测", color: theme.accentGreen)
+                } else {
+                    StatusCapsule(text: "需登录", color: theme.accentOrange)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                toggleExpanded?()
+            }
+
+            if !isCollapsible || isExpanded {
+                ForEach(site.rows) { row in
+                    UpstreamRateProviderSyncRow(row: row, state: state)
+                }
+            }
+        }
+        .padding(10)
+        .cchSurface(.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.borderSubtle, lineWidth: 1))
+    }
+}
+
+private struct UpstreamRateProviderSyncRow: View {
+    let row: UpstreamRateProviderRow
+    @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
+
+    private var statusColor: Color {
+        switch row.matchStatus {
+        case .matched: return row.hasRateChange ? theme.accentOrange : theme.accentGreen
+        case .unmatched: return theme.textTertiary
+        case .unsupported: return theme.textTertiary
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            StatusDot(color: statusColor)
+                .frame(width: 12)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(row.providerName)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .lineLimit(1)
+                    UpstreamHostBadge(host: row.host)
+                    if let group = row.upstreamGroupName {
+                        UpstreamGroupBadge(group: group)
+                    }
+                }
+                HStack(spacing: 6) {
+                    Text("CCH")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textSecondary)
+                    MultiplierBadge(value: row.currentRate, compact: true)
+                    if let upstreamRate = row.upstreamRate {
+                        Text(row.hasRateChange ? "→" : "=")
+                            .font(.caption2)
+                            .foregroundStyle(theme.textSecondary)
+                        Text("上游")
+                            .font(.caption2)
+                            .foregroundStyle(theme.textSecondary)
+                        MultiplierBadge(value: upstreamRate, compact: true)
+                    } else {
+                        Text(row.matchStatus == .matched ? "未勾选，不参与批量/自动同步" : "暂未匹配上游 key")
+                            .font(.caption2)
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            Spacer(minLength: 6)
+            if state.isUpstreamRateProviderUpdating(row.providerId) {
+                ProgressView()
+                    .scaleEffect(0.5)
+                    .frame(width: 24, height: 20)
+            } else {
+                Button {
+                    Task { await state.syncUpstreamRate(row) }
+                } label: {
+                    Image(systemName: "arrow.down.to.line.compact")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(row.matchStatus == .matched ? theme.accentBlue : theme.textTertiary)
+                .disabled(row.matchStatus != .matched || row.upstreamRate == nil)
+                .help("手动同步此 key")
+            }
+
+            Button {
+                state.toggleUpstreamRateSyncSelection(row)
+            } label: {
+                Image(systemName: row.isSelectedForSync ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 18, height: 20)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(row.isSelectedForSync ? theme.accentBlue : theme.textTertiary)
+            .disabled(row.matchStatus != .matched)
+            .help(row.isSelectedForSync ? "取消批量/自动同步" : "参与批量/自动同步")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .cchSurface(.row)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct UpstreamRateUnsupportedCard: View {
+    let site: UpstreamRateSite
+    @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 10) {
+            StatusDot(color: theme.textTertiary)
+                .frame(width: 12)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(site.displayName)
+                        .font(.system(size: 11.5, weight: .semibold))
+                    UpstreamHostBadge(host: site.host)
+                    StatusCapsule(text: "仅展示", color: theme.textTertiary)
+                }
+                Text(site.rows.map(\.providerName).joined(separator: "、"))
+                    .font(.caption2)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            HStack(spacing: 6) {
+                Button("new-api") {
+                    state.setUpstreamRateSourceType(host: site.host, sourceType: .newAPI)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                Button("Sub2API") {
+                    state.setUpstreamRateSourceType(host: site.host, sourceType: .sub2API)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+            }
+        }
+        .padding(10)
+        .cchSurface(.panelSoft)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.borderSubtle, lineWidth: 1))
+    }
+}
+
+private struct UpstreamHostBadge: View {
+    let host: String
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "globe")
+                .font(.system(size: 7.5, weight: .bold))
+            Text(host)
+                .lineLimit(1)
+        }
+        .font(.system(size: 9, weight: .bold, design: .rounded))
+        .foregroundStyle(theme.accentBlue)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(theme.accentBlue.opacity(0.11))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.accentBlue.opacity(0.25), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+}
+
+private struct UpstreamGroupBadge: View {
+    let group: String
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        Text(group)
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .foregroundStyle(theme.textSecondary)
+            .lineLimit(1)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(theme.textSecondary.opacity(0.10))
+            .overlay(Capsule().stroke(theme.textSecondary.opacity(0.25), lineWidth: 1))
+            .clipShape(Capsule())
+    }
+}
+
+private struct UpstreamSourceBadge: View {
+    let type: UpstreamRateSourceType
+    @Environment(\.cchTheme) private var theme
+
+    private var color: Color {
+        switch type {
+        case .newAPI: return theme.accentBlue
+        case .sub2API: return theme.accentOrange
+        case .unknown: return theme.textTertiary
+        }
+    }
+
+    var body: some View {
+        Text(type.title)
+            .font(.system(size: 8.5, weight: .black, design: .rounded))
+            .foregroundStyle(color)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1.5)
+            .background(color.opacity(0.12))
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(color.opacity(0.24), lineWidth: 1))
+    }
+}
+
+private struct UpstreamCredentialEditor: View {
+    @State private var credential: UpstreamRateCredential
+    @StateObject private var chromeImporter = UpstreamChromeAuthImporter()
+    @State private var authMessage: String?
+    @State private var authMessageIsWarning = false
+    @State private var showManualFields = false
+    let onSave: (UpstreamRateCredential) -> Bool
+    let onAutoImported: (UpstreamRateCredential) -> Bool
+    let onCancel: () -> Void
+    @Environment(\.cchTheme) private var theme
+
+    init(
+        credential: UpstreamRateCredential,
+        onSave: @escaping (UpstreamRateCredential) -> Bool,
+        onAutoImported: @escaping (UpstreamRateCredential) -> Bool,
+        onCancel: @escaping () -> Void
+    ) {
+        _credential = State(initialValue: credential)
+        self.onSave = onSave
+        self.onAutoImported = onAutoImported
+        self.onCancel = onCancel
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "key.fill")
+                    .foregroundStyle(theme.accentBlue)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("配置上游登录态")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(credential.host)
+                        .font(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                }
+                Spacer()
+            }
+
+            Picker("类型", selection: $credential.sourceType) {
+                Text("new-api").tag(UpstreamRateSourceType.newAPI)
+                Text("Sub2API").tag(UpstreamRateSourceType.sub2API)
+            }
+            .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Base URL")
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+                TextField("https://example.com", text: $credential.baseURL)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    Task { await captureChromeLoginState() }
+                } label: {
+                    if chromeImporter.isImporting {
+                        ProgressView()
+                            .scaleEffect(0.55)
+                            .frame(width: 18, height: 16)
+                        Text(chromeImporter.step.title)
+                            .font(.system(size: 11, weight: .semibold))
+                    } else {
+                        Label("一键获取登录态", systemImage: "globe.badge.chevron.backward")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(theme.accentBlue)
+                .disabled(chromeImporter.isImporting)
+
+                if let authMessage {
+                    Text(authMessage)
+                        .font(.caption2)
+                        .foregroundStyle(authMessageIsWarning ? theme.accentOrange : theme.textSecondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+
+            DisclosureGroup("高级手动填写", isExpanded: $showManualFields) {
+                if credential.sourceType == .newAPI {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("User ID")
+                            .font(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                        TextField("localStorage user.id", text: $credential.newAPIUserId)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Access Token")
+                            .font(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                        SecureField("localStorage access_token", text: $credential.newAPIAccessToken)
+                            .textFieldStyle(.roundedBorder)
+                        if !credential.newAPICookieHeader.isEmpty {
+                            Label("已捕获浏览器 Cookie", systemImage: "checkmark.seal.fill")
+                                .font(.caption2)
+                                .foregroundStyle(theme.accentBlue)
+                        }
+                    }
+                    .padding(.top, 8)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Auth Token")
+                            .font(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                        SecureField("auth_token", text: $credential.sub2AuthToken)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Refresh Token")
+                            .font(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                        SecureField("refresh_token", text: $credential.sub2RefreshToken)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    .padding(.top, 8)
+                }
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(theme.textSecondary)
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button("取消") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+                Button("保存并检测") {
+                    _ = onSave(normalizedCredential)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(theme.accentBlue)
+                .keyboardShortcut(.defaultAction)
+                .disabled(normalizedCredential.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 430)
+        .background(theme.settingsBackgroundBase)
+        .onDisappear {
+            chromeImporter.closeChrome()
+        }
+    }
+
+    private func captureChromeLoginState() async {
+        do {
+            let result = try await chromeImporter.captureLogin(for: normalizedCredential)
+            credential = result.credential
+            authMessage = "获取成功"
+            authMessageIsWarning = false
+            _ = onAutoImported(result.credential)
+        } catch {
+            authMessage = error.localizedDescription
+            authMessageIsWarning = true
+        }
+    }
+
+    private var normalizedCredential: UpstreamRateCredential {
+        var next = credential
+        next.baseURL = next.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        next.host = normalizedUpstreamHost(next.baseURL) ?? credential.host
+        return next
     }
 }
 

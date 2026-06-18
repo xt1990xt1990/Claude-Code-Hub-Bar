@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCH Bar Upstream Rate Mockup</title>
+  <style>
+    :root {
+      --bg: #050506;
+      --panel: #111113;
+      --panel2: #17171a;
+      --line: rgba(255,255,255,.08);
+      --muted: #9b9ba3;
+      --text: #f1f1f4;
+      --blue: #3478ff;
+      --green: #13c18b;
+      --orange: #ff941f;
+      --red: #ff5b57;
+      --purple: #9a61ff;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 45% -20%, rgba(52,120,255,.14), transparent 30%), var(--bg);
+      color: var(--text);
+    }
+    .app {
+      width: 760px;
+      min-height: 630px;
+      margin: 22px auto;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 18px;
+      overflow: hidden;
+      background: rgba(7,7,8,.96);
+      box-shadow: 0 24px 80px rgba(0,0,0,.55);
+    }
+    .header, .footer {
+      height: 58px;
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(13,13,15,.72);
+    }
+    .footer {
+      height: 48px;
+      border-top: 1px solid var(--line);
+      border-bottom: 0;
+      justify-content: space-between;
+    }
+    .mark {
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
+      background: #000;
+      display: grid;
+      place-items: center;
+      margin-right: 10px;
+      border: 1px solid rgba(255,255,255,.15);
+    }
+    .mark:after {
+      content: "";
+      width: 0;
+      height: 0;
+      border-left: 8px solid transparent;
+      border-right: 8px solid transparent;
+      border-bottom: 20px solid #fff;
+    }
+    .title { font-size: 15px; font-weight: 700; }
+    .subtitle { color: var(--muted); font-size: 12px; margin-top: 1px; }
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 4px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .tab {
+      text-align: center;
+      color: #b8b8bf;
+      font-size: 12px;
+      font-weight: 650;
+      padding: 8px 0;
+      border-radius: 9px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.05);
+    }
+    .tab.active {
+      color: #fff;
+      background: rgba(52,120,255,.18);
+      border-color: rgba(52,120,255,.45);
+    }
+    .content {
+      height: 524px;
+      overflow: hidden;
+      padding: 12px 14px 14px;
+    }
+    .top-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr auto;
+      gap: 10px;
+      align-items: stretch;
+      margin-bottom: 12px;
+    }
+    .stat, .button, .chip, .source, .provider, .rule {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.045);
+      border-radius: 8px;
+    }
+    .stat {
+      padding: 10px 12px;
+    }
+    .stat .k { color: var(--muted); font-size: 11px; font-weight: 650; }
+    .stat .v { margin-top: 4px; font-size: 18px; font-weight: 800; letter-spacing: 0; }
+    .button {
+      height: 36px;
+      align-self: center;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 13px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 750;
+      background: rgba(52,120,255,.18);
+      border-color: rgba(52,120,255,.5);
+    }
+    .section-title {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin: 12px 0 8px;
+    }
+    .section-title h3 {
+      margin: 0;
+      font-size: 12px;
+      letter-spacing: 0;
+    }
+    .section-title span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .sources {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .source {
+      padding: 10px;
+      background: linear-gradient(180deg, rgba(255,255,255,.065), rgba(255,255,255,.035));
+    }
+    .source-head, .provider-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .name {
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .kind {
+      color: var(--green);
+      font-size: 10px;
+      font-weight: 800;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: rgba(19,193,139,.12);
+      border: 1px solid rgba(19,193,139,.28);
+    }
+    .kind.sub2 { color: var(--orange); background: rgba(255,148,31,.11); border-color: rgba(255,148,31,.3); }
+    .meta {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .chip {
+      color: #c8c8cf;
+      font-size: 10.5px;
+      font-weight: 680;
+      padding: 4px 7px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.045);
+    }
+    .chip.good { color: var(--green); background: rgba(19,193,139,.1); border-color: rgba(19,193,139,.25); }
+    .chip.warn { color: var(--orange); background: rgba(255,148,31,.1); border-color: rgba(255,148,31,.25); }
+    .provider-list {
+      display: grid;
+      gap: 8px;
+    }
+    .provider {
+      padding: 10px;
+      background: rgba(17,17,19,.9);
+    }
+    .left {
+      min-width: 0;
+    }
+    .provider-head {
+      align-items: flex-start;
+    }
+    .provider-title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 12px rgba(19,193,139,.55);
+      flex: 0 0 auto;
+    }
+    .rates {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .rate {
+      color: var(--green);
+      font-weight: 850;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: rgba(19,193,139,.11);
+    }
+    .rate.diff { color: var(--orange); background: rgba(255,148,31,.12); }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+    .small-btn {
+      color: var(--blue);
+      font-size: 11px;
+      font-weight: 800;
+      padding: 6px 9px;
+      border-radius: 8px;
+      border: 1px solid rgba(52,120,255,.35);
+      background: rgba(52,120,255,.1);
+    }
+    .toggle {
+      width: 39px;
+      height: 22px;
+      border-radius: 999px;
+      background: rgba(52,120,255,.9);
+      padding: 2px;
+    }
+    .toggle:after {
+      content: "";
+      display: block;
+      margin-left: auto;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+    }
+    .rule-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .rule {
+      padding: 9px 10px;
+      background: rgba(255,255,255,.035);
+    }
+    .rule b {
+      font-size: 12px;
+    }
+    .rule p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 10.5px;
+      line-height: 1.35;
+    }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="header">
+      <div class="mark"></div>
+      <div>
+        <div class="title">Claude Code Hub</div>
+        <div class="subtitle">总览 · 日志 · 渠道 · 上游倍率</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab">总览</div>
+      <div class="tab">排行</div>
+      <div class="tab">日志</div>
+      <div class="tab">渠道</div>
+      <div class="tab active">上游倍率</div>
+    </div>
+
+    <div class="content">
+      <div class="top-row">
+        <div class="stat"><div class="k">站点</div><div class="v">3</div></div>
+        <div class="stat"><div class="k">已匹配渠道</div><div class="v">12/16</div></div>
+        <div class="stat"><div class="k">待同步</div><div class="v" style="color:var(--orange)">4</div></div>
+        <div class="button">同步全部 ↻</div>
+      </div>
+
+      <div class="section-title">
+        <h3>上游站点</h3>
+        <span>从浏览器导入登录态，定时刷新倍率</span>
+      </div>
+      <div class="sources">
+        <div class="source">
+          <div class="source-head"><div class="name">zzshu.cc</div><div class="kind">new-api</div></div>
+          <div class="meta">
+            <div class="chip good">已登录</div><div class="chip">5 keys</div><div class="chip">6 小时</div>
+          </div>
+        </div>
+        <div class="source">
+          <div class="source-head"><div class="name">lucen.cc</div><div class="kind sub2">Sub2API</div></div>
+          <div class="meta">
+            <div class="chip good">refresh 可用</div><div class="chip">7 keys</div><div class="chip warn">1 个变化</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <h3>渠道匹配</h3>
+        <span>自动按 API key 精确匹配；同站多个 key 聚合显示</span>
+      </div>
+      <div class="provider-list">
+        <div class="provider">
+          <div class="provider-head">
+            <div class="left">
+              <div class="provider-title"><div class="dot"></div><div class="name">Xixi-Codex-Plus</div><div class="chip">zzshu.cc</div></div>
+              <div class="rates"><span>CCH</span><span class="rate diff">×0.08</span><span class="muted">→</span><span>上游</span><span class="rate">×0.75</span><span class="chip">Claude Max-2</span></div>
+            </div>
+            <div class="actions"><div class="small-btn">应用</div><div class="toggle"></div></div>
+          </div>
+        </div>
+        <div class="provider">
+          <div class="provider-head">
+            <div class="left">
+              <div class="provider-title"><div class="dot"></div><div class="name">Xixi-Codex-Pro</div><div class="chip">lucen.cc</div></div>
+              <div class="rates"><span>CCH</span><span class="rate">×1.3</span><span class="muted">=</span><span>上游</span><span class="rate">×1.3</span><span class="chip">codex-pro</span></div>
+            </div>
+            <div class="actions"><div class="small-btn">详情</div><div class="toggle"></div></div>
+          </div>
+        </div>
+        <div class="provider">
+          <div class="provider-head">
+            <div class="left">
+              <div class="provider-title"><div class="dot" style="background:var(--orange);box-shadow:0 0 12px rgba(255,148,31,.55)"></div><div class="name">NightYu-Codex</div><div class="chip warn">未匹配</div></div>
+              <div class="rates"><span>需要 reveal CCH key 后和上游 key 比对</span><span class="chip">手动选择站点</span></div>
+            </div>
+            <div class="actions"><div class="small-btn">绑定</div><div class="toggle" style="background:#333"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <h3>同步策略</h3>
+        <span>默认安全：自动检测，变化时自动应用</span>
+      </div>
+      <div class="rule-row">
+        <div class="rule"><b>自动检测</b><p>每次同步 reveal CCH 渠道 key，和上游 key hash 精确匹配。</p></div>
+        <div class="rule"><b>自动同步</b><p>上游倍率变化后更新 CCH costMultiplier，并记录最近同步。</p></div>
+        <div class="rule"><b>手动兜底</b><p>域名不一致或 key 隐藏失败时，手动指定站点和 key。</p></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="subtitle">v1.1.15 · 上游倍率最后同步 12:30</div>
+      <div class="button" style="height:30px;background:rgba(255,255,255,.06);border-color:var(--line)">设置</div>
+    </div>
+  </div>
+</body>
+</html>

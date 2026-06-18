@@ -652,7 +652,7 @@ actor APIService {
         return parseProviderModelTestResult(data)
     }
 
-    private func revealProviderKey(config: CCHConfig, providerId: Int) async throws -> String {
+    func revealProviderKey(config: CCHConfig, providerId: Int) async throws -> String {
         let data = try await getV1(config: config, path: "/api/v1/providers/\(providerId)/key:reveal")
         guard let dict = data as? [String: Any] else { throw APIError.parseError }
         let key = stringValue(dict["key"]).trimmingCharacters(in: .whitespacesAndNewlines)

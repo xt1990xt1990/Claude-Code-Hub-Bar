@@ -27,3 +27,5 @@ release/
 env.txt
 *.key
 *.pem
+sub2-rate-watch*.json
+.sub2-rate-watch*.json

@@ -7,6 +7,7 @@ enum CCHPanelTab: String, CaseIterable, Identifiable {
     case leaderboard = "排行"
     case logs = "日志"
     case providers = "渠道"
+    case upstreamRates = "上游倍率"
 
     var id: String { rawValue }
 
@@ -16,6 +17,7 @@ enum CCHPanelTab: String, CaseIterable, Identifiable {
         case .leaderboard: return "chart.bar.xaxis"
         case .logs: return "list.bullet.rectangle"
         case .providers: return "server.rack"
+        case .upstreamRates: return "arrow.triangle.2.circlepath"
         }
     }
 }
@@ -90,6 +92,13 @@ private struct CCHRefreshTaskSlot {
     let task: Task<String?, Never>
 }
 
+private struct UpstreamRateHostRefreshResult {
+    let host: String
+    let snapshot: UpstreamRateSnapshot?
+    let credential: UpstreamRateCredential?
+    let errorMessage: String?
+}
+
 private enum CCHRetentionLimits {
     static let recentLogHistory = 240
     static let knownLogIds = 1_200
@@ -101,6 +110,15 @@ private enum CCHProviderModelTestLimits {
     static let storageKey = "provider_custom_test_models_v1"
 }
 
+private enum CCHUpstreamRateStorage {
+    static let selectedProviderIdsKey = "upstream_rate_selected_provider_ids_v1"
+    static let ignoredHostsKey = "upstream_rate_ignored_hosts_v1"
+    static let sourceTypeOverridesKey = "upstream_rate_source_type_overrides_v1"
+    static let snapshotsKey = "upstream_rate_snapshots_v1"
+    static let minAutoSyncIntervalHours = 1.0
+    static let maxAutoSyncIntervalHours = 72.0
+}
+
 @MainActor
 final class MonitorState: ObservableObject {
     @AppStorage("cch_base_url") var cchBaseURL = ""
@@ -110,6 +128,8 @@ final class MonitorState: ObservableObject {
     @AppStorage("active_session_user_filter") var activeSessionUserFilter = ""
     @AppStorage("show_status_bar_details") var showStatusBarDetails = true
     @AppStorage("check_for_updates") var checkForUpdatesEnabled: Bool = true
+    @AppStorage("upstream_rate_auto_sync_enabled") var upstreamRateAutoSyncEnabled = false
+    @AppStorage("upstream_rate_auto_sync_interval_hours") var upstreamRateAutoSyncIntervalHours = 6.0
     @AppStorage("dismissed_update_version") var dismissedUpdateVersion: String = ""
     @AppStorage("cch_theme") private var themeRawValue = CCHTheme.liquidGlass.rawValue
 
@@ -143,6 +163,14 @@ final class MonitorState: ObservableObject {
     @Published private(set) var providerModelTestProgress: [Int: CCHProviderModelTestProgress] = [:]
     @Published private(set) var providerCustomTestModels: [Int: [String]] = [:]
     @Published private(set) var providerMultiplierUpdatingIds: Set<Int> = []
+    @Published private(set) var upstreamRateSelectedProviderIds: Set<Int> = []
+    @Published private(set) var upstreamRateIgnoredHosts: Set<String> = []
+    @Published private(set) var upstreamRateSourceTypeOverrides: [String: UpstreamRateSourceType] = [:]
+    @Published private(set) var upstreamRateSnapshots: [UpstreamRateSnapshot] = []
+    @Published private(set) var upstreamRateLastCheckedAt: Date?
+    @Published private(set) var upstreamRateCredentials: [UpstreamRateCredential] = []
+    @Published private(set) var upstreamRateFetchingHosts: Set<String> = []
+    @Published private(set) var isRefreshingUpstreamRates = false
 
     @Published var lastRefresh: Date?
     @Published var isLoading = false
@@ -171,10 +199,13 @@ final class MonitorState: ObservableObject {
     )
 
     private let api = APIService()
+    private let upstreamRateService = UpstreamRateService()
+    private let upstreamCredentialStore = UpstreamRateCredentialStore()
     private var refreshTimer: AnyCancellable?
     private var activeSessionTimer: AnyCancellable?
     private var focusedViewTimer: AnyCancellable?
     private var updateCheckTimer: AnyCancellable?
+    private var upstreamRateAutoSyncTimer: AnyCancellable?
     private var wakeObserver: NSObjectProtocol?
     private var refreshTask: Task<Void, Never>?
     private var isLoadingActiveSessions = false
@@ -296,6 +327,35 @@ final class MonitorState: ObservableObject {
         providerFilterSnapshot.unhealthyCount
     }
 
+    var upstreamRateSites: [UpstreamRateSite] {
+        UpstreamRateMatcher.buildSites(
+            providers: providers.map(upstreamProviderInput),
+            snapshots: upstreamRateSnapshots,
+            selectedProviderIds: upstreamRateSelectedProviderIds,
+            ignoredHosts: upstreamRateIgnoredHosts
+        )
+    }
+
+    var upstreamRateSyncableSites: [UpstreamRateSite] {
+        upstreamRateSites.filter { $0.section == .syncable }
+    }
+
+    var upstreamRateNeedsConfigurationSites: [UpstreamRateSite] {
+        upstreamRateSites.filter { $0.section == .needsConfiguration }
+    }
+
+    var upstreamRateUnsupportedSites: [UpstreamRateSite] {
+        upstreamRateSites.filter { $0.section == .unsupported }
+    }
+
+    var upstreamRateCheckedSyncCount: Int {
+        upstreamRateSites.flatMap(\.syncableRows).count
+    }
+
+    var upstreamRatePendingSyncCount: Int {
+        upstreamRateSites.reduce(0) { $0 + $1.pendingSyncCount }
+    }
+
     func leaderboardCacheHitRate(for entry: CCHLeaderboardEntry) -> Double? {
         entry.cacheHitRate
     }
@@ -311,9 +371,15 @@ final class MonitorState: ObservableObject {
 
     init() {
         providerCustomTestModels = Self.loadProviderCustomTestModels()
+        upstreamRateSelectedProviderIds = Self.loadIntSet(key: CCHUpstreamRateStorage.selectedProviderIdsKey)
+        upstreamRateIgnoredHosts = Self.loadStringSet(key: CCHUpstreamRateStorage.ignoredHostsKey)
+        upstreamRateSourceTypeOverrides = Self.loadUpstreamRateSourceTypeOverrides()
+        upstreamRateSnapshots = Self.loadUpstreamRateSnapshots()
+        upstreamRateCredentials = upstreamCredentialStore.load()
         startRefreshTimer()
         startActiveSessionTimer()
         startUpdateCheckTimer()
+        startUpstreamRateAutoSyncTimer()
         observeSystemWake()
         refreshTask = Task { await refresh() }
         Task { [weak self] in
@@ -327,6 +393,7 @@ final class MonitorState: ObservableObject {
         activeSessionTimer?.cancel()
         focusedViewTimer?.cancel()
         updateCheckTimer?.cancel()
+        upstreamRateAutoSyncTimer?.cancel()
         refreshTask?.cancel()
         cacheAlertDismissTask?.cancel()
         simulatedCacheAlertDismissTask?.cancel()
@@ -587,6 +654,8 @@ final class MonitorState: ObservableObject {
             error = await runRefresh(.leaderboard) { await self.loadLeaderboard() }
         case .providers:
             error = await runRefresh(.providers(usage: true)) { await self.loadProviders(includeUsage: true) }
+        case .upstreamRates:
+            error = await runRefresh(.providers(usage: true)) { await self.loadProviders(includeUsage: true) }
         }
 
         if let error {
@@ -738,6 +807,235 @@ final class MonitorState: ObservableObject {
 
     func isProviderMultiplierUpdating(_ provider: CCHProvider) -> Bool {
         providerMultiplierUpdatingIds.contains(provider.id)
+    }
+
+    func isUpstreamRateProviderUpdating(_ providerId: Int) -> Bool {
+        providerMultiplierUpdatingIds.contains(providerId)
+    }
+
+    func toggleUpstreamRateSyncSelection(_ row: UpstreamRateProviderRow) {
+        guard row.matchStatus == .matched else { return }
+        if upstreamRateSelectedProviderIds.contains(row.providerId) {
+            upstreamRateSelectedProviderIds.remove(row.providerId)
+        } else {
+            upstreamRateSelectedProviderIds.insert(row.providerId)
+        }
+        saveUpstreamRateSelectedProviderIds()
+    }
+
+    func refreshUpstreamRates(silent: Bool = false) async {
+        if isRefreshingUpstreamRates { return }
+        isRefreshingUpstreamRates = true
+        defer { isRefreshingUpstreamRates = false }
+
+        if providers.isEmpty {
+            _ = await loadProviders(includeUsage: true)
+        }
+
+        let credentialsByHost = Dictionary(uniqueKeysWithValues: upstreamRateCredentials.map { ($0.host, $0) })
+        let grouped = Dictionary(grouping: providers.map(upstreamProviderInput)) { input in
+            UpstreamRateMatcher.providerHost(input) ?? "unknown-\(input.id)"
+        }
+        let sortedGroups = grouped.sorted { $0.key < $1.key }
+        let currentConfig = config
+
+        upstreamRateFetchingHosts = Set(sortedGroups.map(\.key))
+        defer { upstreamRateFetchingHosts.removeAll() }
+
+        let results = await withTaskGroup(of: UpstreamRateHostRefreshResult.self) { group in
+            for (host, values) in sortedGroups {
+                let credential = credentialsByHost[host]
+                let localType = localDetectedSourceType(host: host)
+                group.addTask { [api, upstreamRateService] in
+                    await Self.refreshUpstreamRateHost(
+                        host: host,
+                        values: values,
+                        credential: credential,
+                        localType: localType,
+                        config: currentConfig,
+                        api: api,
+                        upstreamRateService: upstreamRateService
+                    )
+                }
+            }
+
+            var values: [UpstreamRateHostRefreshResult] = []
+            for await result in group {
+                values.append(result)
+            }
+            return values.sorted { $0.host < $1.host }
+        }
+
+        var nextSnapshots: [UpstreamRateSnapshot] = []
+        var nextCredentials = upstreamRateCredentials
+        for result in results {
+            if let snapshot = result.snapshot {
+                nextSnapshots.append(snapshot)
+            }
+            if let credential = result.credential {
+                nextCredentials.removeAll { $0.host == credential.host }
+                nextCredentials.append(credential)
+            }
+            if let errorMessage = result.errorMessage, !silent {
+                flashActionMessage("\(result.host): \(errorMessage)", duration: 5, isWarning: true)
+            }
+        }
+        upstreamRateCredentials = nextCredentials.sorted { $0.host < $1.host }
+
+        do {
+            try upstreamCredentialStore.save(upstreamRateCredentials)
+        } catch {
+            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+        }
+        let activeHosts = Set(sortedGroups.map(\.key))
+        upstreamRateSnapshots = UpstreamRateSnapshot
+            .mergeLatest(cached: upstreamRateSnapshots, refreshed: nextSnapshots)
+            .filter { activeHosts.contains($0.host) }
+        saveUpstreamRateSnapshots()
+        upstreamRateLastCheckedAt = Date()
+        if !silent {
+            flashActionMessage("上游倍率已检测")
+        }
+    }
+
+    nonisolated private static func refreshUpstreamRateHost(
+        host: String,
+        values: [UpstreamRateProviderInput],
+        credential: UpstreamRateCredential?,
+        localType: UpstreamRateSourceType,
+        config: CCHConfig,
+        api: APIService,
+        upstreamRateService: UpstreamRateService
+    ) async -> UpstreamRateHostRefreshResult {
+        if let credential {
+            do {
+                let targets = await upstreamRateTargets(for: values, config: config, api: api)
+                let outcome = try await upstreamRateService.fetchSnapshot(credential: credential, targets: targets)
+                return UpstreamRateHostRefreshResult(host: host, snapshot: outcome.snapshot, credential: outcome.credential, errorMessage: nil)
+            } catch {
+                return UpstreamRateHostRefreshResult(
+                    host: host,
+                    snapshot: UpstreamRateSnapshot(host: host, sourceType: credential.sourceType, status: .needsLogin),
+                    credential: nil,
+                    errorMessage: error.localizedDescription
+                )
+            }
+        }
+
+        if localType != .unknown {
+            return UpstreamRateHostRefreshResult(
+                host: host,
+                snapshot: UpstreamRateSnapshot(host: host, sourceType: localType, status: .needsLogin),
+                credential: nil,
+                errorMessage: nil
+            )
+        }
+
+        let detected = await upstreamRateService.detectSite(baseURL: "https://\(host)", host: host)
+        let snapshot = detected == .unknown ? nil : UpstreamRateSnapshot(host: host, sourceType: detected, status: .needsLogin)
+        return UpstreamRateHostRefreshResult(host: host, snapshot: snapshot, credential: nil, errorMessage: nil)
+    }
+
+    nonisolated private static func upstreamRateTargets(
+        for providers: [UpstreamRateProviderInput],
+        config: CCHConfig,
+        api: APIService
+    ) async -> [UpstreamRateTarget] {
+        await withTaskGroup(of: UpstreamRateTarget?.self) { group in
+            for provider in providers {
+                group.addTask {
+                    do {
+                        let key = try await api.revealProviderKey(config: config, providerId: provider.id)
+                        return UpstreamRateTarget(providerId: provider.id, providerName: provider.name, apiKey: key)
+                    } catch {
+                        return nil
+                    }
+                }
+            }
+
+            var targets: [UpstreamRateTarget] = []
+            for await target in group {
+                if let target {
+                    targets.append(target)
+                }
+            }
+            return targets.sorted { $0.providerId < $1.providerId }
+        }
+    }
+
+    @discardableResult
+    func saveUpstreamCredential(_ credential: UpstreamRateCredential) -> Bool {
+        if upsertUpstreamCredential(credential, persist: true) {
+            Task { await refreshUpstreamRates() }
+            return true
+        }
+        return false
+    }
+
+    func draftUpstreamCredential(for site: UpstreamRateSite) -> UpstreamRateCredential {
+        upstreamRateCredentials.first { $0.host == site.host } ?? .empty(host: site.host, sourceType: site.sourceType)
+    }
+
+    func setUpstreamRateSourceType(host: String, sourceType: UpstreamRateSourceType) {
+        guard sourceType != .unknown else { return }
+        let normalizedHost = normalizedUpstreamHost(host) ?? host.lowercased()
+        upstreamRateSourceTypeOverrides[normalizedHost] = sourceType
+        saveUpstreamRateSourceTypeOverrides()
+        upsertLocalUpstreamRateSnapshot(host: normalizedHost, sourceType: sourceType, status: .needsLogin)
+        flashActionMessage("已将 \(normalizedHost) 设为 \(sourceType.title)")
+    }
+
+    func syncSelectedUpstreamRates(showEmptyMessage: Bool = true) async {
+        let rows = upstreamRateSites.flatMap(\.syncableRows).filter(\.hasRateChange)
+        guard !rows.isEmpty else {
+            if showEmptyMessage {
+                flashActionMessage("没有需要同步的勾选项")
+            }
+            return
+        }
+
+        for row in rows {
+            await syncUpstreamRate(row)
+        }
+    }
+
+    func syncUpstreamRate(_ row: UpstreamRateProviderRow) async {
+        guard let provider = providers.first(where: { $0.id == row.providerId }), let upstreamRate = row.upstreamRate else {
+            flashActionMessage("未找到可同步的上游倍率", duration: 4, isWarning: true)
+            return
+        }
+        guard row.matchStatus == .matched else {
+            flashActionMessage("该渠道尚未匹配上游 key", duration: 4, isWarning: true)
+            return
+        }
+        await updateProviderMultiplier(provider, multiplier: upstreamRate)
+    }
+
+    func startUpstreamRateAutoSyncTimer() {
+        upstreamRateAutoSyncTimer?.cancel()
+        guard upstreamRateAutoSyncEnabled else {
+            upstreamRateAutoSyncTimer = nil
+            return
+        }
+        let hours = min(
+            max(upstreamRateAutoSyncIntervalHours, CCHUpstreamRateStorage.minAutoSyncIntervalHours),
+            CCHUpstreamRateStorage.maxAutoSyncIntervalHours
+        )
+        if hours != upstreamRateAutoSyncIntervalHours {
+            upstreamRateAutoSyncIntervalHours = hours
+        }
+        upstreamRateAutoSyncTimer = Timer.publish(every: hours * 60 * 60, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.runScheduledUpstreamRateAutoSync() }
+            }
+    }
+
+    func runScheduledUpstreamRateAutoSync() async {
+        guard upstreamRateAutoSyncEnabled else { return }
+        await refreshUpstreamRates(silent: true)
+        await syncSelectedUpstreamRates(showEmptyMessage: false)
     }
 
     func updateProviderMultiplier(_ provider: CCHProvider, multiplier: Double) async {
@@ -1131,6 +1429,7 @@ final class MonitorState: ObservableObject {
             providers.map { ($0.id, $0.costMultiplier) },
             uniquingKeysWith: { current, _ in current }
         )
+        pruneUpstreamRateSelections()
     }
 
     private func computedProviderGroups() -> [String] {
@@ -1413,6 +1712,203 @@ private extension MonitorState {
         if let data = try? JSONEncoder().encode(encodable) {
             UserDefaults.standard.set(data, forKey: CCHProviderModelTestLimits.storageKey)
         }
+    }
+
+    static func loadIntSet(key: String) -> Set<Int> {
+        Set(UserDefaults.standard.array(forKey: key) as? [Int] ?? [])
+    }
+
+    static func loadStringSet(key: String) -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    func saveUpstreamRateSelectedProviderIds() {
+        UserDefaults.standard.set(upstreamRateSelectedProviderIds.sorted(), forKey: CCHUpstreamRateStorage.selectedProviderIdsKey)
+    }
+
+    func saveUpstreamRateSourceTypeOverrides() {
+        let encodable = upstreamRateSourceTypeOverrides.mapValues(\.rawValue)
+        if let data = try? JSONEncoder().encode(encodable) {
+            UserDefaults.standard.set(data, forKey: CCHUpstreamRateStorage.sourceTypeOverridesKey)
+        }
+    }
+
+    static func loadUpstreamRateSourceTypeOverrides() -> [String: UpstreamRateSourceType] {
+        guard
+            let data = UserDefaults.standard.data(forKey: CCHUpstreamRateStorage.sourceTypeOverridesKey),
+            let raw = try? JSONDecoder().decode([String: String].self, from: data)
+        else {
+            return [:]
+        }
+        return raw.reduce(into: [String: UpstreamRateSourceType]()) { result, entry in
+            if let type = UpstreamRateSourceType(rawValue: entry.value), type != .unknown {
+                result[entry.key] = type
+            }
+        }
+    }
+
+    static func loadUpstreamRateSnapshots() -> [UpstreamRateSnapshot] {
+        guard
+            let data = UserDefaults.standard.data(forKey: CCHUpstreamRateStorage.snapshotsKey),
+            let snapshots = try? JSONDecoder().decode([UpstreamRateSnapshot].self, from: data)
+        else {
+            return []
+        }
+        return snapshots
+    }
+
+    func saveUpstreamRateSnapshots() {
+        if let data = try? JSONEncoder().encode(upstreamRateSnapshots) {
+            UserDefaults.standard.set(data, forKey: CCHUpstreamRateStorage.snapshotsKey)
+        }
+    }
+
+    func pruneUpstreamRateSelections() {
+        let providerIds = Set(providers.map(\.id))
+        let nextSelected = upstreamRateSelectedProviderIds.intersection(providerIds)
+        if nextSelected != upstreamRateSelectedProviderIds {
+            upstreamRateSelectedProviderIds = nextSelected
+            saveUpstreamRateSelectedProviderIds()
+        }
+    }
+
+    @discardableResult
+    func upsertUpstreamCredential(_ credential: UpstreamRateCredential, persist: Bool) -> Bool {
+        let credential = mergedUpstreamCredential(credential)
+        var next = upstreamRateCredentials.filter { $0.host != credential.host }
+        next.append(credential)
+        upstreamRateCredentials = next.sorted { $0.host < $1.host }
+        if persist {
+            do {
+                try upstreamCredentialStore.save(upstreamRateCredentials)
+            } catch {
+                flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+                return false
+            }
+        }
+        return true
+    }
+
+    private func mergedUpstreamCredential(_ credential: UpstreamRateCredential) -> UpstreamRateCredential {
+        guard let existing = upstreamRateCredentials.first(where: { $0.host == credential.host }) else {
+            return credential
+        }
+        var next = credential
+        if next.sub2AuthToken.isEmpty {
+            next.sub2AuthToken = existing.sub2AuthToken
+        }
+        if next.sub2RefreshToken.isEmpty {
+            next.sub2RefreshToken = existing.sub2RefreshToken
+        }
+        if next.sub2TokenExpiresAt == nil {
+            next.sub2TokenExpiresAt = existing.sub2TokenExpiresAt
+        }
+        if next.newAPIUserId.isEmpty {
+            next.newAPIUserId = existing.newAPIUserId
+        }
+        if next.newAPIAccessToken.isEmpty {
+            next.newAPIAccessToken = existing.newAPIAccessToken
+        }
+        if next.newAPICookieHeader.isEmpty {
+            next.newAPICookieHeader = existing.newAPICookieHeader
+        }
+        return next
+    }
+
+    func upsertLocalUpstreamRateSnapshot(host: String, sourceType: UpstreamRateSourceType, status: UpstreamRateSourceStatus) {
+        let normalizedHost = normalizedUpstreamHost(host) ?? host.lowercased()
+        upstreamRateSnapshots.removeAll { $0.host == normalizedHost }
+        upstreamRateSnapshots.append(UpstreamRateSnapshot(host: normalizedHost, sourceType: sourceType, status: status))
+    }
+
+    func upstreamRateTargets(for providers: [UpstreamRateProviderInput]) async -> [UpstreamRateTarget] {
+        var targets: [UpstreamRateTarget] = []
+        for provider in providers {
+            do {
+                let key = try await api.revealProviderKey(config: config, providerId: provider.id)
+                targets.append(UpstreamRateTarget(providerId: provider.id, providerName: provider.name, apiKey: key))
+            } catch {
+                continue
+            }
+        }
+        return targets
+    }
+
+    func upstreamProviderInput(_ provider: CCHProvider) -> UpstreamRateProviderInput {
+        UpstreamRateProviderInput(
+            id: provider.id,
+            name: provider.name,
+            apiURL: provider.apiURL,
+            websiteURL: provider.websiteURL,
+            groupTag: provider.groupTag,
+            costMultiplier: provider.costMultiplier,
+            isEnabled: provider.isEnabled
+        )
+    }
+
+    func buildLocalUpstreamRateSnapshots() -> [UpstreamRateSnapshot] {
+        let inputs = providers.map(upstreamProviderInput)
+        let grouped = Dictionary(grouping: inputs) { input in
+            UpstreamRateMatcher.providerHost(input) ?? "unknown-\(input.id)"
+        }
+
+        return grouped.compactMap { host, values in
+            let sourceType = localDetectedSourceType(host: host)
+            guard sourceType != .unknown else { return nil }
+
+            let entries = values
+                .map { provider in
+                    UpstreamRateEntry(
+                        providerId: provider.id,
+                        keyName: provider.name,
+                        groupName: displayUpstreamGroupName(provider),
+                        rate: provider.costMultiplier
+                    )
+                }
+
+            return UpstreamRateSnapshot(
+                host: host,
+                sourceType: sourceType,
+                status: .available,
+                entries: entries
+            )
+        }
+    }
+
+    func localDetectedSourceType(host: String) -> UpstreamRateSourceType {
+        let value = (normalizedUpstreamHost(host) ?? host).lowercased()
+        if let override = upstreamRateSourceTypeOverrides[value] {
+            return override
+        }
+        if value.contains("zzshu") || value.contains("xixi") || value.contains("new-api") {
+            return .newAPI
+        }
+        if value.contains("sub2") || value.hasPrefix("sub.") || value.contains("kedaya") || value.contains("nightyu") || value.contains("lucen") {
+            return .sub2API
+        }
+        return .unknown
+    }
+
+    func resolvedUpstreamRateSourceType(host: String) async -> UpstreamRateSourceType {
+        let normalizedHost = normalizedUpstreamHost(host) ?? host.lowercased()
+        let local = localDetectedSourceType(host: normalizedHost)
+        if local != .unknown {
+            return local
+        }
+        let detected = await upstreamRateService.detectSite(baseURL: "https://\(normalizedHost)", host: normalizedHost)
+        if detected != .unknown {
+            upstreamRateSourceTypeOverrides[normalizedHost] = detected
+            saveUpstreamRateSourceTypeOverrides()
+        }
+        return detected
+    }
+
+    func displayUpstreamGroupName(_ provider: UpstreamRateProviderInput) -> String {
+        let groups = providerGroupTitles(provider.groupTag).filter { !isDefaultProviderGroup($0) }
+        if let first = groups.first {
+            return first
+        }
+        return provider.name
     }
 }
 
