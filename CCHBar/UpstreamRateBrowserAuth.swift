@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 
 struct UpstreamChromeAuthResult {
@@ -10,6 +11,7 @@ enum UpstreamChromeAuthError: LocalizedError {
     case chromeNotFound
     case noInspectablePage(String)
     case missingLocalStorageCredential(UpstreamRateSourceType)
+    case loginValidationFailed(UpstreamRateSourceType)
     case invalidDevToolsResponse
 
     var errorDescription: String? {
@@ -20,6 +22,8 @@ enum UpstreamChromeAuthError: LocalizedError {
             return "没有找到 \(host) 的 Chrome 登录页"
         case .missingLocalStorageCredential(let type):
             return "没有从 Chrome 读取到 \(type.title) 登录态"
+        case .loginValidationFailed(let type):
+            return "\(type.title) 登录态校验失败，请确认网页里已经登录完成"
         case .invalidDevToolsResponse:
             return "Chrome DevTools 响应无效"
         }
@@ -216,13 +220,15 @@ final class UpstreamChromeAuthImporter: ObservableObject {
 
     private let port = 49_521
     private let session: URLSession
+    private let validateNewAPILogin: (UpstreamRateCredential) async -> Bool
     private var chromeProcess: Process?
 
-    init() {
+    init(validateNewAPILogin: @escaping (UpstreamRateCredential) async -> Bool = UpstreamChromeAuthImporter.defaultValidateNewAPILogin) {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 3
         config.timeoutIntervalForResource = 10
         self.session = URLSession(configuration: config)
+        self.validateNewAPILogin = validateNewAPILogin
     }
 
     func openChrome(for credential: UpstreamRateCredential) throws {
@@ -266,7 +272,11 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         while Date() < deadline {
             do {
                 let state = try await readBrowserState(for: credential)
+                try requireFreshBrowserCredential(state, sourceType: credential.sourceType)
                 let next = try mergeBrowserState(state, into: credential)
+                if !(await isValidatedLogin(next)) {
+                    throw UpstreamChromeAuthError.loginValidationFailed(credential.sourceType)
+                }
                 let importedCount = importedFieldCount(before: credential, after: next)
                 closeChrome()
                 step = .imported
@@ -288,7 +298,11 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         defer { isImporting = false }
 
         let state = try await readBrowserState(for: credential)
+        try requireFreshBrowserCredential(state, sourceType: credential.sourceType)
         let next = try mergeBrowserState(state, into: credential)
+        guard await isValidatedLogin(next) else {
+            throw UpstreamChromeAuthError.loginValidationFailed(credential.sourceType)
+        }
         let importedCount = importedFieldCount(before: credential, after: next)
         message = importedCount > 0 ? "已读取 \(importedCount) 个字段" : "没有新字段"
         return UpstreamChromeAuthResult(credential: next, importedFieldCount: importedCount)
@@ -305,6 +319,30 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         try await readBrowserState(for: credential).storage
     }
 
+    func requireFreshBrowserCredential(
+        _ state: (storage: [String: String], cookieHeader: String),
+        sourceType: UpstreamRateSourceType
+    ) throws {
+        let fresh = try mergeBrowserState(
+            state,
+            into: UpstreamRateCredential.empty(host: "validation.local", sourceType: sourceType)
+        )
+        switch sourceType {
+        case .newAPI:
+            if fresh.newAPIAccessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               fresh.newAPICookieHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw UpstreamChromeAuthError.missingLocalStorageCredential(.newAPI)
+            }
+        case .sub2API:
+            if fresh.sub2AuthToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               fresh.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw UpstreamChromeAuthError.missingLocalStorageCredential(.sub2API)
+            }
+        case .unknown:
+            throw UpstreamChromeAuthError.missingLocalStorageCredential(.unknown)
+        }
+    }
+
     private func readBrowserState(for credential: UpstreamRateCredential) async throws -> (storage: [String: String], cookieHeader: String) {
         let page = try await findPage(for: credential)
         guard let webSocketDebuggerURL = page.webSocketDebuggerURL else {
@@ -314,17 +352,23 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         task.resume()
         defer { task.cancel(with: .normalClosure, reason: nil) }
 
-        let storage = try await evaluateLocalStorage(using: task, id: 1)
+        let storage = try await evaluateBrowserStorage(using: task, id: 1)
         let cookieHeader = try await readCookieHeader(for: page.url, using: task, id: 2)
         print("UpstreamChromeAuthImporter state host=\(credential.host) storageKeys=\(storage.count) cookieHeaderLen=\(cookieHeader.count)")
         return (storage, cookieHeader)
     }
 
-    private func mergeBrowserState(
+    func mergeBrowserState(
         _ state: (storage: [String: String], cookieHeader: String),
         into credential: UpstreamRateCredential
     ) throws -> UpstreamRateCredential {
-        var next = try UpstreamChromeLocalStorageParser.merge(storage: state.storage, into: credential)
+        var next: UpstreamRateCredential
+        do {
+            next = try UpstreamChromeLocalStorageParser.merge(storage: state.storage, into: credential)
+        } catch UpstreamChromeAuthError.missingLocalStorageCredential(.newAPI)
+            where credential.sourceType == .newAPI && !state.cookieHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            next = credential
+        }
         if credential.sourceType == .newAPI, !state.cookieHeader.isEmpty {
             next.newAPICookieHeader = state.cookieHeader
         }
@@ -337,15 +381,33 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         return next
     }
 
-    private func evaluateLocalStorage(using task: URLSessionWebSocketTask, id: Int) async throws -> [String: String] {
+    func isValidatedLogin(_ credential: UpstreamRateCredential) async -> Bool {
+        switch credential.sourceType {
+        case .newAPI:
+            return await validateNewAPILogin(credential)
+        case .sub2API:
+            return !credential.sub2AuthToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !credential.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .unknown:
+            return false
+        }
+    }
+
+    private func evaluateBrowserStorage(using task: URLSessionWebSocketTask, id: Int) async throws -> [String: String] {
         let expression = """
         (() => {
-          const out = {};
-          for (let i = 0; i < localStorage.length; i += 1) {
-            const key = localStorage.key(i);
-            out[key] = localStorage.getItem(key);
+          const copy = (storage) => {
+            const out = {};
+            for (let i = 0; i < storage.length; i += 1) {
+              const key = storage.key(i);
+              out[key] = storage.getItem(key);
+            }
+            return out;
           }
-          return out;
+          return {
+            localStorage: copy(localStorage),
+            sessionStorage: copy(sessionStorage)
+          };
         })()
         """
         let payload: [String: Any] = [
@@ -365,11 +427,30 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             let object = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
             let result = object["result"] as? [String: Any],
             let resultObject = result["result"] as? [String: Any],
-            let value = resultObject["value"] as? [String: Any]
+            let value = resultObject["value"] as? [String: Any],
+            let localStorage = value["localStorage"] as? [String: Any],
+            let sessionStorage = value["sessionStorage"] as? [String: Any]
         else {
             throw UpstreamChromeAuthError.invalidDevToolsResponse
         }
-        return value.compactMapValues { $0 as? String }
+        return browserStorage(localStorage: localStorage, sessionStorage: sessionStorage)
+    }
+
+    func browserStorage(localStorage: [String: Any], sessionStorage: [String: Any]) -> [String: String] {
+        var result: [String: String] = [:]
+        for (key, value) in localStorage {
+            guard let string = value as? String else { continue }
+            result[key] = string
+            result["localStorage.\(key)"] = string
+        }
+        for (key, value) in sessionStorage {
+            guard let string = value as? String else { continue }
+            if result[key] == nil {
+                result[key] = string
+            }
+            result["sessionStorage.\(key)"] = string
+        }
+        return result
     }
 
     private func readCookieHeader(for pageURL: String, using task: URLSessionWebSocketTask, id: Int) async throws -> String {
@@ -427,6 +508,71 @@ final class UpstreamChromeAuthImporter: ObservableObject {
                 return "\(name)=\(value)"
             }
             .joined(separator: "; ")
+    }
+
+    static func defaultValidateNewAPILogin(_ credential: UpstreamRateCredential) async -> Bool {
+        let accessToken = credential.newAPIAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cookieHeader = credential.newAPICookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !accessToken.isEmpty || !cookieHeader.isEmpty else {
+            print("UpstreamChromeAuthImporter newAPI validation host=\(credential.host) result=missing-auth")
+            return false
+        }
+
+        let base = credential.baseURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        let userId = credential.newAPIUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        for probe in NewAPILoginValidationProbe.defaultProbes {
+            guard let url = URL(string: base + probe.apiPath) else {
+                print("UpstreamChromeAuthImporter newAPI validation host=\(credential.host) result=invalid-url path=\(probe.apiPath)")
+                continue
+            }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            if !accessToken.isEmpty {
+                request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            }
+            if !userId.isEmpty {
+                request.setValue(userId, forHTTPHeaderField: "New-Api-User")
+            }
+            if !cookieHeader.isEmpty {
+                request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+            }
+            if let signedPath = probe.signedPath {
+                let signature = newAPIBrowserAuthSignature(path: signedPath)
+                request.setValue(signature.timestamp, forHTTPHeaderField: "X-Timestamp")
+                request.setValue(signature.nonce, forHTTPHeaderField: "X-Nonce")
+                request.setValue(signature.sign, forHTTPHeaderField: "X-Sign")
+            }
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    print("UpstreamChromeAuthImporter newAPI validation host=\(credential.host) path=\(probe.apiPath) status=\(status) success=false userIdSet=\(!userId.isEmpty) tokenLen=\(accessToken.count) cookieLen=\(cookieHeader.count)")
+                    continue
+                }
+                guard
+                    let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let success = object["success"] as? Bool
+                else {
+                    print("UpstreamChromeAuthImporter newAPI validation host=\(credential.host) path=\(probe.apiPath) status=2xx success=unknown userIdSet=\(!userId.isEmpty) tokenLen=\(accessToken.count) cookieLen=\(cookieHeader.count)")
+                    return true
+                }
+                let message = (object["message"] as? String ?? "").prefix(80)
+                print("UpstreamChromeAuthImporter newAPI validation host=\(credential.host) path=\(probe.apiPath) status=2xx success=\(success) message=\(message) userIdSet=\(!userId.isEmpty) tokenLen=\(accessToken.count) cookieLen=\(cookieHeader.count)")
+                if success {
+                    return true
+                }
+            } catch {
+                print("UpstreamChromeAuthImporter newAPI validation host=\(credential.host) path=\(probe.apiPath) error=\(error.localizedDescription) userIdSet=\(!userId.isEmpty) tokenLen=\(accessToken.count) cookieLen=\(cookieHeader.count)")
+            }
+        }
+        return false
     }
 
     private func send(_ text: String, using task: URLSessionWebSocketTask) async throws {
@@ -557,4 +703,33 @@ private struct ChromePage: Decodable {
         case url
         case webSocketDebuggerURL = "webSocketDebuggerUrl"
     }
+}
+
+private struct NewAPILoginValidationProbe {
+    let apiPath: String
+    let signedPath: String?
+
+    static let defaultProbes = [
+        NewAPILoginValidationProbe(apiPath: "/api/user/self/groups", signedPath: nil),
+        NewAPILoginValidationProbe(apiPath: "/api/user/self", signedPath: "/user/self")
+    ]
+}
+
+private struct NewAPIBrowserAuthSignature {
+    let timestamp: String
+    let nonce: String
+    let sign: String
+}
+
+private func newAPIBrowserAuthSignature(path: String, date: Date = Date(), nonce: String = newAPIBrowserAuthRandomNonce()) -> NewAPIBrowserAuthSignature {
+    let timestamp = String(Int(date.timeIntervalSince1970))
+    let payload = "\(timestamp)\(nonce)\(path)nekoneko"
+    let digest = SHA256.hash(data: Data(payload.utf8))
+    let hex = digest.map { String(format: "%02x", $0) }.joined()
+    return NewAPIBrowserAuthSignature(timestamp: timestamp, nonce: nonce, sign: String(hex.prefix(16)))
+}
+
+private func newAPIBrowserAuthRandomNonce() -> String {
+    let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+    return String((0..<8).map { _ in alphabet[Int.random(in: 0..<alphabet.count)] })
 }

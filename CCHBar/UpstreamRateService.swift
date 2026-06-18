@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct UpstreamRateTarget {
@@ -37,12 +38,21 @@ enum UpstreamRateSiteDetector {
 actor UpstreamRateService {
     private let session: URLSession
     private let detectionSession: URLSession
+    private let dateProvider: @Sendable () -> Date
+    private let nonceProvider: @Sendable () -> String
 
-    init(session: URLSession? = nil, detectionSession: URLSession? = nil) {
+    init(
+        session: URLSession? = nil,
+        detectionSession: URLSession? = nil,
+        dateProvider: @escaping @Sendable () -> Date = { Date() },
+        nonceProvider: @escaping @Sendable () -> String = { newAPIRandomNonce() }
+    ) {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
         self.session = session ?? URLSession(configuration: config)
+        self.dateProvider = dateProvider
+        self.nonceProvider = nonceProvider
 
         let detectionConfig = URLSessionConfiguration.ephemeral
         detectionConfig.timeoutIntervalForRequest = 2
@@ -133,13 +143,28 @@ actor UpstreamRateService {
             throw UpstreamRateServiceError.missingCredential("缺少 new-api 登录态")
         }
 
-        let groups = try await listNewAPIGroups(credential)
+        var nextCredential = credential
+        nextCredential = await hydrateNewAPIUserIdIfNeeded(nextCredential)
+        let groups = (try? await listNewAPIGroups(nextCredential)) ?? [:]
+        let variantGroups = groups.isEmpty ? (try? await listVariantNewAPIGroups(nextCredential)) ?? [:] : [:]
         var entries: [UpstreamRateEntry] = []
 
         for target in targets {
-            if let token = try await findNewAPIToken(credential: credential, target: target) {
+            if let token = try? await findNewAPIToken(credential: nextCredential, target: target) {
                 let group = token.group
                 if let rate = groups[group]?.ratio {
+                    entries.append(
+                        UpstreamRateEntry(
+                            providerId: target.providerId,
+                            keyName: token.name.isEmpty ? target.providerName : token.name,
+                            groupName: group.isEmpty ? "默认" : group,
+                            rate: rate
+                        )
+                    )
+                }
+            } else if let token = try await findVariantNewAPIToken(credential: nextCredential, target: target) {
+                let group = token.preferredGroup
+                if let rate = token.preferredRatio ?? variantGroups[group]?.ratio {
                     entries.append(
                         UpstreamRateEntry(
                             providerId: target.providerId,
@@ -154,7 +179,7 @@ actor UpstreamRateService {
 
         return UpstreamRateFetchOutcome(
             snapshot: UpstreamRateSnapshot(host: credential.host, sourceType: .newAPI, status: .available, entries: entries),
-            credential: credential
+            credential: nextCredential
         )
     }
 
@@ -257,10 +282,78 @@ actor UpstreamRateService {
         return result
     }
 
+    private func hydrateNewAPIUserIdIfNeeded(_ credential: UpstreamRateCredential) async -> UpstreamRateCredential {
+        if !credential.newAPIUserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return credential
+        }
+        var next = credential
+        guard let value = try? await requestJSON(
+            baseURL: credential.baseURL,
+            path: "/api/user/self",
+            headers: newAPIHeaders(credential, signedPath: "/user/self"),
+            unwrap: .newAPI
+        ) else {
+            return next
+        }
+        let dict = value as? [String: Any] ?? [:]
+        let userId = serviceString(dict["id"] ?? dict["user_id"] ?? dict["userId"])
+        if !userId.isEmpty {
+            next.newAPIUserId = userId
+        }
+        return next
+    }
+
+    private func listVariantNewAPIGroups(_ credential: UpstreamRateCredential) async throws -> [String: NewAPIGroup] {
+        var result: [String: NewAPIGroup] = [:]
+        for type in ["subscription", "pay_as_you_go"] {
+            let value = try await requestJSON(
+                baseURL: credential.baseURL,
+                path: "/api/groups/by-type",
+                queryItems: [URLQueryItem(name: "type", value: type)],
+                headers: newAPIHeaders(credential, signedPath: "/groups/by-type"),
+                unwrap: .newAPI
+            )
+            for row in value as? [[String: Any]] ?? [] {
+                let group = NewAPIGroup(row)
+                if !group.name.isEmpty {
+                    result[group.name] = group
+                }
+            }
+        }
+        return result
+    }
+
     private func findNewAPIToken(credential: UpstreamRateCredential, target: UpstreamRateTarget) async throws -> NewAPIToken? {
         for tokenQuery in newAPITokenSearchQueries(target.apiKey) {
             if let token = try await findNewAPIToken(credential: credential, target: target, tokenQuery: tokenQuery) {
                 return token
+            }
+        }
+        return nil
+    }
+
+    private func findVariantNewAPIToken(credential: UpstreamRateCredential, target: UpstreamRateTarget) async throws -> VariantNewAPIToken? {
+        for page in 1...20 {
+            let query = [
+                URLQueryItem(name: "p", value: "\(page - 1)"),
+                URLQueryItem(name: "size", value: "100")
+            ]
+            let value = try await requestJSON(
+                baseURL: credential.baseURL,
+                path: "/api/token",
+                queryItems: query,
+                headers: newAPIHeaders(credential, signedPath: "/token"),
+                unwrap: .newAPI
+            )
+            let pageData = variantNewAPIPage(value)
+            for row in pageData.items {
+                let token = VariantNewAPIToken(row)
+                if tokenKeyMatches(token.key, target.apiKey) || tokenKeySuffixMatches(token.key, target.apiKey) {
+                    return token
+                }
+            }
+            if pageData.items.count < pageData.pageSize || page * pageData.pageSize >= pageData.total {
+                return nil
             }
         }
         return nil
@@ -324,7 +417,7 @@ actor UpstreamRateService {
         ["Authorization": "Bearer \(credential.sub2AuthToken)", "Accept": "application/json"]
     }
 
-    private func newAPIHeaders(_ credential: UpstreamRateCredential) -> [String: String] {
+    private func newAPIHeaders(_ credential: UpstreamRateCredential, signedPath: String? = nil) -> [String: String] {
         var headers = [
             "Accept": "application/json",
             "Content-Type": "application/json"
@@ -340,6 +433,12 @@ actor UpstreamRateService {
         let cookieHeader = credential.newAPICookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cookieHeader.isEmpty {
             headers["Cookie"] = cookieHeader
+        }
+        if let signedPath {
+            let signature = newAPISignature(path: signedPath, date: dateProvider(), nonce: nonceProvider())
+            headers["X-Timestamp"] = signature.timestamp
+            headers["X-Nonce"] = signature.nonce
+            headers["X-Sign"] = signature.sign
         }
         return headers
     }
@@ -483,6 +582,55 @@ private struct NewAPIGroup {
         self.name = name
         ratio = serviceOptionalDouble(raw["ratio"])
     }
+
+    init(_ row: [String: Any]) {
+        name = serviceString(row["name"])
+        ratio = serviceOptionalDouble(row["ratio"])
+    }
+}
+
+private struct VariantNewAPIToken {
+    let id: Int?
+    let key: String
+    let name: String
+    let billingType: String
+    let subscriptionGroupName: String
+    let subscriptionGroupRatio: Double?
+    let payAsYouGoGroupName: String
+    let payAsYouGoGroupRatio: Double?
+
+    init(_ row: [String: Any]) {
+        id = serviceInt(row["id"])
+        key = serviceString(row["key"])
+        name = serviceString(row["name"])
+        billingType = serviceString(row["billing_type"] ?? row["billingType"])
+        let subscriptionGroup = row["subscription_group"] as? [String: Any] ?? row["subscriptionGroup"] as? [String: Any] ?? [:]
+        let payAsYouGoGroup = row["pay_as_you_go_group"] as? [String: Any] ?? row["payAsYouGoGroup"] as? [String: Any] ?? [:]
+        subscriptionGroupName = serviceString(subscriptionGroup["name"])
+        subscriptionGroupRatio = serviceOptionalDouble(subscriptionGroup["ratio"])
+        payAsYouGoGroupName = serviceString(payAsYouGoGroup["name"])
+        payAsYouGoGroupRatio = serviceOptionalDouble(payAsYouGoGroup["ratio"])
+    }
+
+    var preferredGroup: String {
+        if billingType == "subscription" {
+            return subscriptionGroupName
+        }
+        if billingType == "pay_as_you_go" || billingType == "payAsYouGo" {
+            return payAsYouGoGroupName
+        }
+        return !subscriptionGroupName.isEmpty ? subscriptionGroupName : payAsYouGoGroupName
+    }
+
+    var preferredRatio: Double? {
+        if billingType == "subscription" {
+            return subscriptionGroupRatio
+        }
+        if billingType == "pay_as_you_go" || billingType == "payAsYouGo" {
+            return payAsYouGoGroupRatio
+        }
+        return subscriptionGroupRatio ?? payAsYouGoGroupRatio
+    }
 }
 
 private func sub2Page(_ value: Any) -> (items: [[String: Any]], total: Int, pageSize: Int) {
@@ -502,6 +650,10 @@ private func newAPIPage(_ value: Any) -> (items: [[String: Any]], total: Int, pa
     let nested = dict["data"] as? [String: Any] ?? [:]
     let rows = dict["items"] as? [[String: Any]] ?? nested["items"] as? [[String: Any]] ?? []
     return (rows, serviceInt(dict["total"] ?? nested["total"]) ?? rows.count, serviceInt(dict["size"] ?? nested["size"]) ?? max(rows.count, 1))
+}
+
+private func variantNewAPIPage(_ value: Any) -> (items: [[String: Any]], total: Int, pageSize: Int) {
+    newAPIPage(value)
 }
 
 func parseSub2UserGroupRates(_ value: Any) -> [Int: Double] {
@@ -643,4 +795,23 @@ private func serviceOptionalDouble(_ value: Any?) -> Double? {
 
 private func serviceDouble(_ value: Any?, fallback: Double = 0) -> Double {
     serviceOptionalDouble(value) ?? fallback
+}
+
+private struct NewAPISignature {
+    let timestamp: String
+    let nonce: String
+    let sign: String
+}
+
+private func newAPISignature(path: String, date: Date, nonce: String) -> NewAPISignature {
+    let timestamp = String(Int(date.timeIntervalSince1970))
+    let payload = "\(timestamp)\(nonce)\(path)nekoneko"
+    let digest = SHA256.hash(data: Data(payload.utf8))
+    let hex = digest.map { String(format: "%02x", $0) }.joined()
+    return NewAPISignature(timestamp: timestamp, nonce: nonce, sign: String(hex.prefix(16)))
+}
+
+private func newAPIRandomNonce() -> String {
+    let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+    return String((0..<8).map { _ in alphabet[Int.random(in: 0..<alphabet.count)] })
 }
