@@ -29,3 +29,6 @@ env.txt
 *.pem
 sub2-rate-watch*.json
 .sub2-rate-watch*.json
+
+# Local agent workspace
+.superpowers/brainstorm/
