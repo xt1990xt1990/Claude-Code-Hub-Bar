@@ -133,6 +133,7 @@ final class MonitorState: ObservableObject {
     @AppStorage("check_for_updates") var checkForUpdatesEnabled: Bool = true
     @AppStorage("upstream_rate_auto_sync_enabled") var upstreamRateAutoSyncEnabled = false
     @AppStorage("upstream_rate_auto_sync_interval_hours") var upstreamRateAutoSyncIntervalHours = 6.0
+    @AppStorage("upstream_rate_auto_sync_last_run_at") var upstreamRateAutoSyncLastRunEpoch: Double = 0
     @AppStorage("dismissed_update_version") var dismissedUpdateVersion: String = ""
     @AppStorage("cch_theme") private var themeRawValue = CCHTheme.liquidGlass.rawValue
 
@@ -1184,6 +1185,18 @@ final class MonitorState: ObservableObject {
     func runScheduledUpstreamRateAutoSync() async {
         guard upstreamRateAutoSyncEnabled else { return }
         await refreshUpstreamRates(silent: true)
+        upstreamRateAutoSyncLastRunEpoch = Date().timeIntervalSince1970
+    }
+
+    var upstreamRateAutoSyncLastRunAt: Date? {
+        upstreamRateAutoSyncLastRunEpoch > 0
+            ? Date(timeIntervalSince1970: upstreamRateAutoSyncLastRunEpoch)
+            : nil
+    }
+
+    var upstreamRateAutoSyncNextRunAt: Date? {
+        guard upstreamRateAutoSyncEnabled, let last = upstreamRateAutoSyncLastRunAt else { return nil }
+        return last.addingTimeInterval(upstreamRateAutoSyncIntervalHours * 3600)
     }
 
     func updateProviderMultiplier(_ provider: CCHProvider, multiplier: Double) async {

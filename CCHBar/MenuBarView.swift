@@ -1386,7 +1386,10 @@ private struct UpstreamRatesTabView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            header
+            VStack(alignment: .leading, spacing: 6) {
+                header
+                RefreshHairline(isActive: state.isRefreshingUpstreamRates || state.isRefreshingUpstreamBalances)
+            }
             stats
 
             if state.upstreamRateSites.isEmpty {
@@ -1459,71 +1462,90 @@ private struct UpstreamRatesTabView: View {
                     .lineLimit(1)
             }
             Spacer()
-            Button {
-                Task { await state.refreshUpstreamRates() }
-            } label: {
-                if state.isRefreshingUpstreamRates {
-                    ProgressView()
-                        .scaleEffect(0.48)
-                        .frame(width: 22, height: 22)
-                } else {
-                    Image(systemName: isRateRefreshHovered ? "arrow.clockwise" : "list.bullet.rectangle")
-                        .font(.system(size: 10.5, weight: .bold))
-                        .frame(width: 22, height: 22)
+            HStack(spacing: 0) {
+                Button {
+                    Task { await state.refreshUpstreamRates() }
+                } label: {
+                    if state.isRefreshingUpstreamRates {
+                        ProgressView()
+                            .scaleEffect(0.48)
+                            .frame(width: 24, height: 22)
+                    } else {
+                        Image(systemName: isRateRefreshHovered ? "arrow.clockwise" : "list.bullet.rectangle")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .frame(width: 24, height: 22)
+                    }
                 }
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(isRateRefreshHovered ? theme.accentBlue : theme.textSecondary)
-            .disabled(state.isRefreshingUpstreamRates)
-            .help("重新检测 key 匹配和分组倍率")
-            .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.12)) {
-                    isRateRefreshHovered = hovering
+                .buttonStyle(.borderless)
+                .foregroundStyle(isRateRefreshHovered ? theme.accentBlue : theme.textSecondary)
+                .disabled(state.isRefreshingUpstreamRates)
+                .help("重新检测 key 匹配和分组倍率")
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        isRateRefreshHovered = hovering
+                    }
                 }
-            }
 
-            Button {
-                Task { await state.refreshUpstreamBalances() }
-            } label: {
-                if state.isRefreshingUpstreamBalances {
-                    ProgressView()
-                        .scaleEffect(0.48)
-                        .frame(width: 22, height: 22)
-                } else {
-                    Image(systemName: isBalanceRefreshHovered ? "arrow.clockwise" : "creditcard")
-                        .font(.system(size: 10.5, weight: .bold))
-                        .frame(width: 22, height: 22)
-                }
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(isBalanceRefreshHovered ? theme.accentBlue : theme.textSecondary)
-            .disabled(state.isRefreshingUpstreamBalances)
-            .help(upstreamBalanceRefreshHelp(state.upstreamBalanceLastRefreshedAt))
-            .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.12)) {
-                    isBalanceRefreshHovered = hovering
-                }
-            }
+                Rectangle()
+                    .fill(theme.borderSubtle)
+                    .frame(width: 1, height: 12)
 
-            Button {
-                isAutoSyncPopoverPresented.toggle()
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: state.upstreamRateAutoSyncEnabled ? "timer.circle.fill" : "timer")
-                        .font(.system(size: 10.5, weight: .bold))
-                    Text(state.upstreamRateAutoSyncEnabled ? "\(Int(state.upstreamRateAutoSyncIntervalHours))h" : "自动")
-                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
-                        .monospacedDigit()
+                Button {
+                    Task { await state.refreshUpstreamBalances() }
+                } label: {
+                    if state.isRefreshingUpstreamBalances {
+                        ProgressView()
+                            .scaleEffect(0.48)
+                            .frame(width: 24, height: 22)
+                    } else {
+                        Image(systemName: isBalanceRefreshHovered ? "arrow.clockwise" : "creditcard")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .frame(width: 24, height: 22)
+                    }
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(isBalanceRefreshHovered ? theme.accentBlue : theme.textSecondary)
+                .disabled(state.isRefreshingUpstreamBalances)
+                .help(upstreamBalanceRefreshHelp(state.upstreamBalanceLastRefreshedAt))
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        isBalanceRefreshHovered = hovering
+                    }
+                }
+
+                Rectangle()
+                    .fill(theme.borderSubtle)
+                    .frame(width: 1, height: 12)
+
+                Button {
+                    isAutoSyncPopoverPresented.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: state.upstreamRateAutoSyncEnabled ? "timer.circle.fill" : "timer")
+                            .font(.system(size: 10.5, weight: .bold))
+                        Text(state.upstreamRateAutoSyncEnabled ? "\(Int(state.upstreamRateAutoSyncIntervalHours))h" : "自动")
+                            .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(height: 22)
+                }
+                .buttonStyle(.borderless)
+                .fixedSize()
+                .foregroundStyle(state.upstreamRateAutoSyncEnabled ? theme.accentBlue : theme.textSecondary)
+                .help("自动检测/同步频率")
+                .popover(isPresented: $isAutoSyncPopoverPresented, arrowEdge: .bottom) {
+                    UpstreamAutoSyncPopover(state: state)
+                        .environment(\.cchTheme, theme)
                 }
             }
-            .buttonStyle(.borderless)
-            .fixedSize()
-            .foregroundStyle(state.upstreamRateAutoSyncEnabled ? theme.accentBlue : theme.textSecondary)
-            .help("自动检测/同步频率")
-            .popover(isPresented: $isAutoSyncPopoverPresented, arrowEdge: .bottom) {
-                UpstreamAutoSyncPopover(state: state)
-                    .environment(\.cchTheme, theme)
-            }
+            .padding(.horizontal, 1)
+            .cchSurface(.control)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(theme.borderSubtle, lineWidth: 1)
+            )
         }
     }
 
@@ -1537,10 +1559,20 @@ private struct UpstreamRatesTabView: View {
                 value: Text("\(state.upstreamRatePendingSyncCount)")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(state.upstreamRatePendingSyncCount > 0 ? theme.accentOrange : theme.textPrimary)
+                    .contentTransition(.numericText())
+                    .animation(.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.22), value: state.upstreamRatePendingSyncCount)
+                    .foregroundStyle(state.upstreamRatePendingSyncCount > 0 ? theme.accentOrange : theme.textPrimary),
+                highlighted: state.upstreamRatePendingSyncCount > 0
             )
             Spacer(minLength: 0)
+            if state.upstreamRatePendingSyncCount > 0 {
+                PendingSyncCTA(count: state.upstreamRatePendingSyncCount) {
+                    Task { await state.syncSelectedUpstreamRates(showEmptyMessage: false) }
+                }
+                .transition(.scale(scale: 0.92).combined(with: .opacity))
+            }
         }
+        .animation(.spring(response: 0.28, dampingFraction: 0.85), value: state.upstreamRatePendingSyncCount)
     }
 
     private func siteSection(
@@ -1650,6 +1682,10 @@ private struct UpstreamAutoSyncPopover: View {
                 .disabled(normalizedHours == nil)
             }
 
+            if state.upstreamRateAutoSyncEnabled {
+                AutoSyncCountdown(state: state)
+            }
+
             Text("范围 1-72；余额后台每 1 小时静默刷新。")
                 .font(.caption2)
                 .foregroundStyle(theme.textSecondary)
@@ -1667,6 +1703,73 @@ private struct UpstreamAutoSyncPopover: View {
         state.upstreamRateAutoSyncIntervalHours = normalizedHours
         intervalInput = "\(Int(normalizedHours))"
         state.startUpstreamRateAutoSyncTimer()
+    }
+}
+
+private struct AutoSyncCountdown: View {
+    @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
+    @State private var now = Date()
+
+    private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+
+    private var nextRun: Date? { state.upstreamRateAutoSyncNextRunAt }
+    private var lastRun: Date? { state.upstreamRateAutoSyncLastRunAt }
+
+    private var progress: Double {
+        guard let last = lastRun else { return 0 }
+        let interval = state.upstreamRateAutoSyncIntervalHours * 3600
+        guard interval > 0 else { return 0 }
+        let elapsed = max(0, now.timeIntervalSince(last))
+        return min(1, elapsed / interval)
+    }
+
+    private var remainingText: String {
+        guard let next = nextRun else { return "等待首次自动同步" }
+        let remaining = next.timeIntervalSince(now)
+        if remaining <= 0 { return "即将同步…" }
+        let totalMinutes = Int(remaining / 60)
+        if totalMinutes < 1 { return "< 1m" }
+        if totalMinutes < 60 { return "\(totalMinutes)m" }
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        return minutes == 0 ? "\(hours)h" : "\(hours)h \(minutes)m"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text("距下次同步")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(theme.textSecondary)
+                Spacer()
+                Text(remainingText)
+                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.textPrimary)
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.25), value: remainingText)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(theme.borderSubtle.opacity(0.5))
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [theme.accentBlue, theme.accentBlue.opacity(0.45)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(3, geo.size.width * progress))
+                }
+            }
+            .frame(height: 3)
+            .clipShape(Capsule())
+        }
+        .onReceive(timer) { _ in now = Date() }
+        .onAppear { now = Date() }
     }
 }
 
@@ -1699,6 +1802,15 @@ private struct UpstreamRateSiteCard: View {
     @State private var isEditingDisplayName = false
     @State private var draftDisplayName = ""
     @State private var isConfirmingDelete = false
+
+    private var stripColor: Color {
+        if site.pendingSyncCount > 0 { return theme.accentOrange }
+        if configureCredential != nil { return theme.accentBlue.opacity(0.55) }
+        if site.status == .available { return theme.accentGreen }
+        return theme.textTertiary.opacity(0.4)
+    }
+
+    private static let stripHeight: CGFloat = 26
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1773,9 +1885,16 @@ private struct UpstreamRateSiteCard: View {
             }
         }
         .padding(10)
+        .padding(.leading, 3)
         .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.borderSubtle, lineWidth: 1))
+        .overlay(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(stripColor)
+                .frame(width: 3, height: Self.stripHeight)
+                .padding(.top, 9)
+        }
         .animation(.easeOut(duration: 0.16), value: isExpanded)
         .transition(.opacity.combined(with: .scale(scale: 0.992, anchor: .top)))
         .confirmationDialog(
@@ -1793,25 +1912,51 @@ private struct UpstreamRateSiteCard: View {
     }
 }
 
+private enum UpstreamBalanceTier {
+    case healthy   // >= $5
+    case low       // $1 .. $5
+    case critical  // < $1
+
+    init(_ amount: Double) {
+        if amount < 1 { self = .critical }
+        else if amount < 5 { self = .low }
+        else { self = .healthy }
+    }
+}
+
 private struct UpstreamBalanceCapsule: View {
     let balance: UpstreamBalanceSnapshot
     @Environment(\.cchTheme) private var theme
+
+    private var tier: UpstreamBalanceTier {
+        UpstreamBalanceTier(balance.displayAmount)
+    }
+
+    private var textColor: Color {
+        switch tier {
+        case .healthy:  return .white
+        case .low:      return theme.accentOrange
+        case .critical: return theme.accentRed
+        }
+    }
 
     var body: some View {
         Text(upstreamBalanceText(balance))
             .font(.system(size: 11.5, weight: .black, design: .rounded))
             .monospacedDigit()
-            .foregroundStyle(.white)
+            .contentTransition(.numericText(value: balance.displayAmount))
+            .animation(.easeOut(duration: 0.3), value: balance.displayAmount)
+            .foregroundStyle(textColor)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3.5)
-        .background(Color.black.opacity(0.88))
-        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.7))
-        .clipShape(Capsule())
-        .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
-        .help(upstreamBalanceHelp(balance))
-        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3.5)
+            .background(Color.black.opacity(0.88))
+            .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.7))
+            .clipShape(Capsule())
+            .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+            .help(upstreamBalanceHelp(balance))
+            .transition(.opacity.combined(with: .scale(scale: 0.96)))
     }
 }
 
@@ -1841,11 +1986,22 @@ private struct UpstreamRateProviderSyncRow: View {
         state.provider(forUpstreamRateRow: row)
     }
 
+    private var rateDirection: RateChangeDirection {
+        guard let upstreamRate = row.upstreamRate else { return .none }
+        if abs(row.currentRate - upstreamRate) < 0.0001 { return .equal }
+        return row.currentRate > upstreamRate ? .up : .down
+    }
+
     var body: some View {
         VStack(spacing: 7) {
             HStack(spacing: 8) {
-                StatusDot(color: statusColor)
-                    .frame(width: 12)
+                if row.hasRateChange {
+                    RatePulseDot(color: statusColor)
+                        .frame(width: 14)
+                } else {
+                    StatusDot(color: statusColor)
+                        .frame(width: 12)
+                }
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 6) {
                         Text(row.providerName)
@@ -1882,9 +2038,7 @@ private struct UpstreamRateProviderSyncRow: View {
                                 .help(row.isSelectedForSync ? "正在跟随上游，取消勾选后可手动编辑" : "")
                         }
                         if let upstreamRate = row.upstreamRate {
-                            Text(row.hasRateChange ? "→" : "=")
-                                .font(.caption2)
-                                .foregroundStyle(theme.textSecondary)
+                            RateChangeArrow(direction: rateDirection)
                             Text("上游")
                                 .font(.caption2)
                                 .foregroundStyle(theme.textSecondary)
@@ -2107,7 +2261,11 @@ private struct UpstreamRateUnsupportedCard: View {
         .padding(10)
         .cchSurface(.panelSoft)
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.borderSubtle, lineWidth: 1))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(theme.borderSubtle, style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+        )
+        .opacity(0.72)
         .transition(.opacity.combined(with: .scale(scale: 0.992, anchor: .top)))
         .confirmationDialog(
             "从上游倍率移除 \(site.displayName)？",
@@ -2603,10 +2761,12 @@ private struct MetricCard: View {
 private struct MiniStat: View {
     let title: String
     let value: AnyView
+    let highlighted: Bool
     @Environment(\.cchTheme) private var theme
 
-    init(title: String, value: String) {
+    init(title: String, value: String, highlighted: Bool = false) {
         self.title = title
+        self.highlighted = highlighted
         self.value = AnyView(
             Text(value)
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -2616,8 +2776,9 @@ private struct MiniStat: View {
         )
     }
 
-    init<V: View>(title: String, value: V) {
+    init<V: View>(title: String, value: V, highlighted: Bool = false) {
         self.title = title
+        self.highlighted = highlighted
         self.value = AnyView(value)
     }
 
@@ -2632,6 +2793,61 @@ private struct MiniStat: View {
         .padding(.vertical, 7)
         .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(theme.accentOrange.opacity(highlighted ? 0.55 : 0), lineWidth: 1)
+        )
+        .shadow(color: theme.accentOrange.opacity(highlighted ? 0.18 : 0), radius: 3)
+        .animation(.easeOut(duration: 0.2), value: highlighted)
+    }
+}
+
+private struct PendingSyncCTA: View {
+    let count: Int
+    let action: () -> Void
+    @Environment(\.cchTheme) private var theme
+    @State private var pulse = false
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 9.5, weight: .black))
+                Text("应用 \(count) 个变更")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(count)))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule().fill(theme.accentOrange)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(theme.accentOrange.opacity(pulse ? 0 : 0.55), lineWidth: 2)
+                    .scaleEffect(pulse ? 1.18 : 1)
+            )
+            .overlay(
+                Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.7)
+            )
+            .shadow(color: theme.accentOrange.opacity(isHovering ? 0.45 : 0.28), radius: isHovering ? 5 : 3, y: 1)
+            .scaleEffect(isHovering ? 1.03 : 1)
+        }
+        .buttonStyle(.plain)
+        .help("把所有待应用的上游倍率一次性同步到 CCH")
+        .animation(.easeOut(duration: 0.16), value: isHovering)
+        .onHover { isHovering = $0 }
+        .onAppear {
+            pulse = false
+            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
+                pulse = true
+            }
+        }
+        .onDisappear { pulse = false }
+        .animation(.easeOut(duration: 0.18), value: count)
     }
 }
 
@@ -2722,6 +2938,7 @@ private struct MultiplierBadge: View {
     var body: some View {
         Text(formatMultiplier(value))
             .font(.system(size: compact ? 8.5 : 9, weight: .bold, design: .rounded))
+            .monospacedDigit()
             .foregroundStyle(color)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
@@ -2729,6 +2946,8 @@ private struct MultiplierBadge: View {
             .padding(.vertical, 1)
             .background(color.opacity(0.13))
             .clipShape(Capsule())
+            .contentTransition(.numericText(value: value))
+            .animation(.easeOut(duration: 0.28), value: value)
     }
 }
 
@@ -4218,6 +4437,136 @@ private struct StatusDot: View {
             .fill(color)
             .frame(width: 8, height: 8)
             .shadow(color: color.opacity(0.35), radius: 3)
+    }
+}
+
+private struct RatePulseDot: View {
+    let color: Color
+    @State private var pulse = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(color.opacity(pulse ? 0 : 0.55), lineWidth: 1.4)
+                .frame(width: 16, height: 16)
+                .scaleEffect(pulse ? 1.35 : 0.55)
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+                .shadow(color: color.opacity(0.35), radius: 3)
+        }
+        .frame(width: 18, height: 18)
+        .onAppear {
+            pulse = false
+            withAnimation(.easeOut(duration: 1.25).repeatForever(autoreverses: false)) {
+                pulse = true
+            }
+        }
+        .onDisappear { pulse = false }
+    }
+}
+
+private struct RefreshHairline: View {
+    let isActive: Bool
+    @State private var phase: CGFloat = 0   // 0 = off left, 1 = off right
+    @State private var measuredWidth: CGFloat = 0
+    @State private var isCycling = false
+    @State private var keepCycling = false
+    @Environment(\.cchTheme) private var theme
+
+    private let cycleDuration: Double = 1.4
+
+    private var bandWidth: CGFloat {
+        max(60, measuredWidth * 0.42)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(theme.borderSubtle.opacity(0.4))
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [.clear, theme.accentBlue, .clear],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: bandWidth)
+                    .offset(x: -bandWidth + phase * (geo.size.width + bandWidth))
+            }
+            .onAppear { measuredWidth = geo.size.width }
+            .onChange(of: geo.size.width) { _, new in measuredWidth = new }
+        }
+        .frame(height: 1.5)
+        .clipShape(Capsule())
+        .opacity(isCycling ? 1 : 0)
+        .animation(.easeOut(duration: 0.3), value: isCycling)
+        .onAppear {
+            keepCycling = isActive
+            if isActive && !isCycling { startCycle() }
+        }
+        .onChange(of: isActive) { _, new in
+            keepCycling = new
+            if new && !isCycling { startCycle() }
+        }
+    }
+
+    private func startCycle() {
+        isCycling = true
+        var reset = Transaction()
+        reset.disablesAnimations = true
+        withTransaction(reset) {
+            phase = 0
+        }
+        DispatchQueue.main.async {
+            withAnimation(.linear(duration: cycleDuration)) {
+                phase = 1
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + cycleDuration + 0.01) {
+            if keepCycling {
+                startCycle()
+            } else {
+                isCycling = false
+            }
+        }
+    }
+}
+
+private enum RateChangeDirection {
+    case up, down, equal, none
+}
+
+private struct RateChangeArrow: View {
+    let direction: RateChangeDirection
+    @Environment(\.cchTheme) private var theme
+
+    private var symbolName: String {
+        switch direction {
+        case .up: return "arrow.up"
+        case .down: return "arrow.down"
+        case .equal: return "equal"
+        case .none: return "arrow.right"
+        }
+    }
+
+    private var color: Color {
+        switch direction {
+        case .up: return theme.accentGreen
+        case .down: return theme.accentOrange
+        case .equal, .none: return theme.textSecondary
+        }
+    }
+
+    var body: some View {
+        Image(systemName: symbolName)
+            .font(.system(size: 9, weight: .black))
+            .foregroundStyle(color)
+            .frame(width: 14, height: 12)
+            .contentTransition(.symbolEffect(.replace))
+            .animation(.easeOut(duration: 0.18), value: direction)
     }
 }
 
