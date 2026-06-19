@@ -134,6 +134,7 @@ final class MonitorState: ObservableObject {
     @AppStorage("upstream_rate_auto_sync_enabled") var upstreamRateAutoSyncEnabled = false
     @AppStorage("upstream_rate_auto_sync_interval_hours") var upstreamRateAutoSyncIntervalHours = 6.0
     @AppStorage("upstream_rate_auto_sync_last_run_at") var upstreamRateAutoSyncLastRunEpoch: Double = 0
+    @AppStorage("upstream_rate_auto_sync_next_run_at") var upstreamRateAutoSyncNextRunEpoch: Double = 0
     @AppStorage("dismissed_update_version") var dismissedUpdateVersion: String = ""
     @AppStorage("cch_theme") private var themeRawValue = CCHTheme.liquidGlass.rawValue
 
@@ -1155,6 +1156,7 @@ final class MonitorState: ObservableObject {
         upstreamRateAutoSyncTimer?.cancel()
         guard upstreamRateAutoSyncEnabled else {
             upstreamRateAutoSyncTimer = nil
+            upstreamRateAutoSyncNextRunEpoch = 0
             return
         }
         let hours = min(
@@ -1164,7 +1166,9 @@ final class MonitorState: ObservableObject {
         if hours != upstreamRateAutoSyncIntervalHours {
             upstreamRateAutoSyncIntervalHours = hours
         }
-        upstreamRateAutoSyncTimer = Timer.publish(every: hours * 60 * 60, on: .main, in: .common)
+        let interval = hours * 60 * 60
+        upstreamRateAutoSyncNextRunEpoch = Date().addingTimeInterval(interval).timeIntervalSince1970
+        upstreamRateAutoSyncTimer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
@@ -1184,8 +1188,12 @@ final class MonitorState: ObservableObject {
 
     func runScheduledUpstreamRateAutoSync() async {
         guard upstreamRateAutoSyncEnabled else { return }
+        let startedAt = Date()
+        upstreamRateAutoSyncLastRunEpoch = startedAt.timeIntervalSince1970
+        upstreamRateAutoSyncNextRunEpoch = startedAt
+            .addingTimeInterval(upstreamRateAutoSyncIntervalHours * 3600)
+            .timeIntervalSince1970
         await refreshUpstreamRates(silent: true)
-        upstreamRateAutoSyncLastRunEpoch = Date().timeIntervalSince1970
     }
 
     var upstreamRateAutoSyncLastRunAt: Date? {
@@ -1195,8 +1203,8 @@ final class MonitorState: ObservableObject {
     }
 
     var upstreamRateAutoSyncNextRunAt: Date? {
-        guard upstreamRateAutoSyncEnabled, let last = upstreamRateAutoSyncLastRunAt else { return nil }
-        return last.addingTimeInterval(upstreamRateAutoSyncIntervalHours * 3600)
+        guard upstreamRateAutoSyncEnabled, upstreamRateAutoSyncNextRunEpoch > 0 else { return nil }
+        return Date(timeIntervalSince1970: upstreamRateAutoSyncNextRunEpoch)
     }
 
     func updateProviderMultiplier(_ provider: CCHProvider, multiplier: Double) async {

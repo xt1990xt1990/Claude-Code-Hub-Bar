@@ -1565,12 +1565,6 @@ private struct UpstreamRatesTabView: View {
                 highlighted: state.upstreamRatePendingSyncCount > 0
             )
             Spacer(minLength: 0)
-            if state.upstreamRatePendingSyncCount > 0 {
-                PendingSyncCTA(count: state.upstreamRatePendingSyncCount) {
-                    Task { await state.syncSelectedUpstreamRates(showEmptyMessage: false) }
-                }
-                .transition(.scale(scale: 0.92).combined(with: .opacity))
-            }
         }
         .animation(.spring(response: 0.28, dampingFraction: 0.85), value: state.upstreamRatePendingSyncCount)
     }
@@ -1714,13 +1708,13 @@ private struct AutoSyncCountdown: View {
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     private var nextRun: Date? { state.upstreamRateAutoSyncNextRunAt }
-    private var lastRun: Date? { state.upstreamRateAutoSyncLastRunAt }
 
     private var progress: Double {
-        guard let last = lastRun else { return 0 }
+        guard let next = nextRun else { return 0 }
         let interval = state.upstreamRateAutoSyncIntervalHours * 3600
         guard interval > 0 else { return 0 }
-        let elapsed = max(0, now.timeIntervalSince(last))
+        let scheduledAt = next.addingTimeInterval(-interval)
+        let elapsed = max(0, now.timeIntervalSince(scheduledAt))
         return min(1, elapsed / interval)
     }
 
@@ -1995,13 +1989,8 @@ private struct UpstreamRateProviderSyncRow: View {
     var body: some View {
         VStack(spacing: 7) {
             HStack(spacing: 8) {
-                if row.hasRateChange {
-                    RatePulseDot(color: statusColor)
-                        .frame(width: 14)
-                } else {
-                    StatusDot(color: statusColor)
-                        .frame(width: 12)
-                }
+                StatusDot(color: statusColor)
+                    .frame(width: 12)
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 6) {
                         Text(row.providerName)
@@ -2799,55 +2788,6 @@ private struct MiniStat: View {
         )
         .shadow(color: theme.accentOrange.opacity(highlighted ? 0.18 : 0), radius: 3)
         .animation(.easeOut(duration: 0.2), value: highlighted)
-    }
-}
-
-private struct PendingSyncCTA: View {
-    let count: Int
-    let action: () -> Void
-    @Environment(\.cchTheme) private var theme
-    @State private var pulse = false
-    @State private var isHovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: "bolt.fill")
-                    .font(.system(size: 9.5, weight: .black))
-                Text("应用 \(count) 个变更")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .contentTransition(.numericText(value: Double(count)))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                Capsule().fill(theme.accentOrange)
-            )
-            .overlay(
-                Capsule()
-                    .stroke(theme.accentOrange.opacity(pulse ? 0 : 0.55), lineWidth: 2)
-                    .scaleEffect(pulse ? 1.18 : 1)
-            )
-            .overlay(
-                Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.7)
-            )
-            .shadow(color: theme.accentOrange.opacity(isHovering ? 0.45 : 0.28), radius: isHovering ? 5 : 3, y: 1)
-            .scaleEffect(isHovering ? 1.03 : 1)
-        }
-        .buttonStyle(.plain)
-        .help("把所有待应用的上游倍率一次性同步到 CCH")
-        .animation(.easeOut(duration: 0.16), value: isHovering)
-        .onHover { isHovering = $0 }
-        .onAppear {
-            pulse = false
-            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
-                pulse = true
-            }
-        }
-        .onDisappear { pulse = false }
-        .animation(.easeOut(duration: 0.18), value: count)
     }
 }
 
@@ -4437,32 +4377,6 @@ private struct StatusDot: View {
             .fill(color)
             .frame(width: 8, height: 8)
             .shadow(color: color.opacity(0.35), radius: 3)
-    }
-}
-
-private struct RatePulseDot: View {
-    let color: Color
-    @State private var pulse = false
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .stroke(color.opacity(pulse ? 0 : 0.55), lineWidth: 1.4)
-                .frame(width: 16, height: 16)
-                .scaleEffect(pulse ? 1.35 : 0.55)
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
-                .shadow(color: color.opacity(0.35), radius: 3)
-        }
-        .frame(width: 18, height: 18)
-        .onAppear {
-            pulse = false
-            withAnimation(.easeOut(duration: 1.25).repeatForever(autoreverses: false)) {
-                pulse = true
-            }
-        }
-        .onDisappear { pulse = false }
     }
 }
 
