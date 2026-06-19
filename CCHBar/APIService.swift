@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 struct CCHConfig {
     var baseURL: String
@@ -661,6 +662,10 @@ actor APIService {
     }
 
     func probeFirstEndpoint(config: CCHConfig, provider: CCHProvider) async throws -> CCHProbeResult {
+        if let result = await probeConfiguredProviderURL(provider) {
+            return result
+        }
+
         if let vendorId = provider.vendorId {
             let endpointsData: Any
             do {
@@ -685,10 +690,6 @@ actor APIService {
                let endpointId = firstOptionalInt(endpoint, keys: ["id", "endpointId", "providerEndpointId"]) {
                 return try await probeProviderEndpoint(config: config, endpointId: endpointId)
             }
-        }
-
-        if let result = await probeConfiguredProviderURL(provider) {
-            return result
         }
 
         throw APIError.actionError("没有可测速的端点")
@@ -738,6 +739,30 @@ actor APIService {
             )
         }
 
+        if let tcpLatencyMs = try? await probeTCPConnection(url) {
+            let isSuspiciousLocalProxy = isLikelyLocalProxyLatency(tcpLatencyMs)
+            if !isSuspiciousLocalProxy || url.scheme?.lowercased() != "https" {
+                return CCHProbeResult(
+                    ok: true,
+                    method: "TCP",
+                    statusCode: nil,
+                    latencyMs: tcpLatencyMs,
+                    errorMessage: ""
+                )
+            }
+
+            if let tlsLatencyMs = try? await probeTLSConnection(url) {
+                let shouldEstimateRTT = tlsLatencyMs >= 80 && tlsLatencyMs >= tcpLatencyMs * 6
+                return CCHProbeResult(
+                    ok: true,
+                    method: shouldEstimateRTT ? "链路估算" : "TLS",
+                    statusCode: nil,
+                    latencyMs: shouldEstimateRTT ? max(tcpLatencyMs, tlsLatencyMs / 2) : tlsLatencyMs,
+                    errorMessage: ""
+                )
+            }
+        }
+
         let start = Date()
         do {
             let response = try await probeURL(url, method: "HEAD")
@@ -782,6 +807,59 @@ actor APIService {
                 )
             }
         }
+    }
+
+    private func probeTCPConnection(_ url: URL, timeout: TimeInterval = 4) async throws -> Double {
+        try await probeNetworkConnection(url, parameters: .tcp, timeout: timeout)
+    }
+
+    private func probeTLSConnection(_ url: URL, timeout: TimeInterval = 5) async throws -> Double {
+        try await probeNetworkConnection(url, parameters: .tls, timeout: timeout)
+    }
+
+    private func probeNetworkConnection(_ url: URL, parameters: NWParameters, timeout: TimeInterval) async throws -> Double {
+        guard let host = url.host else { throw APIError.invalidURL }
+        let portNumber = url.port ?? (url.scheme?.lowercased() == "http" ? 80 : 443)
+        guard (1...65_535).contains(portNumber),
+              let port = NWEndpoint.Port(rawValue: UInt16(portNumber))
+        else {
+            throw APIError.invalidURL
+        }
+
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
+        let start = Date()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Double, Error>) in
+                let box = ProbeContinuationBox(continuation)
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        let latencyMs = max(Date().timeIntervalSince(start) * 1000, 0.1)
+                        connection.cancel()
+                        box.resume(.success(latencyMs))
+                    case .failed(let error):
+                        connection.cancel()
+                        box.resume(.failure(error))
+                    case .cancelled:
+                        box.resume(.failure(APIError.actionError("TLS 连接已取消")))
+                    default:
+                        break
+                    }
+                }
+                connection.start(queue: .global(qos: .utility))
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                    connection.cancel()
+                    box.resume(.failure(APIError.actionError("TLS 连接超时")))
+                }
+            }
+        } onCancel: {
+            connection.cancel()
+        }
+    }
+
+    private func isLikelyLocalProxyLatency(_ latencyMs: Double) -> Bool {
+        latencyMs > 0 && latencyMs < 15
     }
 
     private func probeURL(_ url: URL, method: String) async throws -> HTTPURLResponse {
@@ -1115,6 +1193,30 @@ actor APIService {
             if parts[0] == 172 && (16...31).contains(parts[1]) { return true }
         }
         return false
+    }
+}
+
+private final class ProbeContinuationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Double, Error>?
+
+    init(_ continuation: CheckedContinuation<Double, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ result: Result<Double, Error>) {
+        lock.lock()
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+
+        guard let continuation else { return }
+        switch result {
+        case .success(let value):
+            continuation.resume(returning: value)
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
     }
 }
 

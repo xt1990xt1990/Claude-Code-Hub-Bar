@@ -114,7 +114,10 @@ private enum CCHUpstreamRateStorage {
     static let selectedProviderIdsKey = "upstream_rate_selected_provider_ids_v1"
     static let ignoredHostsKey = "upstream_rate_ignored_hosts_v1"
     static let sourceTypeOverridesKey = "upstream_rate_source_type_overrides_v1"
+    static let hostDisplayNamesKey = "upstream_rate_host_display_names_v1"
     static let snapshotsKey = "upstream_rate_snapshots_v1"
+    static let balanceRefreshInterval: TimeInterval = 60 * 60
+    static let balanceStaleInterval: TimeInterval = 60 * 60
     static let minAutoSyncIntervalHours = 1.0
     static let maxAutoSyncIntervalHours = 72.0
 }
@@ -166,11 +169,14 @@ final class MonitorState: ObservableObject {
     @Published private(set) var upstreamRateSelectedProviderIds: Set<Int> = []
     @Published private(set) var upstreamRateIgnoredHosts: Set<String> = []
     @Published private(set) var upstreamRateSourceTypeOverrides: [String: UpstreamRateSourceType] = [:]
+    @Published private(set) var upstreamRateHostDisplayNames: [String: String] = [:]
     @Published private(set) var upstreamRateSnapshots: [UpstreamRateSnapshot] = []
     @Published private(set) var upstreamRateLastCheckedAt: Date?
     @Published private(set) var upstreamRateCredentials: [UpstreamRateCredential] = []
     @Published private(set) var upstreamRateFetchingHosts: Set<String> = []
     @Published private(set) var isRefreshingUpstreamRates = false
+    @Published private(set) var isRefreshingUpstreamBalances = false
+    @Published private(set) var upstreamBalanceLastRefreshedAt: Date?
 
     @Published var lastRefresh: Date?
     @Published var isLoading = false
@@ -206,6 +212,7 @@ final class MonitorState: ObservableObject {
     private var focusedViewTimer: AnyCancellable?
     private var updateCheckTimer: AnyCancellable?
     private var upstreamRateAutoSyncTimer: AnyCancellable?
+    private var upstreamBalanceRefreshTimer: AnyCancellable?
     private var wakeObserver: NSObjectProtocol?
     private var refreshTask: Task<Void, Never>?
     private var isLoadingActiveSessions = false
@@ -332,7 +339,8 @@ final class MonitorState: ObservableObject {
             providers: providers.map(upstreamProviderInput),
             snapshots: upstreamRateSnapshots,
             selectedProviderIds: upstreamRateSelectedProviderIds,
-            ignoredHosts: upstreamRateIgnoredHosts
+            ignoredHosts: upstreamRateIgnoredHosts,
+            displayNames: upstreamRateHostDisplayNames
         )
     }
 
@@ -374,12 +382,14 @@ final class MonitorState: ObservableObject {
         upstreamRateSelectedProviderIds = Self.loadIntSet(key: CCHUpstreamRateStorage.selectedProviderIdsKey)
         upstreamRateIgnoredHosts = Self.loadStringSet(key: CCHUpstreamRateStorage.ignoredHostsKey)
         upstreamRateSourceTypeOverrides = Self.loadUpstreamRateSourceTypeOverrides()
+        upstreamRateHostDisplayNames = Self.loadUpstreamRateHostDisplayNames()
         upstreamRateSnapshots = Self.loadUpstreamRateSnapshots()
         upstreamRateCredentials = upstreamCredentialStore.load()
         startRefreshTimer()
         startActiveSessionTimer()
         startUpdateCheckTimer()
         startUpstreamRateAutoSyncTimer()
+        startUpstreamBalanceRefreshTimer()
         observeSystemWake()
         refreshTask = Task { await refresh() }
         Task { [weak self] in
@@ -394,6 +404,7 @@ final class MonitorState: ObservableObject {
         focusedViewTimer?.cancel()
         updateCheckTimer?.cancel()
         upstreamRateAutoSyncTimer?.cancel()
+        upstreamBalanceRefreshTimer?.cancel()
         refreshTask?.cancel()
         cacheAlertDismissTask?.cancel()
         simulatedCacheAlertDismissTask?.cancel()
@@ -743,11 +754,12 @@ final class MonitorState: ObservableObject {
             let result = try await api.probeFirstEndpoint(config: config, provider: provider)
             if result.ok {
                 let latency = formatProbeLatency(result.latencyMs)
-                flashActionMessage("测速 \(provider.name): \(latency)")
+                let method = result.method.trimmingCharacters(in: .whitespacesAndNewlines)
+                let suffix = method.isEmpty ? "" : " · \(method)"
+                flashActionMessage("测速 \(provider.name): \(latency)\(suffix)")
             } else {
                 flashActionMessage(result.errorMessage, duration: 5, isWarning: true)
             }
-            _ = await loadProviders()
         } catch {
             flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
         }
@@ -813,12 +825,21 @@ final class MonitorState: ObservableObject {
         providerMultiplierUpdatingIds.contains(providerId)
     }
 
-    func toggleUpstreamRateSyncSelection(_ row: UpstreamRateProviderRow) {
+    func provider(forUpstreamRateRow row: UpstreamRateProviderRow) -> CCHProvider? {
+        providers.first { $0.id == row.providerId }
+    }
+
+    func toggleUpstreamRateSyncSelection(_ row: UpstreamRateProviderRow) async {
         guard row.matchStatus == .matched else { return }
         if upstreamRateSelectedProviderIds.contains(row.providerId) {
             upstreamRateSelectedProviderIds.remove(row.providerId)
         } else {
             upstreamRateSelectedProviderIds.insert(row.providerId)
+            saveUpstreamRateSelectedProviderIds()
+            if row.hasRateChange {
+                await syncUpstreamRate(row, showNoopMessage: false)
+            }
+            return
         }
         saveUpstreamRateSelectedProviderIds()
     }
@@ -893,8 +914,87 @@ final class MonitorState: ObservableObject {
             .filter { activeHosts.contains($0.host) }
         saveUpstreamRateSnapshots()
         upstreamRateLastCheckedAt = Date()
+        await syncSelectedUpstreamRates(showEmptyMessage: false)
         if !silent {
             flashActionMessage("上游倍率已检测")
+        }
+    }
+
+    func refreshUpstreamBalances(silent: Bool = false, onlyIfStale: Bool = false) async {
+        if isRefreshingUpstreamBalances { return }
+        if onlyIfStale,
+           let upstreamBalanceLastRefreshedAt,
+           Date().timeIntervalSince(upstreamBalanceLastRefreshedAt) < CCHUpstreamRateStorage.balanceStaleInterval {
+            return
+        }
+        let credentials = upstreamRateCredentials.filter { credential in
+            credential.sourceType == .sub2API || credential.sourceType == .newAPI
+        }
+        guard !credentials.isEmpty else { return }
+
+        isRefreshingUpstreamBalances = true
+        defer { isRefreshingUpstreamBalances = false }
+
+        let results = await withTaskGroup(of: UpstreamRateHostRefreshResult.self) { group in
+            for credential in credentials {
+                group.addTask { [upstreamRateService] in
+                    do {
+                        let outcome = try await upstreamRateService.fetchBalance(credential: credential)
+                        return UpstreamRateHostRefreshResult(
+                            host: credential.host,
+                            snapshot: outcome.snapshot,
+                            credential: outcome.credential,
+                            errorMessage: nil
+                        )
+                    } catch {
+                        return UpstreamRateHostRefreshResult(
+                            host: credential.host,
+                            snapshot: nil,
+                            credential: nil,
+                            errorMessage: error.localizedDescription
+                        )
+                    }
+                }
+            }
+
+            var values: [UpstreamRateHostRefreshResult] = []
+            for await result in group {
+                values.append(result)
+            }
+            return values.sorted { $0.host < $1.host }
+        }
+
+        var balanceSnapshots: [UpstreamRateSnapshot] = []
+        var nextCredentials = upstreamRateCredentials
+        for result in results {
+            if let snapshot = result.snapshot, snapshot.balance != nil {
+                balanceSnapshots.append(snapshot)
+            }
+            if let credential = result.credential {
+                nextCredentials.removeAll { $0.host == credential.host }
+                nextCredentials.append(credential)
+            }
+            if let errorMessage = result.errorMessage, !silent {
+                flashActionMessage("\(result.host): \(errorMessage)", duration: 5, isWarning: true)
+            }
+        }
+
+        upstreamRateCredentials = nextCredentials.sorted { $0.host < $1.host }
+        do {
+            try upstreamCredentialStore.save(upstreamRateCredentials)
+        } catch {
+            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+        }
+        if !balanceSnapshots.isEmpty {
+            upstreamRateSnapshots = UpstreamRateSnapshot.mergeBalances(
+                cached: upstreamRateSnapshots,
+                balances: balanceSnapshots
+            )
+            saveUpstreamRateSnapshots()
+        }
+        upstreamBalanceLastRefreshedAt = Date()
+        if !silent {
+            flashActionMessage(balanceSnapshots.isEmpty ? "未读取到上游余额" : "上游余额已刷新", isWarning: balanceSnapshots.isEmpty)
         }
     }
 
@@ -985,27 +1085,66 @@ final class MonitorState: ObservableObject {
         flashActionMessage("已将 \(normalizedHost) 设为 \(sourceType.title)")
     }
 
+    func setUpstreamRateHostDisplayName(host: String, displayName: String) {
+        let normalizedHost = normalizedUpstreamHost(host) ?? host.lowercased()
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == normalizedHost {
+            upstreamRateHostDisplayNames.removeValue(forKey: normalizedHost)
+            flashActionMessage("已恢复 \(normalizedHost) 的官网名")
+        } else {
+            upstreamRateHostDisplayNames[normalizedHost] = trimmed
+            flashActionMessage("已重命名为 \(trimmed)")
+        }
+        saveUpstreamRateHostDisplayNames()
+    }
+
+    func deleteUpstreamRateSite(_ site: UpstreamRateSite) {
+        let normalizedHost = normalizedUpstreamHost(site.host) ?? site.host.lowercased()
+        upstreamRateIgnoredHosts.insert(normalizedHost)
+        upstreamRateSelectedProviderIds.subtract(site.rows.map(\.providerId))
+        upstreamRateSnapshots.removeAll { $0.host == normalizedHost }
+        upstreamRateCredentials.removeAll { $0.host == normalizedHost }
+        upstreamRateSourceTypeOverrides.removeValue(forKey: normalizedHost)
+        upstreamRateHostDisplayNames.removeValue(forKey: normalizedHost)
+        saveUpstreamRateIgnoredHosts()
+        saveUpstreamRateSelectedProviderIds()
+        saveUpstreamRateSnapshots()
+        saveUpstreamRateSourceTypeOverrides()
+        saveUpstreamRateHostDisplayNames()
+        do {
+            try upstreamCredentialStore.save(upstreamRateCredentials)
+        } catch {
+            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+            return
+        }
+        flashActionMessage("已从上游倍率移除 \(site.displayName)")
+    }
+
     func syncSelectedUpstreamRates(showEmptyMessage: Bool = true) async {
         let rows = upstreamRateSites.flatMap(\.syncableRows).filter(\.hasRateChange)
         guard !rows.isEmpty else {
             if showEmptyMessage {
-                flashActionMessage("没有需要同步的勾选项")
+                flashActionMessage("没有需要应用的上游倍率")
             }
             return
         }
 
         for row in rows {
-            await syncUpstreamRate(row)
+            await syncUpstreamRate(row, showNoopMessage: showEmptyMessage)
         }
     }
 
-    func syncUpstreamRate(_ row: UpstreamRateProviderRow) async {
+    func syncUpstreamRate(_ row: UpstreamRateProviderRow, showNoopMessage: Bool = true) async {
         guard let provider = providers.first(where: { $0.id == row.providerId }), let upstreamRate = row.upstreamRate else {
-            flashActionMessage("未找到可同步的上游倍率", duration: 4, isWarning: true)
+            if showNoopMessage {
+                flashActionMessage("未找到可应用的上游倍率", duration: 4, isWarning: true)
+            }
             return
         }
         guard row.matchStatus == .matched else {
-            flashActionMessage("该渠道尚未匹配上游 key", duration: 4, isWarning: true)
+            if showNoopMessage {
+                flashActionMessage("该渠道尚未匹配上游 key", duration: 4, isWarning: true)
+            }
             return
         }
         await updateProviderMultiplier(provider, multiplier: upstreamRate)
@@ -1032,10 +1171,19 @@ final class MonitorState: ObservableObject {
             }
     }
 
+    func startUpstreamBalanceRefreshTimer() {
+        upstreamBalanceRefreshTimer?.cancel()
+        upstreamBalanceRefreshTimer = Timer.publish(every: CCHUpstreamRateStorage.balanceRefreshInterval, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.refreshUpstreamBalances(silent: true, onlyIfStale: true) }
+            }
+    }
+
     func runScheduledUpstreamRateAutoSync() async {
         guard upstreamRateAutoSyncEnabled else { return }
         await refreshUpstreamRates(silent: true)
-        await syncSelectedUpstreamRates(showEmptyMessage: false)
     }
 
     func updateProviderMultiplier(_ provider: CCHProvider, multiplier: Double) async {
@@ -1726,10 +1874,28 @@ private extension MonitorState {
         UserDefaults.standard.set(upstreamRateSelectedProviderIds.sorted(), forKey: CCHUpstreamRateStorage.selectedProviderIdsKey)
     }
 
+    func saveUpstreamRateIgnoredHosts() {
+        UserDefaults.standard.set(upstreamRateIgnoredHosts.sorted(), forKey: CCHUpstreamRateStorage.ignoredHostsKey)
+    }
+
     func saveUpstreamRateSourceTypeOverrides() {
         let encodable = upstreamRateSourceTypeOverrides.mapValues(\.rawValue)
         if let data = try? JSONEncoder().encode(encodable) {
             UserDefaults.standard.set(data, forKey: CCHUpstreamRateStorage.sourceTypeOverridesKey)
+        }
+    }
+
+    func saveUpstreamRateHostDisplayNames() {
+        let encodable = upstreamRateHostDisplayNames.reduce(into: [String: String]()) { result, entry in
+            let normalizedHost = normalizedUpstreamHost(entry.key) ?? entry.key.lowercased()
+            let name = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty, name != normalizedHost {
+                result[normalizedHost] = name
+            }
+        }
+        upstreamRateHostDisplayNames = encodable
+        if let data = try? JSONEncoder().encode(encodable) {
+            UserDefaults.standard.set(data, forKey: CCHUpstreamRateStorage.hostDisplayNamesKey)
         }
     }
 
@@ -1743,6 +1909,22 @@ private extension MonitorState {
         return raw.reduce(into: [String: UpstreamRateSourceType]()) { result, entry in
             if let type = UpstreamRateSourceType(rawValue: entry.value), type != .unknown {
                 result[entry.key] = type
+            }
+        }
+    }
+
+    static func loadUpstreamRateHostDisplayNames() -> [String: String] {
+        guard
+            let data = UserDefaults.standard.data(forKey: CCHUpstreamRateStorage.hostDisplayNamesKey),
+            let raw = try? JSONDecoder().decode([String: String].self, from: data)
+        else {
+            return [:]
+        }
+        return raw.reduce(into: [String: String]()) { result, entry in
+            let normalizedHost = normalizedUpstreamHost(entry.key) ?? entry.key.lowercased()
+            let name = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty, name != normalizedHost {
+                result[normalizedHost] = name
             }
         }
     }

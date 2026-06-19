@@ -56,17 +56,47 @@ struct UpstreamRateEntry: Codable, Equatable {
     }
 }
 
+struct UpstreamBalanceSnapshot: Codable, Equatable {
+    let displayAmount: Double
+    let unit: String
+    let rawAmount: Double?
+    let usedDisplayAmount: Double?
+    let totalRechargedDisplayAmount: Double?
+
+    init(
+        displayAmount: Double,
+        unit: String = "USD",
+        rawAmount: Double? = nil,
+        usedDisplayAmount: Double? = nil,
+        totalRechargedDisplayAmount: Double? = nil
+    ) {
+        self.displayAmount = displayAmount
+        self.unit = unit
+        self.rawAmount = rawAmount
+        self.usedDisplayAmount = usedDisplayAmount
+        self.totalRechargedDisplayAmount = totalRechargedDisplayAmount
+    }
+}
+
 struct UpstreamRateSnapshot: Codable, Equatable {
     let host: String
     let sourceType: UpstreamRateSourceType
     let status: UpstreamRateSourceStatus
     let entries: [UpstreamRateEntry]
+    let balance: UpstreamBalanceSnapshot?
 
-    init(host: String, sourceType: UpstreamRateSourceType, status: UpstreamRateSourceStatus, entries: [UpstreamRateEntry] = []) {
+    init(
+        host: String,
+        sourceType: UpstreamRateSourceType,
+        status: UpstreamRateSourceStatus,
+        entries: [UpstreamRateEntry] = [],
+        balance: UpstreamBalanceSnapshot? = nil
+    ) {
         self.host = normalizedUpstreamHost(host) ?? host.lowercased()
         self.sourceType = sourceType
         self.status = status
         self.entries = entries
+        self.balance = balance
     }
 
     static func mergeLatest(cached: [UpstreamRateSnapshot], refreshed: [UpstreamRateSnapshot]) -> [UpstreamRateSnapshot] {
@@ -81,6 +111,24 @@ struct UpstreamRateSnapshot: Codable, Equatable {
                 continue
             }
             merged[snapshot.host] = snapshot
+        }
+        return merged.values.sorted { $0.host.localizedCaseInsensitiveCompare($1.host) == .orderedAscending }
+    }
+
+    static func mergeBalances(cached: [UpstreamRateSnapshot], balances: [UpstreamRateSnapshot]) -> [UpstreamRateSnapshot] {
+        var merged = Dictionary(uniqueKeysWithValues: cached.map { ($0.host, $0) })
+        for snapshot in balances where snapshot.balance != nil {
+            if let previous = merged[snapshot.host] {
+                merged[snapshot.host] = UpstreamRateSnapshot(
+                    host: previous.host,
+                    sourceType: previous.sourceType,
+                    status: previous.status,
+                    entries: previous.entries,
+                    balance: snapshot.balance
+                )
+            } else {
+                merged[snapshot.host] = snapshot
+            }
         }
         return merged.values.sorted { $0.host.localizedCaseInsensitiveCompare($1.host) == .orderedAscending }
     }
@@ -118,6 +166,7 @@ struct UpstreamRateSite: Identifiable, Equatable {
     let status: UpstreamRateSourceStatus
     let section: UpstreamRateSection
     let rows: [UpstreamRateProviderRow]
+    let balance: UpstreamBalanceSnapshot?
 
     var id: String { host }
 
@@ -143,14 +192,18 @@ enum UpstreamRateMatcher {
         providers: [UpstreamRateProviderInput],
         snapshots: [UpstreamRateSnapshot],
         selectedProviderIds: Set<Int>,
-        ignoredHosts: Set<String>
+        ignoredHosts: Set<String>,
+        displayNames: [String: String] = [:]
     ) -> [UpstreamRateSite] {
         let snapshotsByHost = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.host, $0) })
         let grouped = Dictionary(grouping: providers) { provider in
             providerHost(provider) ?? "unknown-\(provider.id)"
         }
 
-        return grouped.map { host, values in
+        return grouped.compactMap { host, values in
+            if ignoredHosts.contains(host) {
+                return nil
+            }
             let snapshot = snapshotsByHost[host]
             let sourceType = snapshot?.sourceType ?? inferredSourceType(host: host)
             let status = resolvedStatus(sourceType: sourceType, snapshot: snapshot, ignoredHosts: ignoredHosts, host: host)
@@ -169,11 +222,12 @@ enum UpstreamRateMatcher {
 
             return UpstreamRateSite(
                 host: host,
-                displayName: displayName(for: host),
+                displayName: displayName(for: host, customNames: displayNames),
                 sourceType: sourceType,
                 status: status,
                 section: section(sourceType: sourceType, status: status),
-                rows: rows
+                rows: rows,
+                balance: snapshot?.balance
             )
         }
         .sorted { lhs, rhs in
@@ -252,8 +306,11 @@ enum UpstreamRateMatcher {
         return .unknown
     }
 
-    private static func displayName(for host: String) -> String {
-        host
+    private static func displayName(for host: String, customNames: [String: String]) -> String {
+        let normalizedHost = normalizedUpstreamHost(host) ?? host.lowercased()
+        let customName = customNames[normalizedHost] ?? customNames[host]
+        let trimmed = customName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? host : trimmed
     }
 
     private static func sectionRank(_ section: UpstreamRateSection) -> Int {

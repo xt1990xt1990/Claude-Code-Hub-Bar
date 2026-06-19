@@ -1,4 +1,5 @@
 import Combine
+import AppKit
 import SwiftUI
 
 private enum CCHPanelLayout {
@@ -1379,6 +1380,9 @@ private struct UpstreamRatesTabView: View {
     @State private var editingCredential: UpstreamRateCredential?
     @State private var didInitialRefresh = false
     @State private var expandedUpstreamRateHosts: Set<String> = []
+    @State private var isAutoSyncPopoverPresented = false
+    @State private var isRateRefreshHovered = false
+    @State private var isBalanceRefreshHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1417,6 +1421,7 @@ private struct UpstreamRatesTabView: View {
             if state.upstreamRateSnapshots.isEmpty {
                 await state.refreshUpstreamRates(silent: true)
             }
+            await state.refreshUpstreamBalances(silent: true)
         }
         .sheet(item: $editingCredential) { credential in
             UpstreamCredentialEditor(
@@ -1448,7 +1453,7 @@ private struct UpstreamRatesTabView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("上游倍率")
                     .font(.system(size: 13, weight: .semibold))
-                Text("按官网聚合同一上游；同步范围完全由勾选决定")
+                Text("按官网聚合同一上游；勾选后跟随上游自动应用")
                     .font(.caption)
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
@@ -1457,48 +1462,67 @@ private struct UpstreamRatesTabView: View {
             Button {
                 Task { await state.refreshUpstreamRates() }
             } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 22)
+                if state.isRefreshingUpstreamRates {
+                    ProgressView()
+                        .scaleEffect(0.48)
+                        .frame(width: 22, height: 22)
+                } else {
+                    Image(systemName: isRateRefreshHovered ? "arrow.clockwise" : "list.bullet.rectangle")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .frame(width: 22, height: 22)
+                }
             }
             .buttonStyle(.borderless)
-            .foregroundStyle(theme.accentBlue)
-            .help("重新检测")
+            .foregroundStyle(isRateRefreshHovered ? theme.accentBlue : theme.textSecondary)
+            .disabled(state.isRefreshingUpstreamRates)
+            .help("重新检测 key 匹配和分组倍率")
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.12)) {
+                    isRateRefreshHovered = hovering
+                }
+            }
 
             Button {
-                Task { await state.syncSelectedUpstreamRates() }
+                Task { await state.refreshUpstreamBalances() }
             } label: {
-                Label("同步勾选项", systemImage: "checkmark.arrow.trianglehead.clockwise")
-                    .font(.system(size: 11, weight: .bold))
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .tint(theme.accentBlue)
-            .disabled(state.upstreamRatePendingSyncCount == 0)
-
-            Toggle("自动", isOn: $state.upstreamRateAutoSyncEnabled)
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(theme.textSecondary)
-                .help("按自定义频率检测并同步已勾选项")
-                .onChange(of: state.upstreamRateAutoSyncEnabled) { _, _ in
-                    state.startUpstreamRateAutoSyncTimer()
+                if state.isRefreshingUpstreamBalances {
+                    ProgressView()
+                        .scaleEffect(0.48)
+                        .frame(width: 22, height: 22)
+                } else {
+                    Image(systemName: isBalanceRefreshHovered ? "arrow.clockwise" : "creditcard")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .frame(width: 22, height: 22)
                 }
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(isBalanceRefreshHovered ? theme.accentBlue : theme.textSecondary)
+            .disabled(state.isRefreshingUpstreamBalances)
+            .help(upstreamBalanceRefreshHelp(state.upstreamBalanceLastRefreshedAt))
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.12)) {
+                    isBalanceRefreshHovered = hovering
+                }
+            }
 
-            if state.upstreamRateAutoSyncEnabled {
-                Stepper(value: $state.upstreamRateAutoSyncIntervalHours, in: 1...72, step: 1) {
-                    Text("每 \(Int(state.upstreamRateAutoSyncIntervalHours)) 小时")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(theme.textSecondary)
+            Button {
+                isAutoSyncPopoverPresented.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: state.upstreamRateAutoSyncEnabled ? "timer.circle.fill" : "timer")
+                        .font(.system(size: 10.5, weight: .bold))
+                    Text(state.upstreamRateAutoSyncEnabled ? "\(Int(state.upstreamRateAutoSyncIntervalHours))h" : "自动")
+                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
                         .monospacedDigit()
                 }
-                .controlSize(.mini)
-                .frame(width: 118)
-                .help("自动检测/同步频率")
-                .onChange(of: state.upstreamRateAutoSyncIntervalHours) { _, _ in
-                    state.startUpstreamRateAutoSyncTimer()
-                }
+            }
+            .buttonStyle(.borderless)
+            .fixedSize()
+            .foregroundStyle(state.upstreamRateAutoSyncEnabled ? theme.accentBlue : theme.textSecondary)
+            .help("自动检测/同步频率")
+            .popover(isPresented: $isAutoSyncPopoverPresented, arrowEdge: .bottom) {
+                UpstreamAutoSyncPopover(state: state)
+                    .environment(\.cchTheme, theme)
             }
         }
     }
@@ -1507,9 +1531,9 @@ private struct UpstreamRatesTabView: View {
         HStack(spacing: 10) {
             MiniStat(title: "官网", value: "\(state.upstreamRateSites.count)")
             MiniStat(title: "可同步", value: "\(state.upstreamRateSyncableSites.count)")
-            MiniStat(title: "已勾选", value: "\(state.upstreamRateCheckedSyncCount)")
+            MiniStat(title: "跟随", value: "\(state.upstreamRateCheckedSyncCount)")
             MiniStat(
-                title: "待同步",
+                title: "待应用",
                 value: Text("\(state.upstreamRatePendingSyncCount)")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .monospacedDigit()
@@ -1554,6 +1578,7 @@ private struct UpstreamRatesTabView: View {
                         )
                     }
                 }
+                .animation(.easeOut(duration: 0.16), value: sites.map(\.id))
             }
         }
     }
@@ -1566,7 +1591,82 @@ private struct UpstreamRatesTabView: View {
                     UpstreamRateUnsupportedCard(site: site, state: state)
                 }
             }
+            .animation(.easeOut(duration: 0.16), value: state.upstreamRateUnsupportedSites.map(\.id))
         }
+    }
+}
+
+private struct UpstreamAutoSyncPopover: View {
+    @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
+    @State private var intervalInput = ""
+
+    private var normalizedHours: Double? {
+        guard let hours = Int(intervalInput), hours > 0 else { return nil }
+        return Double(min(max(hours, 1), 72))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("自动同步")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Toggle("", isOn: $state.upstreamRateAutoSyncEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .scaleEffect(0.72)
+                    .onChange(of: state.upstreamRateAutoSyncEnabled) { _, _ in
+                        state.startUpstreamRateAutoSyncTimer()
+                    }
+            }
+
+            HStack(spacing: 8) {
+                TextField("小时", text: $intervalInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .frame(width: 74)
+                    .onChange(of: intervalInput) { _, value in
+                        let digits = value.filter(\.isNumber)
+                        if digits != value {
+                            intervalInput = String(digits.prefix(2))
+                        } else if digits.count > 2 {
+                            intervalInput = String(digits.prefix(2))
+                        }
+                    }
+                    .onSubmit {
+                        applyInterval()
+                    }
+                Text("小时")
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+                Spacer()
+                Button("保存") {
+                    applyInterval()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(theme.accentBlue)
+                .disabled(normalizedHours == nil)
+            }
+
+            Text("范围 1-72；余额后台每 1 小时静默刷新。")
+                .font(.caption2)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+        }
+        .padding(12)
+        .frame(width: 230)
+        .onAppear {
+            intervalInput = multiplierInputString(state.upstreamRateAutoSyncIntervalHours)
+        }
+    }
+
+    private func applyInterval() {
+        guard let normalizedHours else { return }
+        state.upstreamRateAutoSyncIntervalHours = normalizedHours
+        intervalInput = "\(Int(normalizedHours))"
+        state.startUpstreamRateAutoSyncTimer()
     }
 }
 
@@ -1596,6 +1696,9 @@ private struct UpstreamRateSiteCard: View {
     var toggleExpanded: (() -> Void)?
     var configureCredential: (() -> Void)?
     @Environment(\.cchTheme) private var theme
+    @State private var isEditingDisplayName = false
+    @State private var draftDisplayName = ""
+    @State private var isConfirmingDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1607,49 +1710,108 @@ private struct UpstreamRateSiteCard: View {
                         .frame(width: 14, height: 18)
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(site.displayName)
-                            .font(.system(size: 12, weight: .semibold))
-                            .lineLimit(1)
-                        UpstreamSourceBadge(type: site.sourceType)
-                    }
-                    Text("\(site.matchedCount)/\(site.rows.count) key 已匹配 · \(site.selectedCount) 个已勾选")
+                    UpstreamHostTitleEditor(
+                        host: site.host,
+                        displayName: site.displayName,
+                        sourceType: site.sourceType,
+                        isEditing: $isEditingDisplayName,
+                        draftName: $draftDisplayName,
+                        fontSize: 12,
+                        save: { name in
+                            state.setUpstreamRateHostDisplayName(host: site.host, displayName: name)
+                        }
+                    )
+                    Text("\(site.matchedCount)/\(site.rows.count) key 已匹配 · \(site.selectedCount) 个跟随")
                         .font(.caption2)
                         .foregroundStyle(theme.textSecondary)
                 }
                 Spacer()
-                if let configureCredential {
-                    Button {
-                        configureCredential()
-                    } label: {
-                        Label("配置登录态", systemImage: "key.fill")
-                            .font(.system(size: 10.5, weight: .bold))
+                HStack(spacing: 4) {
+                    if let balance = site.balance {
+                        UpstreamBalanceCapsule(balance: balance)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                } else if site.pendingSyncCount > 0 {
-                    StatusCapsule(text: "\(site.pendingSyncCount) 待同步", color: theme.accentOrange)
-                } else if site.status == .available {
-                    StatusCapsule(text: "已检测", color: theme.accentGreen)
-                } else {
-                    StatusCapsule(text: "需登录", color: theme.accentOrange)
+                    if let configureCredential {
+                        Button {
+                            configureCredential()
+                        } label: {
+                            Label("配置登录态", systemImage: "key.fill")
+                                .font(.system(size: 10.5, weight: .bold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    } else if site.pendingSyncCount > 0 {
+                        StatusCapsule(text: "\(site.pendingSyncCount) 待应用", color: theme.accentOrange)
+                    } else if site.status == .available {
+                        StatusCapsule(text: "已检测", color: theme.accentGreen)
+                    } else {
+                        StatusCapsule(text: "需登录", color: theme.accentOrange)
+                    }
+                    Button {
+                        isConfirmingDelete = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.accentRed.opacity(0.92))
+                    .help("从上游倍率移除此官网")
                 }
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                toggleExpanded?()
+                if !isEditingDisplayName {
+                    toggleExpanded?()
+                }
             }
 
             if !isCollapsible || isExpanded {
                 ForEach(site.rows) { row in
                     UpstreamRateProviderSyncRow(row: row, state: state)
                 }
+                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .top)))
             }
         }
         .padding(10)
         .cchSurface(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.borderSubtle, lineWidth: 1))
+        .animation(.easeOut(duration: 0.16), value: isExpanded)
+        .transition(.opacity.combined(with: .scale(scale: 0.992, anchor: .top)))
+        .confirmationDialog(
+            "从上游倍率移除 \(site.displayName)？",
+            isPresented: $isConfirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("移除", role: .destructive) {
+                state.deleteUpstreamRateSite(site)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这只会隐藏这个官网分组，不会删除 CCH 渠道。")
+        }
+    }
+}
+
+private struct UpstreamBalanceCapsule: View {
+    let balance: UpstreamBalanceSnapshot
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        Text(upstreamBalanceText(balance))
+            .font(.system(size: 11.5, weight: .black, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3.5)
+        .background(Color.black.opacity(0.88))
+        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.7))
+        .clipShape(Capsule())
+        .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+        .help(upstreamBalanceHelp(balance))
+        .transition(.opacity.combined(with: .scale(scale: 0.96)))
     }
 }
 
@@ -1657,6 +1819,15 @@ private struct UpstreamRateProviderSyncRow: View {
     let row: UpstreamRateProviderRow
     @ObservedObject var state: MonitorState
     @Environment(\.cchTheme) private var theme
+    @State private var modelTestInput = ""
+    @State private var multiplierInput = ""
+    @State private var renderedEditor: ProviderEditor?
+    @State private var editorRevealHeight: CGFloat = 0
+
+    private enum ProviderEditor: Equatable {
+        case multiplier
+        case modelTest
+    }
 
     private var statusColor: Color {
         switch row.matchStatus {
@@ -1666,76 +1837,214 @@ private struct UpstreamRateProviderSyncRow: View {
         }
     }
 
+    private var provider: CCHProvider? {
+        state.provider(forUpstreamRateRow: row)
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
-            StatusDot(color: statusColor)
-                .frame(width: 12)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Text(row.providerName)
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .lineLimit(1)
-                    UpstreamHostBadge(host: row.host)
-                    if let group = row.upstreamGroupName {
-                        UpstreamGroupBadge(group: group)
-                    }
-                }
-                HStack(spacing: 6) {
-                    Text("CCH")
-                        .font(.caption2)
-                        .foregroundStyle(theme.textSecondary)
-                    MultiplierBadge(value: row.currentRate, compact: true)
-                    if let upstreamRate = row.upstreamRate {
-                        Text(row.hasRateChange ? "→" : "=")
-                            .font(.caption2)
-                            .foregroundStyle(theme.textSecondary)
-                        Text("上游")
-                            .font(.caption2)
-                            .foregroundStyle(theme.textSecondary)
-                        MultiplierBadge(value: upstreamRate, compact: true)
-                    } else {
-                        Text(row.matchStatus == .matched ? "未勾选，不参与批量/自动同步" : "暂未匹配上游 key")
-                            .font(.caption2)
-                            .foregroundStyle(theme.textSecondary)
+        VStack(spacing: 7) {
+            HStack(spacing: 8) {
+                StatusDot(color: statusColor)
+                    .frame(width: 12)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(row.providerName)
+                            .font(.system(size: 11.5, weight: .semibold))
                             .lineLimit(1)
+                        UpstreamHostBadge(host: row.host, isInteractive: true) {
+                            openUpstreamHost(row.host)
+                        }
+                        if let group = row.upstreamGroupName {
+                            UpstreamGroupBadge(group: group)
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        Text("当前")
+                            .font(.caption2)
+                            .foregroundStyle(theme.textSecondary)
+                        if let provider, !row.isSelectedForSync {
+                            Button {
+                                toggleMultiplierEditor(provider)
+                            } label: {
+                                if state.isProviderMultiplierUpdating(provider) {
+                                    ProgressView()
+                                        .scaleEffect(0.42)
+                                        .frame(width: 26, height: 14)
+                                } else {
+                                    MultiplierBadge(value: row.currentRate, compact: true)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(state.isProviderMultiplierUpdating(provider))
+                            .help("手动编辑 CCH 倍率")
+                        } else {
+                            MultiplierBadge(value: row.currentRate, compact: true)
+                                .help(row.isSelectedForSync ? "正在跟随上游，取消勾选后可手动编辑" : "")
+                        }
+                        if let upstreamRate = row.upstreamRate {
+                            Text(row.hasRateChange ? "→" : "=")
+                                .font(.caption2)
+                                .foregroundStyle(theme.textSecondary)
+                            Text("上游")
+                                .font(.caption2)
+                                .foregroundStyle(theme.textSecondary)
+                            MultiplierBadge(value: upstreamRate, compact: true)
+                        } else {
+                            Text(row.matchStatus == .matched ? "未跟随，可手动编辑 CCH 倍率" : "暂未匹配上游 key")
+                                .font(.caption2)
+                                .foregroundStyle(theme.textSecondary)
+                                .lineLimit(1)
+                        }
                     }
                 }
-            }
-            Spacer(minLength: 6)
-            if state.isUpstreamRateProviderUpdating(row.providerId) {
-                ProgressView()
-                    .scaleEffect(0.5)
-                    .frame(width: 24, height: 20)
-            } else {
+                Spacer(minLength: 6)
+                if let provider {
+                    Button {
+                        toggleModelTest(provider)
+                    } label: {
+                        if state.isProviderModelTesting(provider) {
+                            ProgressView()
+                                .scaleEffect(0.45)
+                                .frame(width: 20, height: 20)
+                        } else {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 10, weight: .bold))
+                                .frame(width: 20, height: 20)
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.accentOrange)
+                    .disabled(state.isProviderModelTesting(provider))
+                    .help("供应商模型测试")
+                }
+
                 Button {
-                    Task { await state.syncUpstreamRate(row) }
+                    Task { await state.toggleUpstreamRateSyncSelection(row) }
                 } label: {
-                    Image(systemName: "arrow.down.to.line.compact")
-                        .font(.system(size: 10, weight: .bold))
-                        .frame(width: 20, height: 20)
+                    Image(systemName: row.isSelectedForSync ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 18, height: 20)
                 }
                 .buttonStyle(.borderless)
-                .foregroundStyle(row.matchStatus == .matched ? theme.accentBlue : theme.textTertiary)
-                .disabled(row.matchStatus != .matched || row.upstreamRate == nil)
-                .help("手动同步此 key")
+                .foregroundStyle(row.isSelectedForSync ? theme.accentBlue : theme.textTertiary)
+                .disabled(row.matchStatus != .matched)
+                .help(row.isSelectedForSync ? "取消跟随上游" : "跟随上游，倍率变化后自动应用")
             }
 
-            Button {
-                state.toggleUpstreamRateSyncSelection(row)
-            } label: {
-                Image(systemName: row.isSelectedForSync ? "checkmark.square.fill" : "square")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 18, height: 20)
+            if let provider, let renderedEditor {
+                ProviderEditorReveal(
+                    revealHeight: editorRevealHeight,
+                    contentHeight: editorHeight(renderedEditor, provider: provider)
+                ) {
+                    ProviderInlineEditorContainer {
+                        switch renderedEditor {
+                        case .multiplier:
+                            ProviderMultiplierPopover(
+                                provider: provider,
+                                multiplier: $multiplierInput,
+                                isUpdating: state.isProviderMultiplierUpdating(provider)
+                            ) { value in
+                                closeEditor()
+                                Task { await state.updateProviderMultiplier(provider, multiplier: value) }
+                            }
+                        case .modelTest:
+                            ProviderModelTestPopover(
+                                provider: provider,
+                                model: $modelTestInput,
+                                isTesting: state.isProviderModelTesting(provider),
+                                result: state.providerModelTestResult(for: provider),
+                                resultsByModel: state.providerModelTestResults(for: provider),
+                                progress: state.providerModelTestProgress(for: provider),
+                                customModels: state.customTestModels(for: provider),
+                                addModel: { model in state.addCustomTestModel(model, for: provider) },
+                                removeModel: { model in state.removeCustomTestModel(model, for: provider) },
+                                runSingle: { model in Task { await state.testProviderModel(provider, model: model) } },
+                                runBatch: { models in Task { await state.testProviderModels(provider, models: models) } }
+                            )
+                        }
+                    }
+                }
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(row.isSelectedForSync ? theme.accentBlue : theme.textTertiary)
-            .disabled(row.matchStatus != .matched)
-            .help(row.isSelectedForSync ? "取消批量/自动同步" : "参与批量/自动同步")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .cchSurface(.row)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onChange(of: provider.map { state.customTestModels(for: $0) } ?? []) {
+            guard renderedEditor == .modelTest, let provider else { return }
+            editorRevealHeight = editorHeight(.modelTest, provider: provider)
+        }
+        .onChange(of: row.isSelectedForSync) { _, selected in
+            if selected {
+                if renderedEditor == .multiplier {
+                    closeEditor()
+                }
+            }
+        }
+    }
+
+    private func toggleModelTest(_ provider: CCHProvider) {
+        if modelTestInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            modelTestInput = provider.testModel
+        }
+        toggleEditor(.modelTest, provider: provider)
+    }
+
+    private func toggleMultiplierEditor(_ provider: CCHProvider) {
+        if multiplierInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            multiplierInput = multiplierInputString(row.currentRate)
+        }
+        toggleEditor(.multiplier, provider: provider)
+    }
+
+    private func toggleEditor(_ editor: ProviderEditor, provider: CCHProvider) {
+        if renderedEditor == editor, editorRevealHeight > 0 {
+            closeEditor()
+            return
+        }
+
+        let targetHeight = editorHeight(editor, provider: provider)
+        if renderedEditor == nil {
+            renderedEditor = editor
+            editorRevealHeight = 0
+            withAnimation(editorOpenAnimation) {
+                editorRevealHeight = targetHeight
+            }
+        } else {
+            renderedEditor = editor
+            withAnimation(editorOpenAnimation) {
+                editorRevealHeight = targetHeight
+            }
+        }
+    }
+
+    private func closeEditor() {
+        let closingEditor = renderedEditor
+        withAnimation(editorCloseAnimation) {
+            editorRevealHeight = 0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            if renderedEditor == closingEditor, editorRevealHeight == 0 {
+                renderedEditor = nil
+            }
+        }
+    }
+
+    private func editorHeight(_ editor: ProviderEditor, provider: CCHProvider) -> CGFloat {
+        switch editor {
+        case .multiplier:
+            return 70
+        case .modelTest:
+            return state.customTestModels(for: provider).isEmpty ? 76 : 112
+        }
+    }
+
+    private var editorCloseAnimation: Animation {
+        .easeInOut(duration: 0.2)
+    }
+
+    private var editorOpenAnimation: Animation {
+        .timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.24)
     }
 }
 
@@ -1743,25 +2052,36 @@ private struct UpstreamRateUnsupportedCard: View {
     let site: UpstreamRateSite
     @ObservedObject var state: MonitorState
     @Environment(\.cchTheme) private var theme
+    @State private var isEditingDisplayName = false
+    @State private var draftDisplayName = ""
+    @State private var isConfirmingDelete = false
 
     var body: some View {
         HStack(spacing: 10) {
             StatusDot(color: theme.textTertiary)
                 .frame(width: 12)
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(site.displayName)
-                        .font(.system(size: 11.5, weight: .semibold))
-                    UpstreamHostBadge(host: site.host)
-                    StatusCapsule(text: "仅展示", color: theme.textTertiary)
-                }
+                UpstreamHostTitleEditor(
+                    host: site.host,
+                    displayName: site.displayName,
+                    sourceType: nil,
+                    isEditing: $isEditingDisplayName,
+                    draftName: $draftDisplayName,
+                    fontSize: 11.5,
+                    trailing: {
+                        StatusCapsule(text: "仅展示", color: theme.textTertiary)
+                    },
+                    save: { name in
+                        state.setUpstreamRateHostDisplayName(host: site.host, displayName: name)
+                    }
+                )
                 Text(site.rows.map(\.providerName).joined(separator: "、"))
                     .font(.caption2)
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
             }
             Spacer()
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Button("new-api") {
                     state.setUpstreamRateSourceType(host: site.host, sourceType: .newAPI)
                 }
@@ -1772,33 +2092,203 @@ private struct UpstreamRateUnsupportedCard: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
+                Button {
+                    isConfirmingDelete = true
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(theme.accentRed.opacity(0.92))
+                .help("从上游倍率移除此官网")
             }
         }
         .padding(10)
         .cchSurface(.panelSoft)
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.borderSubtle, lineWidth: 1))
+        .transition(.opacity.combined(with: .scale(scale: 0.992, anchor: .top)))
+        .confirmationDialog(
+            "从上游倍率移除 \(site.displayName)？",
+            isPresented: $isConfirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("移除", role: .destructive) {
+                state.deleteUpstreamRateSite(site)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这只会隐藏这个官网分组，不会删除 CCH 渠道。")
+        }
+    }
+}
+
+private struct UpstreamHostTitleEditor<Trailing: View>: View {
+    let host: String
+    let displayName: String
+    let sourceType: UpstreamRateSourceType?
+    @Binding var isEditing: Bool
+    @Binding var draftName: String
+    var fontSize: CGFloat
+    @ViewBuilder var trailing: () -> Trailing
+    let save: (String) -> Void
+    @Environment(\.cchTheme) private var theme
+
+    init(
+        host: String,
+        displayName: String,
+        sourceType: UpstreamRateSourceType?,
+        isEditing: Binding<Bool>,
+        draftName: Binding<String>,
+        fontSize: CGFloat,
+        @ViewBuilder trailing: @escaping () -> Trailing,
+        save: @escaping (String) -> Void
+    ) {
+        self.host = host
+        self.displayName = displayName
+        self.sourceType = sourceType
+        _isEditing = isEditing
+        _draftName = draftName
+        self.fontSize = fontSize
+        self.trailing = trailing
+        self.save = save
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if isEditing {
+                TextField(host, text: $draftName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: fontSize, weight: .semibold))
+                    .frame(minWidth: 120, maxWidth: 190)
+                    .onSubmit {
+                        commit()
+                    }
+                Button {
+                    commit()
+                } label: {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .black))
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(theme.accentBlue)
+                .help("保存名称")
+                Button {
+                    cancel()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .black))
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(theme.textSecondary)
+                .help("取消")
+            } else {
+                Text(displayName)
+                    .font(.system(size: fontSize, weight: .semibold))
+                    .lineLimit(1)
+                if displayName != host {
+                    UpstreamHostBadge(host: host, isInteractive: true) {
+                        openUpstreamHost(host)
+                    }
+                }
+                Button {
+                    beginEditing()
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(theme.textTertiary)
+                .help("自定义上游名称")
+            }
+            if let sourceType {
+                UpstreamSourceBadge(type: sourceType)
+            }
+            trailing()
+        }
+    }
+
+    private func beginEditing() {
+        draftName = displayName == host ? "" : displayName
+        isEditing = true
+    }
+
+    private func commit() {
+        save(draftName)
+        isEditing = false
+    }
+
+    private func cancel() {
+        draftName = ""
+        isEditing = false
+    }
+}
+
+private extension UpstreamHostTitleEditor where Trailing == EmptyView {
+    init(
+        host: String,
+        displayName: String,
+        sourceType: UpstreamRateSourceType?,
+        isEditing: Binding<Bool>,
+        draftName: Binding<String>,
+        fontSize: CGFloat,
+        save: @escaping (String) -> Void
+    ) {
+        self.init(
+            host: host,
+            displayName: displayName,
+            sourceType: sourceType,
+            isEditing: isEditing,
+            draftName: draftName,
+            fontSize: fontSize,
+            trailing: { EmptyView() },
+            save: save
+        )
     }
 }
 
 private struct UpstreamHostBadge: View {
     let host: String
+    var isInteractive = false
+    var action: (() -> Void)?
     @Environment(\.cchTheme) private var theme
+    @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 3) {
-            Image(systemName: "globe")
-                .font(.system(size: 7.5, weight: .bold))
-            Text(host)
-                .lineLimit(1)
+        Button {
+            action?()
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "globe")
+                    .font(.system(size: 7.5, weight: .bold))
+                Text(host)
+                    .lineLimit(1)
+                if isInteractive {
+                    Image(systemName: "arrow.up.forward")
+                        .font(.system(size: 6.8, weight: .black))
+                        .opacity(isHovering ? 1 : 0.58)
+                }
+            }
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .foregroundStyle(isHovering && isInteractive ? theme.backgroundBottom : theme.accentBlue)
+            .padding(.horizontal, isInteractive ? 6 : 5)
+            .padding(.vertical, 1.5)
+            .background(theme.accentBlue.opacity(isHovering && isInteractive ? 0.95 : 0.11))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.accentBlue.opacity(isHovering && isInteractive ? 0.75 : 0.25), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .offset(y: isHovering && isInteractive ? -0.5 : 0)
         }
-        .font(.system(size: 9, weight: .bold, design: .rounded))
-        .foregroundStyle(theme.accentBlue)
-        .padding(.horizontal, 5)
-        .padding(.vertical, 1.5)
-        .background(theme.accentBlue.opacity(0.11))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.accentBlue.opacity(0.25), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .buttonStyle(.plain)
+        .disabled(!isInteractive)
+        .help(isInteractive ? "打开 \(host)" : host)
+        .animation(.easeInOut(duration: 0.14), value: isHovering)
+        .onHover { hovering in
+            isHovering = hovering
+        }
     }
 }
 
@@ -3127,6 +3617,16 @@ private struct ProviderRow: View {
                         .lineLimit(1)
                     Spacer()
                     Button {
+                        probe()
+                    } label: {
+                        Image(systemName: "waveform.path.ecg")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.accentOrange)
+                    .help("测速")
+                    Button {
                         modelTestInput = modelTestInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             ? provider.testModel
                             : modelTestInput
@@ -3137,7 +3637,7 @@ private struct ProviderRow: View {
                                 ProgressView()
                                     .scaleEffect(0.45)
                             } else {
-                                Image(systemName: "waveform.path.ecg")
+                                Image(systemName: "bolt.fill")
                                     .font(.system(size: 11, weight: .semibold))
                             }
                         }
@@ -3147,16 +3647,6 @@ private struct ProviderRow: View {
                     .foregroundStyle(theme.accentOrange)
                     .disabled(isModelTesting)
                     .help("供应商模型测试")
-                    Button {
-                        probe()
-                    } label: {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                            .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(theme.accentOrange)
-                    .help("测速")
                     if provider.health.circuitState.lowercased() == "open" {
                         Button("重置") {
                             resetCircuit()
@@ -3235,9 +3725,7 @@ private struct ProviderRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onChange(of: customTestModels) {
             guard renderedEditor == .modelTest else { return }
-            withAnimation(editorSwitchAnimation) {
-                editorRevealHeight = editorHeight(.modelTest)
-            }
+            editorRevealHeight = editorHeight(.modelTest)
         }
     }
 
@@ -3251,14 +3739,12 @@ private struct ProviderRow: View {
         if renderedEditor == nil {
             renderedEditor = editor
             editorRevealHeight = 0
-            DispatchQueue.main.async {
-                withAnimation(editorOpenAnimation) {
-                    editorRevealHeight = targetHeight
-                }
+            withAnimation(editorOpenAnimation) {
+                editorRevealHeight = targetHeight
             }
         } else {
             renderedEditor = editor
-            withAnimation(editorSwitchAnimation) {
+            withAnimation(editorOpenAnimation) {
                 editorRevealHeight = targetHeight
             }
         }
@@ -3285,16 +3771,12 @@ private struct ProviderRow: View {
         }
     }
 
-    private var editorOpenAnimation: Animation {
-        .timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.24)
-    }
-
-    private var editorSwitchAnimation: Animation {
-        .timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.2)
-    }
-
     private var editorCloseAnimation: Animation {
         .easeInOut(duration: 0.2)
+    }
+
+    private var editorOpenAnimation: Animation {
+        .timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.24)
     }
 }
 
@@ -3312,8 +3794,11 @@ private struct ProviderEditorReveal<Content: View>: View {
                 }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .frame(height: revealHeight, alignment: .top)
+        .frame(height: max(0, min(revealHeight, contentHeight)), alignment: .top)
         .clipped()
+        .contentShape(Rectangle())
+        .allowsHitTesting(revealHeight > 0.5)
+        .accessibilityHidden(revealHeight <= 0)
     }
 }
 
@@ -3416,7 +3901,6 @@ private struct ProviderMultiplierPopover: View {
         }
     }
 }
-
 private struct ProviderModelTestPopover: View {
     let provider: CCHProvider
     @Binding var model: String
@@ -3513,13 +3997,20 @@ private struct ProviderModelTestPopover: View {
                     Image(systemName: "plus")
                         .font(.system(size: 10.5, weight: .bold))
                         .frame(width: 22, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(canAddModel ? theme.accentGreen.opacity(0.18) : theme.textTertiary.opacity(0.1))
+                        )
+                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay {
+                            Rectangle()
+                                .fill(Color.clear)
+                                .frame(width: 34, height: 34)
+                                .contentShape(Rectangle())
+                        }
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(canAddModel ? theme.accentGreen : theme.textTertiary)
-                .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(canAddModel ? theme.accentGreen.opacity(0.18) : theme.textTertiary.opacity(0.1))
-                )
                 .disabled(!canAddModel || isTesting)
                 .help("加入此渠道的测试模型")
                 Spacer()
@@ -3530,22 +4021,30 @@ private struct ProviderModelTestPopover: View {
                         runBatch(testQueue)
                     }
                 } label: {
-                    if isTesting {
-                        ProgressView()
-                            .scaleEffect(0.55)
-                            .frame(width: 24, height: 24)
-                    } else {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 10.5, weight: .bold))
-                            .frame(width: 24, height: 24)
+                    Group {
+                        if isTesting {
+                            ProgressView()
+                                .scaleEffect(0.55)
+                        } else {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 10.5, weight: .bold))
+                        }
+                    }
+                    .frame(width: 24, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(!canRun || isTesting ? theme.accentOrange.opacity(0.36) : theme.accentOrange)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay {
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
                     }
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
-                .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(!canRun || isTesting ? theme.accentOrange.opacity(0.36) : theme.accentOrange)
-                )
                 .disabled(isTesting || !canRun)
             }
             .frame(height: 30)
@@ -3873,6 +4372,69 @@ private func cacheRateColor(_ rate: Double?, theme: CCHThemePalette) -> Color {
     default:
         return theme.accentRed
     }
+}
+
+private func upstreamBalanceText(_ balance: UpstreamBalanceSnapshot) -> String {
+    let value = balance.displayAmount
+    let formatted: String
+    switch abs(value) {
+    case 0..<10:
+        formatted = String(format: "%.2f", value)
+    case 10..<1000:
+        formatted = String(format: "%.1f", value)
+    default:
+        formatted = String(format: "%.0f", value)
+    }
+    return balance.unit == "USD" ? "$\(formatted)" : "\(formatted) \(balance.unit)"
+}
+
+private func upstreamBalanceHelp(_ balance: UpstreamBalanceSnapshot) -> String {
+    var parts = ["余额 \(upstreamBalanceText(balance))"]
+    if let rawAmount = balance.rawAmount {
+        parts.append("raw \(String(format: "%.0f", rawAmount))")
+    }
+    if let used = balance.usedDisplayAmount {
+        parts.append("已用 $\(String(format: "%.2f", used))")
+    }
+    if let totalRecharged = balance.totalRechargedDisplayAmount {
+        parts.append("累计充值 $\(String(format: "%.2f", totalRecharged))")
+    }
+    return parts.joined(separator: " · ")
+}
+
+private func upstreamBalanceRefreshHelp(_ lastRefreshedAt: Date?) -> String {
+    guard let lastRefreshedAt else {
+        return "刷新上游账户余额"
+    }
+    return "刷新上游账户余额 · 上次 \(formatRelativeShortTime(lastRefreshedAt))"
+}
+
+private func formatRelativeShortTime(_ date: Date, now: Date = Date()) -> String {
+    let seconds = max(0, now.timeIntervalSince(date))
+    if seconds < 60 {
+        return "刚刚"
+    }
+    if seconds < 3600 {
+        return "\(Int(seconds / 60)) 分钟前"
+    }
+    if seconds < 86_400 {
+        return "\(Int(seconds / 3600)) 小时前"
+    }
+    return "\(Int(seconds / 86_400)) 天前"
+}
+
+private func openUpstreamHost(_ host: String) {
+    guard let url = upstreamHostURL(host) else { return }
+    NSWorkspace.shared.open(url)
+}
+
+private func upstreamHostURL(_ host: String) -> URL? {
+    let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    if let url = URL(string: trimmed), url.scheme != nil {
+        return url
+    }
+    return URL(string: "https://\(trimmed)")
 }
 
 private func providerGroupColor(_ group: String, theme: CCHThemePalette) -> Color {

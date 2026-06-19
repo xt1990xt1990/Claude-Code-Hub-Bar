@@ -74,6 +74,48 @@ actor UpstreamRateService {
         }
     }
 
+    func fetchBalance(credential: UpstreamRateCredential) async throws -> UpstreamRateFetchOutcome {
+        switch credential.sourceType {
+        case .sub2API:
+            var nextCredential = credential
+            if shouldRefreshSub2Token(nextCredential) {
+                nextCredential = try await refreshSub2Token(nextCredential)
+            }
+            let balance = try await fetchSub2UserBalance(nextCredential)
+            return UpstreamRateFetchOutcome(
+                snapshot: UpstreamRateSnapshot(
+                    host: credential.host,
+                    sourceType: .sub2API,
+                    status: .available,
+                    balance: balance
+                ),
+                credential: nextCredential
+            )
+        case .newAPI:
+            let accessToken = credential.newAPIAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cookieHeader = credential.newAPICookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !accessToken.isEmpty || !cookieHeader.isEmpty else {
+                throw UpstreamRateServiceError.missingCredential("缺少 new-api 登录态")
+            }
+            let nextCredential = await hydrateNewAPIUserIdIfNeeded(credential)
+            let balance = try await fetchNewAPIUserBalance(nextCredential)
+            return UpstreamRateFetchOutcome(
+                snapshot: UpstreamRateSnapshot(
+                    host: credential.host,
+                    sourceType: .newAPI,
+                    status: .available,
+                    balance: balance
+                ),
+                credential: nextCredential
+            )
+        case .unknown:
+            return UpstreamRateFetchOutcome(
+                snapshot: UpstreamRateSnapshot(host: credential.host, sourceType: .unknown, status: .unsupported),
+                credential: credential
+            )
+        }
+    }
+
     func detectSite(baseURL: String, host: String) async -> UpstreamRateSourceType {
         let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let paths = ["/api/status", "/api/user/self/groups", "/api/v1/groups/available"]
@@ -113,6 +155,7 @@ actor UpstreamRateService {
             nextCredential = try await refreshSub2Token(nextCredential)
         }
 
+        let balance = try? await fetchSub2UserBalance(nextCredential)
         let userGroupRates = (try? await listSub2UserGroupRates(nextCredential)) ?? [:]
         var entries: [UpstreamRateEntry] = []
         for target in targets {
@@ -131,7 +174,13 @@ actor UpstreamRateService {
         }
 
         return UpstreamRateFetchOutcome(
-            snapshot: UpstreamRateSnapshot(host: credential.host, sourceType: .sub2API, status: .available, entries: entries),
+            snapshot: UpstreamRateSnapshot(
+                host: credential.host,
+                sourceType: .sub2API,
+                status: .available,
+                entries: entries,
+                balance: balance
+            ),
             credential: nextCredential
         )
     }
@@ -145,6 +194,7 @@ actor UpstreamRateService {
 
         var nextCredential = credential
         nextCredential = await hydrateNewAPIUserIdIfNeeded(nextCredential)
+        let balance = try? await fetchNewAPIUserBalance(nextCredential)
         let groups = (try? await listNewAPIGroups(nextCredential)) ?? [:]
         let variantGroups = groups.isEmpty ? (try? await listVariantNewAPIGroups(nextCredential)) ?? [:] : [:]
         var entries: [UpstreamRateEntry] = []
@@ -178,7 +228,13 @@ actor UpstreamRateService {
         }
 
         return UpstreamRateFetchOutcome(
-            snapshot: UpstreamRateSnapshot(host: credential.host, sourceType: .newAPI, status: .available, entries: entries),
+            snapshot: UpstreamRateSnapshot(
+                host: credential.host,
+                sourceType: .newAPI,
+                status: .available,
+                entries: entries,
+                balance: balance
+            ),
             credential: nextCredential
         )
     }
@@ -216,6 +272,33 @@ actor UpstreamRateService {
         next.sub2RefreshToken = nextRefreshToken
         next.sub2TokenExpiresAt = Date().addingTimeInterval(expiresIn)
         return next
+    }
+
+    private func fetchSub2UserBalance(_ credential: UpstreamRateCredential) async throws -> UpstreamBalanceSnapshot? {
+        let value = try await requestJSON(
+            baseURL: credential.baseURL,
+            path: "/api/v1/auth/me",
+            headers: sub2Headers(credential),
+            unwrap: .sub2
+        )
+        return parseSub2UserBalance(value as? [String: Any] ?? [:])
+    }
+
+    private func fetchNewAPIUserBalance(_ credential: UpstreamRateCredential) async throws -> UpstreamBalanceSnapshot? {
+        let status = (try? await requestJSON(
+            baseURL: credential.baseURL,
+            path: "/api/status",
+            headers: ["Accept": "application/json"],
+            unwrap: .newAPI
+        )) as? [String: Any] ?? [:]
+
+        let value = try await requestJSON(
+            baseURL: credential.baseURL,
+            path: "/api/user/self",
+            headers: newAPIHeaders(credential, signedPath: "/user/self"),
+            unwrap: .newAPI
+        )
+        return parseNewAPIUserBalance(user: value as? [String: Any] ?? [:], status: status)
     }
 
     private func listSub2UserGroupRates(_ credential: UpstreamRateCredential) async throws -> [Int: Double] {
@@ -613,23 +696,11 @@ private struct VariantNewAPIToken {
     }
 
     var preferredGroup: String {
-        if billingType == "subscription" {
-            return subscriptionGroupName
-        }
-        if billingType == "pay_as_you_go" || billingType == "payAsYouGo" {
-            return payAsYouGoGroupName
-        }
-        return !subscriptionGroupName.isEmpty ? subscriptionGroupName : payAsYouGoGroupName
+        !payAsYouGoGroupName.isEmpty ? payAsYouGoGroupName : subscriptionGroupName
     }
 
     var preferredRatio: Double? {
-        if billingType == "subscription" {
-            return subscriptionGroupRatio
-        }
-        if billingType == "pay_as_you_go" || billingType == "payAsYouGo" {
-            return payAsYouGoGroupRatio
-        }
-        return subscriptionGroupRatio ?? payAsYouGoGroupRatio
+        payAsYouGoGroupRatio ?? subscriptionGroupRatio
     }
 }
 
@@ -739,6 +810,32 @@ func findSub2KeyByKey(rows: [[String: Any]], targetAPIKey: String) -> Sub2Key? {
         return exact
     }
     return keys.first { sub2KeyMatches($0.key, targetAPIKey) }
+}
+
+func parseSub2UserBalance(_ user: [String: Any]) -> UpstreamBalanceSnapshot? {
+    guard let balance = serviceOptionalDouble(user["balance"]) else { return nil }
+    return UpstreamBalanceSnapshot(
+        displayAmount: balance,
+        unit: "USD",
+        totalRechargedDisplayAmount: serviceOptionalDouble(user["total_recharged"] ?? user["totalRecharged"])
+    )
+}
+
+func parseNewAPIUserBalance(user: [String: Any], status: [String: Any]) -> UpstreamBalanceSnapshot? {
+    let quotaPerUnit = max(serviceOptionalDouble(status["quota_per_unit"] ?? status["quotaPerUnit"]) ?? 500_000, 1)
+    if let quota = serviceOptionalDouble(user["quota"]) {
+        let usedQuota = serviceOptionalDouble(user["used_quota"] ?? user["usedQuota"])
+        return UpstreamBalanceSnapshot(
+            displayAmount: quota / quotaPerUnit,
+            unit: "USD",
+            rawAmount: quota,
+            usedDisplayAmount: usedQuota.map { $0 / quotaPerUnit }
+        )
+    }
+    if let balance = serviceOptionalDouble(user["balance"]) {
+        return UpstreamBalanceSnapshot(displayAmount: balance, unit: "USD")
+    }
+    return nil
 }
 
 private func tokenKeyMatches(_ lhs: String, _ rhs: String) -> Bool {
