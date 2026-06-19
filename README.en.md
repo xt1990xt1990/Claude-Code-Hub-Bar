@@ -28,6 +28,12 @@ Private configuration should be entered locally and should not be committed to t
 - Log details with provider chain, TTFB, throughput, and cache tokens.
 - Cache hit-rate display for logs and leaderboards.
 - Provider group filters, provider group assignment, enable/disable, probe, and circuit reset controls.
+- Upstream rate panel for Sub2API and new-api providers.
+- Groups upstream providers by official website and matches local providers by key suffix.
+- Chrome-based upstream login capture, with credentials stored locally for rate and balance refreshes.
+- Manual and scheduled upstream rate refreshes, with automatic multiplier sync for selected providers.
+- Upstream balance tracking with an independent background refresh cadence.
+- Provider drawers reuse the existing endpoint and model test controls for upstream checks.
 - Launch at login support.
 
 ## Build
