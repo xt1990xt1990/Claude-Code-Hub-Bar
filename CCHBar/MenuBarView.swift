@@ -2871,6 +2871,23 @@ private extension View {
     }
 }
 
+private struct CappedInlineText: View {
+    let text: String
+    let maxWidth: CGFloat
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            Text(text)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            Text(text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: maxWidth, alignment: .leading)
+        }
+    }
+}
+
 private struct MultiplierBadge: View {
     let value: Double
     var compact = false
@@ -3417,6 +3434,14 @@ private struct CompactLogRow: View {
         log.model.isEmpty ? log.originalModel : log.model
     }
 
+    var providerTitle: String {
+        log.providerName.isEmpty ? "渠道" : log.providerName
+    }
+
+    var modelTitle: String {
+        model.isEmpty ? "模型" : model
+    }
+
     var throughput: Double? {
         normalizedTokensPerSecond(
             raw: log.tokensPerSecond,
@@ -3431,14 +3456,14 @@ private struct CompactLogRow: View {
             LogStatusIndicator(color: statusColor, isRunning: log.statusCode == nil, isActive: isActive)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
-                    Text(log.providerName.isEmpty ? "渠道" : log.providerName)
+                    CappedInlineText(text: providerTitle, maxWidth: 220)
                         .font(.system(size: 11.5, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 220, compactThreshold: 15)
+                        .layoutPriority(1)
                     MultiplierBadge(value: providerMultiplier, compact: true)
+                        .fixedSize(horizontal: true, vertical: false)
                     if log.isFastTier {
                         FastTierBadge(compact: true)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     StatusCapsule(text: statusText, color: statusColor)
                         .fixedSize(horizontal: true, vertical: false)
@@ -3452,10 +3477,8 @@ private struct CompactLogRow: View {
                         .fixedSize(horizontal: true, vertical: false)
                     ModelBrandIcon(model: model, provider: log.providerName, size: 11)
                         .fixedSize(horizontal: true, vertical: false)
-                    Text(model.isEmpty ? "模型" : model)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .textAdaptiveWidth(model.isEmpty ? "模型" : model, limit: 200, compactThreshold: 10)
+                    CappedInlineText(text: modelTitle, maxWidth: 200)
+                        .layoutPriority(1)
                     Text("· \(shortTime(log.createdAt))")
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -3465,7 +3488,6 @@ private struct CompactLogRow: View {
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
-            Spacer()
             CompactUsageMetric(
                 top: log.outputTokens,
                 bottom: log.inputTokens,
