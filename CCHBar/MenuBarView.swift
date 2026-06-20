@@ -4256,14 +4256,9 @@ private struct ProviderMiniProbeNeedles: View {
 
     private func height(for sample: CCHProviderMiniProbeSample?, index: Int) -> CGFloat {
         if isRunning, index == CCHProviderMiniProbeLimits.maxSamples - 1 {
-            return 9
+            return 7
         }
-        guard let sample else { return 4 }
-        switch sample.status {
-        case .success: return 7
-        case .warning: return 6
-        case .failure: return 5
-        }
+        return sample == nil ? 4 : 7
     }
 }
 

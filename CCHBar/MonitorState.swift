@@ -260,8 +260,11 @@ final class MonitorState: ObservableObject {
     private var providerMiniProbeTimer: AnyCancellable?
     private var upstreamRateAutoSyncTimer: AnyCancellable?
     private var upstreamBalanceRefreshTimer: AnyCancellable?
-    private var wakeObserver: NSObjectProtocol?
+    private var workspaceWakeObservers: [NSObjectProtocol] = []
+    private var distributedWakeObservers: [NSObjectProtocol] = []
     private var refreshTask: Task<Void, Never>?
+    private var providerMiniProbeResumeTask: Task<Void, Never>?
+    private var providerMiniProbeLastRunAtByProviderId: [Int: Date] = [:]
     private var isLoadingActiveSessions = false
     private var isLoadingStatusBarData = false
     private var isLoadingFocusedView = false
@@ -444,6 +447,7 @@ final class MonitorState: ObservableObject {
         providerMiniProbeSelectedProviderIds = Self.loadIntSet(key: CCHProviderMiniProbeStorage.selectedProviderIdsKey)
         providerMiniProbeModelOverrides = Self.loadProviderMiniProbeModelOverrides()
         providerMiniProbeHistories = Self.loadProviderMiniProbeHistories()
+        providerMiniProbeLastRunAtByProviderId = Self.latestProviderMiniProbeRunDates(from: providerMiniProbeHistories)
         upstreamRateSelectedProviderIds = Self.loadIntSet(key: CCHUpstreamRateStorage.selectedProviderIdsKey)
         upstreamRateIgnoredHosts = Self.loadStringSet(key: CCHUpstreamRateStorage.ignoredHostsKey)
         upstreamRateSourceTypeOverrides = Self.loadUpstreamRateSourceTypeOverrides()
@@ -453,7 +457,7 @@ final class MonitorState: ObservableObject {
         startRefreshTimer()
         startActiveSessionTimer()
         startUpdateCheckTimer()
-        startProviderMiniProbeTimer()
+        startProviderMiniProbeTimer(runImmediately: providerMiniProbeEnabled)
         startUpstreamRateAutoSyncTimer()
         startUpstreamBalanceRefreshTimer()
         observeSystemWake()
@@ -470,6 +474,7 @@ final class MonitorState: ObservableObject {
         focusedViewTimer?.cancel()
         updateCheckTimer?.cancel()
         providerMiniProbeTimer?.cancel()
+        providerMiniProbeResumeTask?.cancel()
         upstreamRateAutoSyncTimer?.cancel()
         upstreamBalanceRefreshTimer?.cancel()
         refreshTask?.cancel()
@@ -477,8 +482,11 @@ final class MonitorState: ObservableObject {
         simulatedCacheAlertDismissTask?.cancel()
         actionMessageDismissTask?.cancel()
         highlightedLogDismissTasks.values.forEach { $0.cancel() }
-        if let wakeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        workspaceWakeObservers.forEach {
+            NSWorkspace.shared.notificationCenter.removeObserver($0)
+        }
+        distributedWakeObservers.forEach {
+            DistributedNotificationCenter.default().removeObserver($0)
         }
     }
 
@@ -901,7 +909,9 @@ final class MonitorState: ObservableObject {
         let samples = Array(providerMiniProbeHistory(for: provider)
             .sorted { $0.createdAt < $1.createdAt }
             .suffix(providerMiniProbeAverageSampleCountValue))
-        let values = samples.compactMap(\.ttfbMs)
+        let values = samples.compactMap { sample in
+            sample.status == .success ? sample.ttfbMs : nil
+        }
         guard !values.isEmpty else { return nil }
         return values.reduce(0, +) / Double(values.count)
     }
@@ -937,7 +947,7 @@ final class MonitorState: ObservableObject {
         saveProviderMiniProbeSelectedProviderIds()
 
         guard enabled, providerMiniProbeEnabled else { return }
-        Task { await runProviderMiniProbe(provider, silent: true) }
+        Task { await runProviderMiniProbe(provider, silent: true, respectingInterval: false) }
     }
 
     func normalizeProviderMiniProbeInterval() {
@@ -988,7 +998,6 @@ final class MonitorState: ObservableObject {
         let start = providerMiniProbeScheduleStartHour
         let end = providerMiniProbeScheduleEndHour
         if start <= 0, end >= 24 { return true }
-        guard end > start else { return false }
         let components = Calendar.current.dateComponents([.hour, .minute, .second], from: now)
         let hour = Double(components.hour ?? 0)
             + Double(components.minute ?? 0) / 60
@@ -1002,7 +1011,7 @@ final class MonitorState: ObservableObject {
         return false
     }
 
-    func startProviderMiniProbeTimer(runImmediately: Bool = false) {
+    func startProviderMiniProbeTimer(runImmediately: Bool = false, forceImmediate: Bool = false) {
         providerMiniProbeTimer?.cancel()
         guard providerMiniProbeEnabled else {
             providerMiniProbeTimer = nil
@@ -1015,15 +1024,15 @@ final class MonitorState: ObservableObject {
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
-                Task { await self.runScheduledProviderMiniProbes() }
+                Task { await self.runScheduledProviderMiniProbes(respectingInterval: true) }
             }
 
         if runImmediately {
-            Task { await runScheduledProviderMiniProbes() }
+            Task { await runScheduledProviderMiniProbes(respectingInterval: !forceImmediate) }
         }
     }
 
-    func runScheduledProviderMiniProbes() async {
+    func runScheduledProviderMiniProbes(respectingInterval: Bool = true) async {
         guard providerMiniProbeEnabled else { return }
         guard isProviderMiniProbeWithinSchedule() else { return }
         guard !providerMiniProbeSelectedProviderIds.isEmpty else { return }
@@ -1034,19 +1043,22 @@ final class MonitorState: ObservableObject {
 
         let selectedIds = providerMiniProbeSelectedProviderIds
         let targets = providers
-            .filter { selectedIds.contains($0.id) && $0.isEnabled }
+            .filter { selectedIds.contains($0.id) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        guard !targets.isEmpty else { return }
 
         for provider in targets {
-            await runProviderMiniProbe(provider, silent: true)
+            await runProviderMiniProbe(provider, silent: true, respectingInterval: respectingInterval)
         }
     }
 
-    func runProviderMiniProbe(_ provider: CCHProvider, silent: Bool = true) async {
+    func runProviderMiniProbe(_ provider: CCHProvider, silent: Bool = true, respectingInterval: Bool = false) async {
         guard providerMiniProbeEnabled else { return }
         guard isProviderMiniProbeWithinSchedule() else { return }
         guard providerMiniProbeSelectedProviderIds.contains(provider.id) else { return }
-        guard provider.isEnabled else { return }
+        if respectingInterval {
+            guard isProviderMiniProbeDue(providerId: provider.id) else { return }
+        }
         guard !providerMiniProbeRunningIds.contains(provider.id) else { return }
         guard !modelTestingProviderIds.contains(provider.id) else { return }
 
@@ -1075,6 +1087,40 @@ final class MonitorState: ObservableObject {
                 flashActionMessage("探针 \(provider.name): \(error.localizedDescription)", duration: 5, isWarning: true)
             }
         }
+    }
+
+    private func runProviderMiniProbesAfterSystemResumeIfNeeded() {
+        guard providerMiniProbeEnabled else { return }
+        guard isProviderMiniProbeWithinSchedule() else { return }
+        guard !providerMiniProbeSelectedProviderIds.isEmpty else { return }
+        let now = Date()
+        guard providerMiniProbeSelectedProviderIds.contains(where: { isProviderMiniProbeDue(providerId: $0, now: now) }) else {
+            return
+        }
+
+        providerMiniProbeResumeTask?.cancel()
+        providerMiniProbeResumeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard let self else { return }
+            await self.runScheduledProviderMiniProbes(respectingInterval: true)
+            self.providerMiniProbeResumeTask = nil
+        }
+    }
+
+    private func isProviderMiniProbeDue(providerId: Int, now: Date = Date()) -> Bool {
+        normalizeProviderMiniProbeInterval()
+        return providerMiniProbeIsDue(
+            lastRunAt: latestProviderMiniProbeRunDate(providerId: providerId),
+            intervalMinutes: providerMiniProbeIntervalMinutes,
+            now: now
+        )
+    }
+
+    private func latestProviderMiniProbeRunDate(providerId: Int) -> Date? {
+        if let lastRun = providerMiniProbeLastRunAtByProviderId[providerId] {
+            return lastRun
+        }
+        return providerMiniProbeHistories[providerId]?.map(\.createdAt).max()
     }
 
     func isProviderMultiplierUpdating(_ provider: CCHProvider) -> Bool {
@@ -1623,6 +1669,7 @@ final class MonitorState: ObservableObject {
         var samples = providerMiniProbeHistories[providerId] ?? []
         samples.append(sample)
         providerMiniProbeHistories[providerId] = Array(samples.suffix(CCHProviderMiniProbeLimits.maxSamples))
+        providerMiniProbeLastRunAtByProviderId[providerId] = sample.createdAt
         saveProviderMiniProbeHistories()
     }
 
@@ -1867,16 +1914,36 @@ final class MonitorState: ObservableObject {
     }
 
     private func observeSystemWake() {
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification,
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.didWakeNotification,
+            NSWorkspace.screensDidWakeNotification
+        ] {
+            let observer = workspaceCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    await self.refresh()
+                    self.runProviderMiniProbesAfterSystemResumeIfNeeded()
+                }
+            }
+            workspaceWakeObservers.append(observer)
+        }
+
+        let unlockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"),
             object: nil,
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
-                await self.refresh()
+                self.runProviderMiniProbesAfterSystemResumeIfNeeded()
             }
         }
+        distributedWakeObservers.append(unlockObserver)
     }
 
     private func rebuildCacheStatus() {
@@ -2253,6 +2320,14 @@ private extension MonitorState {
         }
     }
 
+    static func latestProviderMiniProbeRunDates(from histories: [Int: [CCHProviderMiniProbeSample]]) -> [Int: Date] {
+        histories.reduce(into: [Int: Date]()) { result, entry in
+            if let latest = entry.value.map(\.createdAt).max() {
+                result[entry.key] = latest
+            }
+        }
+    }
+
     func pruneProviderMiniProbeData() {
         let providerIds = Set(providers.map(\.id))
         let nextSelected = providerMiniProbeSelectedProviderIds.intersection(providerIds)
@@ -2265,6 +2340,10 @@ private extension MonitorState {
         if nextHistories != providerMiniProbeHistories {
             providerMiniProbeHistories = nextHistories
             saveProviderMiniProbeHistories()
+        }
+        let nextLastRunDates = providerMiniProbeLastRunAtByProviderId.filter { providerIds.contains($0.key) }
+        if nextLastRunDates != providerMiniProbeLastRunAtByProviderId {
+            providerMiniProbeLastRunAtByProviderId = nextLastRunDates
         }
 
         let nextModelOverrides = providerMiniProbeModelOverrides.filter { providerIds.contains($0.key) }

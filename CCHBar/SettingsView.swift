@@ -176,7 +176,7 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
                     .font(.system(size: 12, weight: .semibold))
                     .onChange(of: state.providerMiniProbeEnabled) { _, enabled in
-                        state.startProviderMiniProbeTimer(runImmediately: enabled)
+                        state.startProviderMiniProbeTimer(runImmediately: enabled, forceImmediate: enabled)
                     }
             }
 
