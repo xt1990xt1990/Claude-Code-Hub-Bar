@@ -1253,8 +1253,9 @@ final class MonitorState: ObservableObject {
         saveUpstreamRateSelectedProviderIds()
     }
 
-    func refreshUpstreamRates(silent: Bool = false) async {
-        if isRefreshingUpstreamRates { return }
+    @discardableResult
+    func refreshUpstreamRates(silent: Bool = false) async -> Bool {
+        if isRefreshingUpstreamRates { return false }
         isRefreshingUpstreamRates = true
         defer { isRefreshingUpstreamRates = false }
 
@@ -1327,6 +1328,7 @@ final class MonitorState: ObservableObject {
         if !silent {
             flashActionMessage("上游倍率已检测")
         }
+        return true
     }
 
     func refreshUpstreamBalances(silent: Bool = false, onlyIfStale: Bool = false) async {
@@ -1559,28 +1561,32 @@ final class MonitorState: ObservableObject {
         await updateProviderMultiplier(provider, multiplier: upstreamRate)
     }
 
-    func startUpstreamRateAutoSyncTimer() {
+    func startUpstreamRateAutoSyncTimer(resetSchedule: Bool = false) {
         upstreamRateAutoSyncTimer?.cancel()
         guard upstreamRateAutoSyncEnabled else {
             upstreamRateAutoSyncTimer = nil
             upstreamRateAutoSyncNextRunEpoch = 0
             return
         }
-        let hours = min(
-            max(upstreamRateAutoSyncIntervalHours, CCHUpstreamRateStorage.minAutoSyncIntervalHours),
-            CCHUpstreamRateStorage.maxAutoSyncIntervalHours
-        )
+        let hours = UpstreamRateAutoSyncTiming.clampedIntervalHours(upstreamRateAutoSyncIntervalHours)
         if hours != upstreamRateAutoSyncIntervalHours {
             upstreamRateAutoSyncIntervalHours = hours
         }
-        let interval = hours * 60 * 60
-        upstreamRateAutoSyncNextRunEpoch = Date().addingTimeInterval(interval).timeIntervalSince1970
-        upstreamRateAutoSyncTimer = Timer.publish(every: interval, on: .main, in: .common)
+        if resetSchedule {
+            upstreamRateAutoSyncNextRunEpoch = 0
+        }
+        upstreamRateAutoSyncNextRunEpoch = UpstreamRateAutoSyncTiming.nextRunEpoch(
+            now: Date(),
+            intervalHours: hours,
+            existingNextRunEpoch: upstreamRateAutoSyncNextRunEpoch
+        )
+        upstreamRateAutoSyncTimer = Timer.publish(every: 60, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
-                Task { await self.runScheduledUpstreamRateAutoSync() }
+                self.runDueUpstreamRateAutoSyncIfNeeded()
             }
+        runDueUpstreamRateAutoSyncIfNeeded()
     }
 
     func startUpstreamBalanceRefreshTimer() {
@@ -1596,11 +1602,18 @@ final class MonitorState: ObservableObject {
     func runScheduledUpstreamRateAutoSync() async {
         guard upstreamRateAutoSyncEnabled else { return }
         let startedAt = Date()
+        let didRun = await refreshUpstreamRates(silent: true)
+        guard didRun else { return }
         upstreamRateAutoSyncLastRunEpoch = startedAt.timeIntervalSince1970
-        upstreamRateAutoSyncNextRunEpoch = startedAt
-            .addingTimeInterval(upstreamRateAutoSyncIntervalHours * 3600)
+        upstreamRateAutoSyncNextRunEpoch = Date()
+            .addingTimeInterval(UpstreamRateAutoSyncTiming.intervalSeconds(hours: upstreamRateAutoSyncIntervalHours))
             .timeIntervalSince1970
-        await refreshUpstreamRates(silent: true)
+    }
+
+    func runDueUpstreamRateAutoSyncIfNeeded(now: Date = Date()) {
+        guard upstreamRateAutoSyncEnabled else { return }
+        guard UpstreamRateAutoSyncTiming.shouldRun(now: now, nextRunEpoch: upstreamRateAutoSyncNextRunEpoch) else { return }
+        Task { await self.runScheduledUpstreamRateAutoSync() }
     }
 
     var upstreamRateAutoSyncLastRunAt: Date? {
@@ -2045,6 +2058,7 @@ final class MonitorState: ObservableObject {
                 Task { @MainActor in
                     await self.refresh()
                     self.runProviderMiniProbesAfterSystemResumeIfNeeded()
+                    self.runDueUpstreamRateAutoSyncIfNeeded()
                 }
             }
             workspaceWakeObservers.append(observer)
@@ -2058,6 +2072,7 @@ final class MonitorState: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.runProviderMiniProbesAfterSystemResumeIfNeeded()
+                self.runDueUpstreamRateAutoSyncIfNeeded()
             }
         }
         distributedWakeObservers.append(unlockObserver)

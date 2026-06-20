@@ -4,6 +4,11 @@ An unofficial native macOS menu bar client for [Claude Code Hub](https://github.
 
 It surfaces today’s usage, running requests, logs, leaderboards, and provider health directly in the menu bar.
 
+## Download
+
+- Latest version: [v1.2.1.1](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/tag/v1.2.1.1)
+- Apple Silicon: [CCHBar-v1.2.1.1-arm64.zip](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/download/v1.2.1.1/CCHBar-v1.2.1.1-arm64.zip)
+
 ## Usage
 
 1. Launch the app.

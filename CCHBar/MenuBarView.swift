@@ -317,7 +317,8 @@ struct MenuBarView: View {
                                     }
                                 }
                                 .frame(width: CCHPanelLayout.contentWidth, alignment: .topLeading)
-                                .padding(14)
+                                .padding(.vertical, 14)
+                                .frame(maxWidth: .infinity)
                             }
                         } else {
                             Color.clear
@@ -1677,7 +1678,7 @@ private struct UpstreamAutoSyncPopover: View {
         guard let normalizedHours else { return }
         state.upstreamRateAutoSyncIntervalHours = normalizedHours
         intervalInput = "\(Int(normalizedHours))"
-        state.startUpstreamRateAutoSyncTimer()
+        state.startUpstreamRateAutoSyncTimer(resetSchedule: true)
     }
 }
 
