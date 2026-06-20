@@ -2828,7 +2828,6 @@ private struct UsageMetricColumn: View {
 }
 
 private struct CompactUsageMetric: View {
-    let title: String
     let top: Int
     let bottom: Int
     let topColor: Color
@@ -2837,19 +2836,16 @@ private struct CompactUsageMetric: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 1) {
-            Text(title)
-                .font(.system(size: 7.5, weight: .bold))
-                .foregroundStyle(theme.textSecondary)
             Text(top > 0 ? compactNumber(top) : "-")
-                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
                 .foregroundStyle(top > 0 ? topColor : theme.textTertiary)
                 .monospacedDigit()
             Text(bottom > 0 ? compactNumber(bottom) : "-")
-                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .font(.system(size: 9.5, weight: .medium, design: .rounded))
                 .foregroundStyle(bottom > 0 ? bottomColor : theme.textTertiary.opacity(0.82))
                 .monospacedDigit()
         }
-        .frame(width: 42, alignment: .trailing)
+        .frame(width: 44, alignment: .trailing)
     }
 }
 
@@ -3344,6 +3340,12 @@ private struct LogRow: View {
                         .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 160, compactThreshold: 18)
                     Text("· \(shortTime(log.createdAt))")
                         .fixedSize(horizontal: true, vertical: false)
+                    if log.costUsd > 0 {
+                        Text("·")
+                            .fixedSize(horizontal: true, vertical: false)
+                        MoneyValue(value: log.costUsd, majorSize: 10.5, minorSize: 6.5, weight: .semibold, color: theme.textSecondary)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(theme.textSecondary)
@@ -3366,8 +3368,6 @@ private struct LogRow: View {
                 bottomColor: cacheReadDisplayColor(cacheStatus, theme: theme)
             )
             .frame(width: 56, alignment: .trailing)
-            MoneyValue(value: log.costUsd, majorSize: 11.5, minorSize: 6.8, weight: .semibold)
-                .frame(width: 62, alignment: .trailing)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(formatMillisecondsAsSeconds(log.durationMs))
                     .font(.caption)
@@ -3435,11 +3435,13 @@ private struct CompactLogRow: View {
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 128, compactThreshold: 15)
+                        .textAdaptiveWidth(log.providerName.isEmpty ? "渠道" : log.providerName, limit: 220, compactThreshold: 15)
                     MultiplierBadge(value: providerMultiplier, compact: true)
                     if log.isFastTier {
                         FastTierBadge(compact: true)
                     }
+                    StatusCapsule(text: statusText, color: statusColor)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 HStack(spacing: 4) {
                     Text(log.userName.isEmpty ? "-" : log.userName)
@@ -3453,7 +3455,7 @@ private struct CompactLogRow: View {
                     Text(model.isEmpty ? "模型" : model)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .textAdaptiveWidth(model.isEmpty ? "模型" : model, limit: 130, compactThreshold: 10)
+                        .textAdaptiveWidth(model.isEmpty ? "模型" : model, limit: 200, compactThreshold: 10)
                     Text("· \(shortTime(log.createdAt))")
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -3465,21 +3467,17 @@ private struct CompactLogRow: View {
             .layoutPriority(1)
             Spacer()
             CompactUsageMetric(
-                title: "TOK",
                 top: log.outputTokens,
                 bottom: log.inputTokens,
                 topColor: theme.textPrimary,
                 bottomColor: theme.textSecondary
             )
             CompactUsageMetric(
-                title: "CACHE",
                 top: log.cacheCreationTokens,
                 bottom: log.cacheReadTokens,
                 topColor: cacheCreationDisplayColor(cacheStatus, theme: theme),
                 bottomColor: cacheReadDisplayColor(cacheStatus, theme: theme)
             )
-            StatusCapsule(text: statusText, color: statusColor)
-                .frame(width: 50, alignment: .trailing)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(formatMillisecondsAsSeconds(log.durationMs))
                     .foregroundStyle(theme.textPrimary)
@@ -4137,10 +4135,14 @@ private struct ProviderMiniProbeControl: View {
         featureEnabled && isEnabled
     }
 
+    private var latestSample: CCHProviderMiniProbeSample? {
+        samples.max { $0.createdAt < $1.createdAt }
+    }
+
     private var statusColor: Color {
         guard active else { return theme.textTertiary }
-        if isRunning { return theme.accentOrange }
-        return samples.last.map { providerMiniProbeColor($0.status, theme: theme) } ?? theme.accentBlue
+        if isRunning { return theme.accentBlue }
+        return latestSample.map { providerMiniProbeColor($0.status, theme: theme) } ?? theme.accentBlue
     }
 
     private var helpText: String {
@@ -4185,6 +4187,8 @@ private struct ProviderMiniProbeControl: View {
                     }
                 }
                 .frame(width: 18, height: 18)
+                .contentTransition(.opacity)
+                .animation(.easeInOut(duration: 0.2), value: isRunning)
             }
             .buttonStyle(.borderless)
             .foregroundStyle(statusColor)
@@ -4217,7 +4221,7 @@ private struct ProviderMiniProbeControl: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(active ? statusColor.opacity(0.28) : theme.borderSubtle, lineWidth: 1)
+                .stroke(active ? statusColor.opacity(0.42) : theme.borderSubtle, lineWidth: 1)
         )
     }
 }
@@ -4227,6 +4231,7 @@ private struct ProviderMiniProbeNeedles: View {
     let active: Bool
     let isRunning: Bool
     @Environment(\.cchTheme) private var theme
+    @State private var runningPulse = false
 
     private var orderedSamples: [CCHProviderMiniProbeSample] {
         Array(samples.sorted { $0.createdAt < $1.createdAt }.suffix(CCHProviderMiniProbeLimits.maxSamples))
@@ -4240,18 +4245,33 @@ private struct ProviderMiniProbeNeedles: View {
                 Capsule()
                     .fill(color(for: sample, index: index))
                     .frame(width: 2, height: height(for: sample, index: index))
-                    .opacity(active || sample != nil ? 1 : 0.55)
-                    .animation(.easeOut(duration: 0.18), value: samples)
+                    .opacity(opacity(for: sample, index: index))
+                    .scaleEffect(sample == nil ? 0.86 : 1, anchor: .bottom)
+                    .animation(.spring(response: 0.32, dampingFraction: 0.78), value: orderedSamples.map(\.id))
+                    .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: runningPulse)
             }
+        }
+        .onAppear {
+            runningPulse = isRunning
+        }
+        .onChange(of: isRunning) { _, value in
+            runningPulse = value
         }
     }
 
     private func color(for sample: CCHProviderMiniProbeSample?, index: Int) -> Color {
         if isRunning, index == CCHProviderMiniProbeLimits.maxSamples - 1 {
-            return theme.accentOrange
+            return theme.accentBlue
         }
         guard let sample else { return theme.textTertiary.opacity(0.34) }
         return providerMiniProbeColor(sample.status, theme: theme)
+    }
+
+    private func opacity(for sample: CCHProviderMiniProbeSample?, index: Int) -> Double {
+        if isRunning, index == CCHProviderMiniProbeLimits.maxSamples - 1 {
+            return runningPulse ? 0.42 : 1
+        }
+        return active || sample != nil ? 1 : 0.55
     }
 
     private func height(for sample: CCHProviderMiniProbeSample?, index: Int) -> CGFloat {
@@ -4286,10 +4306,11 @@ private struct ProviderMiniProbePopover: View {
     private var latestText: String {
         guard let latestSample else { return "暂无样本" }
         let totalLatency = latestSample.latencyMs.map(formatProbeLatency) ?? "-"
+        let relativeTime = formatRelativeShortTime(latestSample.createdAt)
         if let ttfbMs = latestSample.ttfbMs {
-            return "\(probeStatusTitle(latestSample.status)) · 首字节 \(formatProbeLatency(ttfbMs)) · 总延迟 \(totalLatency)"
+            return "\(probeStatusTitle(latestSample.status)) · 首字节 \(formatProbeLatency(ttfbMs)) · 总延迟 \(totalLatency) · \(relativeTime)"
         }
-        return "\(probeStatusTitle(latestSample.status)) · 总延迟 \(totalLatency)"
+        return "\(probeStatusTitle(latestSample.status)) · 总延迟 \(totalLatency) · \(relativeTime)"
     }
 
     private var averageText: String? {
@@ -4327,10 +4348,14 @@ private struct ProviderMiniProbePopover: View {
             }
 
             if let averageText {
-                Text(averageText)
-                    .font(.caption2)
-                    .foregroundStyle(theme.accentOrange)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Image(systemName: "timer.circle")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(averageText)
+                        .font(.caption2)
+                        .lineLimit(1)
+                }
+                .foregroundStyle(theme.textSecondary)
             }
 
             HStack(spacing: 8) {

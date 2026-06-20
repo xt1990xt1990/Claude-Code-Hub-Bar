@@ -31,5 +31,32 @@ private struct ProviderMiniProbeTimingTests {
             providerMiniProbeIsDue(lastRunAt: now.addingTimeInterval(-1_800), intervalMinutes: 30, now: now),
             "run should be due at the configured interval"
         )
+
+        expectEqual(
+            providerMiniProbeFailureBackoffSeconds(failureCount: 1, intervalMinutes: 30),
+            60,
+            "first failure backs off for one minute"
+        )
+        expectEqual(
+            providerMiniProbeFailureBackoffSeconds(failureCount: 2, intervalMinutes: 30),
+            120,
+            "second failure backs off for two minutes"
+        )
+        expectEqual(
+            providerMiniProbeFailureBackoffSeconds(failureCount: 3, intervalMinutes: 30),
+            300,
+            "third failure backs off for five minutes"
+        )
+        expectEqual(
+            providerMiniProbeFailureBackoffSeconds(failureCount: 3, intervalMinutes: 2),
+            120,
+            "failure backoff is capped by configured interval"
+        )
+    }
+}
+
+private func expectEqual(_ actual: TimeInterval, _ expected: TimeInterval, _ message: String) {
+    guard abs(actual - expected) < 0.001 else {
+        fail("\(message): expected \(expected), got \(actual)")
     }
 }

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Network
 import SwiftUI
 
 enum CCHPanelTab: String, CaseIterable, Identifiable {
@@ -125,7 +126,7 @@ struct CCHProviderMiniProbeSample: Identifiable, Codable, Equatable {
     let message: String
 
     var id: String {
-        "\(createdAt.timeIntervalSince1970)-\(model)-\(status.rawValue)"
+        "\(createdAt.timeIntervalSince1970)-\(model)-\(status.rawValue)-\(latencyMs ?? -1)-\(ttfbMs ?? -1)-\(message)"
     }
 }
 
@@ -135,6 +136,7 @@ enum CCHProviderMiniProbeLimits {
     static let maxAverageSampleCount = Double(maxSamples)
     static let minIntervalMinutes = 5.0
     static let maxIntervalMinutes = 360.0
+    static let maxConcurrentProbes = 4
 }
 
 private enum CCHProviderMiniProbeStorage {
@@ -264,7 +266,17 @@ final class MonitorState: ObservableObject {
     private var distributedWakeObservers: [NSObjectProtocol] = []
     private var refreshTask: Task<Void, Never>?
     private var providerMiniProbeResumeTask: Task<Void, Never>?
+    private var providerMiniProbeIntervalRestartTask: Task<Void, Never>?
+    private var providerMiniProbeTasks: [Int: Task<Void, Never>] = [:]
+    private var providerMiniProbeTaskTokens: [Int: UUID] = [:]
+    private var providerMiniProbeRunTokens: [Int: UUID] = [:]
+    private var providerMiniProbeHistoriesSaveTask: Task<Void, Never>?
     private var providerMiniProbeLastRunAtByProviderId: [Int: Date] = [:]
+    private var providerMiniProbeFailureBackoffUntilByProviderId: [Int: Date] = [:]
+    private var providerMiniProbeFailureCountByProviderId: [Int: Int] = [:]
+    private let providerMiniProbeNetworkMonitor = NWPathMonitor()
+    private let providerMiniProbeNetworkQueue = DispatchQueue(label: "app.cchbar.provider-mini-probe-network")
+    private var providerMiniProbeNetworkStatus: NWPath.Status = .requiresConnection
     private var isLoadingActiveSessions = false
     private var isLoadingStatusBarData = false
     private var isLoadingFocusedView = false
@@ -458,6 +470,7 @@ final class MonitorState: ObservableObject {
         startActiveSessionTimer()
         startUpdateCheckTimer()
         startProviderMiniProbeTimer(runImmediately: providerMiniProbeEnabled)
+        observeProviderMiniProbeNetwork()
         startUpstreamRateAutoSyncTimer()
         startUpstreamBalanceRefreshTimer()
         observeSystemWake()
@@ -475,6 +488,9 @@ final class MonitorState: ObservableObject {
         updateCheckTimer?.cancel()
         providerMiniProbeTimer?.cancel()
         providerMiniProbeResumeTask?.cancel()
+        providerMiniProbeIntervalRestartTask?.cancel()
+        providerMiniProbeTasks.values.forEach { $0.cancel() }
+        providerMiniProbeNetworkMonitor.cancel()
         upstreamRateAutoSyncTimer?.cancel()
         upstreamBalanceRefreshTimer?.cancel()
         refreshTask?.cancel()
@@ -939,15 +955,24 @@ final class MonitorState: ObservableObject {
     func setProviderMiniProbe(_ provider: CCHProvider, enabled: Bool) {
         if enabled {
             providerMiniProbeSelectedProviderIds.insert(provider.id)
-            flashActionMessage("已开启探针 \(provider.name)")
+            if providerMiniProbeEnabled, !isProviderMiniProbeWithinSchedule() {
+                flashActionMessage("已开启探针 \(provider.name)，当前不在运行时段", duration: 4, isWarning: true)
+            } else {
+                flashActionMessage("已开启探针 \(provider.name)")
+            }
         } else {
             providerMiniProbeSelectedProviderIds.remove(provider.id)
+            providerMiniProbeTasks[provider.id]?.cancel()
+            providerMiniProbeTasks[provider.id] = nil
+            providerMiniProbeTaskTokens[provider.id] = nil
+            providerMiniProbeRunTokens[provider.id] = nil
+            providerMiniProbeRunningIds.remove(provider.id)
             flashActionMessage("已关闭探针 \(provider.name)")
         }
         saveProviderMiniProbeSelectedProviderIds()
 
         guard enabled, providerMiniProbeEnabled else { return }
-        Task { await runProviderMiniProbe(provider, silent: true, respectingInterval: false) }
+        startProviderMiniProbeTask(provider, silent: true, respectingInterval: false)
     }
 
     func normalizeProviderMiniProbeInterval() {
@@ -970,6 +995,16 @@ final class MonitorState: ObservableObject {
         }
     }
 
+    func restartProviderMiniProbeTimerDebounced() {
+        providerMiniProbeIntervalRestartTask?.cancel()
+        providerMiniProbeIntervalRestartTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.startProviderMiniProbeTimer()
+            self.providerMiniProbeIntervalRestartTask = nil
+        }
+    }
+
     func normalizeProviderMiniProbeSchedule() {
         let normalizedStart = min(max(providerMiniProbeScheduleStartHour, 0), 24)
         let normalizedEnd = min(max(providerMiniProbeScheduleEndHour, 0), 24)
@@ -987,6 +1022,9 @@ final class MonitorState: ObservableObject {
         let end = min(max(providerMiniProbeScheduleEndHour, 0), 24)
         if start <= 0, end >= 24 {
             return "全天"
+        }
+        if abs(start - end) < 0.001 {
+            return "已停用"
         }
         let suffix = start > end ? " 次日" : ""
         return "\(formatProviderMiniProbeHour(start))-\(formatProviderMiniProbeHour(end))\(suffix)"
@@ -1045,10 +1083,25 @@ final class MonitorState: ObservableObject {
         let targets = providers
             .filter { selectedIds.contains($0.id) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        guard !targets.isEmpty else { return }
+        let dueTargets = respectingInterval
+            ? targets.filter { isProviderMiniProbeDue(providerId: $0.id) }
+            : targets
+        guard !dueTargets.isEmpty else { return }
 
-        for provider in targets {
-            await runProviderMiniProbe(provider, silent: true, respectingInterval: respectingInterval)
+        var iterator = dueTargets.makeIterator()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<min(CCHProviderMiniProbeLimits.maxConcurrentProbes, dueTargets.count) {
+                guard let provider = iterator.next() else { break }
+                group.addTask { @MainActor in
+                    await self.runProviderMiniProbe(provider, silent: true, respectingInterval: false)
+                }
+            }
+            while await group.next() != nil {
+                guard let provider = iterator.next() else { continue }
+                group.addTask { @MainActor in
+                    await self.runProviderMiniProbe(provider, silent: true, respectingInterval: false)
+                }
+            }
         }
     }
 
@@ -1056,22 +1109,30 @@ final class MonitorState: ObservableObject {
         guard providerMiniProbeEnabled else { return }
         guard isProviderMiniProbeWithinSchedule() else { return }
         guard providerMiniProbeSelectedProviderIds.contains(provider.id) else { return }
+        guard providerMiniProbeNetworkStatus == .satisfied else { return }
         if respectingInterval {
             guard isProviderMiniProbeDue(providerId: provider.id) else { return }
         }
         guard !providerMiniProbeRunningIds.contains(provider.id) else { return }
         guard !modelTestingProviderIds.contains(provider.id) else { return }
 
+        let runToken = UUID()
+        providerMiniProbeRunTokens[provider.id] = runToken
         providerMiniProbeRunningIds.insert(provider.id)
         defer {
-            providerMiniProbeRunningIds.remove(provider.id)
+            if providerMiniProbeRunTokens[provider.id] == runToken {
+                providerMiniProbeRunTokens[provider.id] = nil
+                providerMiniProbeRunningIds.remove(provider.id)
+            }
         }
 
         let testModel = resolvedProviderMiniProbeModel(for: provider)
         do {
             let result = try await api.testProviderModel(config: config, provider: provider, model: testModel)
+            guard shouldRecordProviderMiniProbeResult(providerId: provider.id, runToken: runToken) else { return }
             appendProviderMiniProbeSample(providerId: provider.id, sample: miniProbeSample(from: result, requestedModel: testModel))
         } catch {
+            guard shouldRecordProviderMiniProbeResult(providerId: provider.id, runToken: runToken) else { return }
             appendProviderMiniProbeSample(
                 providerId: provider.id,
                 sample: CCHProviderMiniProbeSample(
@@ -1089,10 +1150,36 @@ final class MonitorState: ObservableObject {
         }
     }
 
+    private func shouldRecordProviderMiniProbeResult(providerId: Int, runToken: UUID) -> Bool {
+        !Task.isCancelled
+            && providerMiniProbeRunTokens[providerId] == runToken
+            && providerMiniProbeSelectedProviderIds.contains(providerId)
+    }
+
+    private func startProviderMiniProbeTask(
+        _ provider: CCHProvider,
+        silent: Bool,
+        respectingInterval: Bool
+    ) {
+        providerMiniProbeTasks[provider.id]?.cancel()
+        let providerId = provider.id
+        let taskToken = UUID()
+        providerMiniProbeTaskTokens[providerId] = taskToken
+        providerMiniProbeTasks[providerId] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runProviderMiniProbe(provider, silent: silent, respectingInterval: respectingInterval)
+            if self.providerMiniProbeTaskTokens[providerId] == taskToken {
+                self.providerMiniProbeTaskTokens[providerId] = nil
+                self.providerMiniProbeTasks[providerId] = nil
+            }
+        }
+    }
+
     private func runProviderMiniProbesAfterSystemResumeIfNeeded() {
         guard providerMiniProbeEnabled else { return }
         guard isProviderMiniProbeWithinSchedule() else { return }
         guard !providerMiniProbeSelectedProviderIds.isEmpty else { return }
+        guard providerMiniProbeNetworkStatus == .satisfied else { return }
         let now = Date()
         guard providerMiniProbeSelectedProviderIds.contains(where: { isProviderMiniProbeDue(providerId: $0, now: now) }) else {
             return
@@ -1107,8 +1194,24 @@ final class MonitorState: ObservableObject {
         }
     }
 
+    private func observeProviderMiniProbeNetwork() {
+        providerMiniProbeNetworkMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                guard let self else { return }
+                let oldStatus = self.providerMiniProbeNetworkStatus
+                self.providerMiniProbeNetworkStatus = path.status
+                guard oldStatus != .satisfied, path.status == .satisfied else { return }
+                self.runProviderMiniProbesAfterSystemResumeIfNeeded()
+            }
+        }
+        providerMiniProbeNetworkMonitor.start(queue: providerMiniProbeNetworkQueue)
+    }
+
     private func isProviderMiniProbeDue(providerId: Int, now: Date = Date()) -> Bool {
         normalizeProviderMiniProbeInterval()
+        if let backoffUntil = providerMiniProbeFailureBackoffUntilByProviderId[providerId], now < backoffUntil {
+            return false
+        }
         return providerMiniProbeIsDue(
             lastRunAt: latestProviderMiniProbeRunDate(providerId: providerId),
             intervalMinutes: providerMiniProbeIntervalMinutes,
@@ -1669,8 +1772,22 @@ final class MonitorState: ObservableObject {
         var samples = providerMiniProbeHistories[providerId] ?? []
         samples.append(sample)
         providerMiniProbeHistories[providerId] = Array(samples.suffix(CCHProviderMiniProbeLimits.maxSamples))
-        providerMiniProbeLastRunAtByProviderId[providerId] = sample.createdAt
-        saveProviderMiniProbeHistories()
+        switch sample.status {
+        case .success, .warning:
+            providerMiniProbeLastRunAtByProviderId[providerId] = sample.createdAt
+            providerMiniProbeFailureBackoffUntilByProviderId[providerId] = nil
+            providerMiniProbeFailureCountByProviderId[providerId] = 0
+        case .failure:
+            let failureCount = (providerMiniProbeFailureCountByProviderId[providerId] ?? 0) + 1
+            providerMiniProbeFailureCountByProviderId[providerId] = failureCount
+            providerMiniProbeFailureBackoffUntilByProviderId[providerId] = sample.createdAt.addingTimeInterval(
+                providerMiniProbeFailureBackoffSeconds(
+                    failureCount: failureCount,
+                    intervalMinutes: providerMiniProbeIntervalMinutes
+                )
+            )
+        }
+        saveProviderMiniProbeHistoriesDebounced()
     }
 
     private func flashActionMessage(_ message: String, duration: TimeInterval = 2.6, isWarning: Bool = false) {
@@ -2306,8 +2423,26 @@ private extension MonitorState {
     }
 
     func saveProviderMiniProbeHistories() {
+        saveProviderMiniProbeHistoriesDebounced()
+    }
+
+    func saveProviderMiniProbeHistoriesDebounced() {
+        providerMiniProbeHistoriesSaveTask?.cancel()
+        let histories = providerMiniProbeHistories
+        providerMiniProbeHistoriesSaveTask = Task {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            Self.persistProviderMiniProbeHistories(histories)
+        }
+    }
+
+    func saveProviderMiniProbeHistoriesNow() {
+        Self.persistProviderMiniProbeHistories(providerMiniProbeHistories)
+    }
+
+    nonisolated static func persistProviderMiniProbeHistories(_ histories: [Int: [CCHProviderMiniProbeSample]]) {
         var encodable: [String: [CCHProviderMiniProbeSample]] = [:]
-        for (providerId, samples) in providerMiniProbeHistories {
+        for (providerId, samples) in histories {
             let normalized = samples
                 .sorted { $0.createdAt < $1.createdAt }
                 .suffix(CCHProviderMiniProbeLimits.maxSamples)
@@ -2322,7 +2457,8 @@ private extension MonitorState {
 
     static func latestProviderMiniProbeRunDates(from histories: [Int: [CCHProviderMiniProbeSample]]) -> [Int: Date] {
         histories.reduce(into: [Int: Date]()) { result, entry in
-            if let latest = entry.value.map(\.createdAt).max() {
+            let countedSamples = entry.value.filter { $0.status == .success || $0.status == .warning }
+            if let latest = countedSamples.map(\.createdAt).max() {
                 result[entry.key] = latest
             }
         }
@@ -2344,6 +2480,14 @@ private extension MonitorState {
         let nextLastRunDates = providerMiniProbeLastRunAtByProviderId.filter { providerIds.contains($0.key) }
         if nextLastRunDates != providerMiniProbeLastRunAtByProviderId {
             providerMiniProbeLastRunAtByProviderId = nextLastRunDates
+        }
+        providerMiniProbeFailureBackoffUntilByProviderId = providerMiniProbeFailureBackoffUntilByProviderId.filter { providerIds.contains($0.key) }
+        providerMiniProbeFailureCountByProviderId = providerMiniProbeFailureCountByProviderId.filter { providerIds.contains($0.key) }
+        providerMiniProbeRunTokens = providerMiniProbeRunTokens.filter { providerIds.contains($0.key) }
+        let staleTaskIds = providerMiniProbeTasks.keys.filter { !providerIds.contains($0) }
+        for providerId in staleTaskIds {
+            providerMiniProbeTasks[providerId]?.cancel()
+            providerMiniProbeTasks[providerId] = nil
         }
 
         let nextModelOverrides = providerMiniProbeModelOverrides.filter { providerIds.contains($0.key) }

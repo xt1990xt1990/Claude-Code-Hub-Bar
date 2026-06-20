@@ -190,7 +190,7 @@ struct SettingsView: View {
                     .tint(theme.accentOrange)
                     .onChange(of: state.providerMiniProbeIntervalMinutes) { _, _ in
                         state.normalizeProviderMiniProbeInterval()
-                        state.startProviderMiniProbeTimer()
+                        state.restartProviderMiniProbeTimerDebounced()
                     }
                     Text("\(Int(state.providerMiniProbeIntervalMinutes))m")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
@@ -201,10 +201,14 @@ struct SettingsView: View {
 
             SettingsControlRow(title: "平均首字", subtitle: "开启后按最近 1-8 次有首字节数据的探针样本计算平均值。") {
                 HStack(spacing: 10) {
-                    Toggle("", isOn: $state.providerMiniProbeAverageTTFBEnabled)
+                    Toggle(isOn: $state.providerMiniProbeAverageTTFBEnabled) {
+                        Label("平均首字节", systemImage: "timer")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(state.providerMiniProbeAverageTTFBEnabled ? theme.textSecondary : theme.textTertiary)
+                    }
                         .toggleStyle(.switch)
-                        .labelsHidden()
-                        .scaleEffect(0.72)
+                        .scaleEffect(0.72, anchor: .leading)
+                        .frame(width: 104, alignment: .leading)
                     Slider(
                         value: $state.providerMiniProbeAverageSampleCount,
                         in: CCHProviderMiniProbeLimits.minAverageSampleCount...CCHProviderMiniProbeLimits.maxAverageSampleCount,
@@ -217,7 +221,7 @@ struct SettingsView: View {
                     }
                     Text("\(state.providerMiniProbeAverageSampleCountValue)次")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(state.providerMiniProbeAverageTTFBEnabled ? theme.accentOrange : theme.textTertiary)
+                        .foregroundStyle(state.providerMiniProbeAverageTTFBEnabled ? theme.textSecondary : theme.textTertiary)
                         .frame(width: 48, alignment: .trailing)
                 }
             }
@@ -874,8 +878,8 @@ private struct ProviderMiniProbeTimeRangeSlider: View {
                             .monospacedDigit()
                             .foregroundStyle(theme.textTertiary)
                     }
-                    .frame(width: 24)
-                    .offset(x: CGFloat(Double(tick) / 24) * width + handleSize / 2 - 12, y: 10)
+                    .frame(width: tickLabelWidth(for: tick), alignment: tickLabelAlignment(for: tick))
+                    .offset(x: tickLabelOffset(for: tick, width: width), y: 10)
                 }
 
                 rangeHandle(title: formatProviderMiniProbeHour(displayStartHour), active: isEnabled)
@@ -887,6 +891,23 @@ private struct ProviderMiniProbeTimeRangeSlider: View {
                     .gesture(endDrag(width: width))
             }
         }
+    }
+
+    private func tickLabelWidth(for tick: Int) -> CGFloat {
+        tick == 0 || tick == 24 ? 18 : 24
+    }
+
+    private func tickLabelAlignment(for tick: Int) -> Alignment {
+        if tick == 0 { return .leading }
+        if tick == 24 { return .trailing }
+        return .center
+    }
+
+    private func tickLabelOffset(for tick: Int, width: CGFloat) -> CGFloat {
+        let x = CGFloat(Double(tick) / 24) * width + handleSize / 2
+        if tick == 0 { return x - handleSize / 2 }
+        if tick == 24 { return x - tickLabelWidth(for: tick) + handleSize / 2 }
+        return x - tickLabelWidth(for: tick) / 2
     }
 
     private func rangeHandle(title: String, active: Bool) -> some View {
