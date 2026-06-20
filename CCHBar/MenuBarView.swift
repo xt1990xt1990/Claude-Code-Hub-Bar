@@ -84,46 +84,14 @@ private struct CCHTriangleMark: Shape {
     }
 }
 
-private enum ModelBrand: String {
-    case openai
-    case claude
-    case deepseek
-    case gemini
-
-    var assetName: String {
-        switch self {
-        case .openai: return "model-openai"
-        case .claude: return "model-claude"
-        case .deepseek: return "model-deepseek"
-        case .gemini: return "model-gemini"
-        }
-    }
-
-    static func resolve(model: String, provider: String = "") -> ModelBrand? {
-        let text = "\(model) \(provider)".lowercased()
-        if text.contains("deepseek") { return .deepseek }
-        if text.contains("gemini") || text.contains("google") { return .gemini }
-        if text.contains("claude") || text.contains("anthropic") { return .claude }
-        if text.contains("openai")
-            || text.contains("codex")
-            || text.contains("gpt")
-            || text.contains("o1")
-            || text.contains("o3")
-            || text.contains("o4")
-            || text.contains("o5") {
-            return .openai
-        }
-        return nil
-    }
-}
-
 private struct ModelBrandIcon: View {
     let model: String
+    var providerType: String = ""
     var provider: String = ""
     var size: CGFloat = 13
 
     var body: some View {
-        if let brand = ModelBrand.resolve(model: model, provider: provider) {
+        if let brand = ModelBrand.resolve(model: model, providerType: providerType, provider: provider) {
             Image(brand.assetName)
                 .resizable()
                 .interpolation(.high)
@@ -3540,7 +3508,8 @@ private struct CompactProviderRow: View {
                 HStack(spacing: 5) {
                     ModelBrandIcon(
                         model: "\(provider.lastCallModel) \(provider.allowedModels)",
-                        provider: "\(provider.providerType) \(provider.name)",
+                        providerType: provider.providerType,
+                        provider: provider.name,
                         size: 12
                     )
                     Text(provider.name)
@@ -3752,7 +3721,8 @@ private struct ProviderRow: View {
                         HStack(spacing: 6) {
                             ModelBrandIcon(
                                 model: "\(provider.lastCallModel) \(provider.allowedModels)",
-                                provider: "\(provider.providerType) \(provider.name)",
+                                providerType: provider.providerType,
+                                provider: provider.name,
                                 size: 13
                             )
                             Text(provider.name)

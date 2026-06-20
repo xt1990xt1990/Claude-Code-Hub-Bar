@@ -23,6 +23,7 @@
 		A1000016 = {isa = PBXBuildFile; fileRef = A2000016; };
 		A1000017 = {isa = PBXBuildFile; fileRef = A2000017; };
 		A1000018 = {isa = PBXBuildFile; fileRef = A2000018; };
+		A1000019 = {isa = PBXBuildFile; fileRef = A2000019; };
 		D27441A8A4A175F817E286B9 /* SettingsWindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C63241B3849099D5A6742559 /* SettingsWindowManager.swift */; };
 /* End PBXBuildFile section */
 
@@ -43,6 +44,7 @@
 		A2000016 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpstreamRateBrowserAuth.swift; sourceTree = "<group>"; };
 		A2000017 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHProviderModelTestParser.swift; sourceTree = "<group>"; };
 		A2000018 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHProviderMiniProbeTiming.swift; sourceTree = "<group>"; };
+		A2000019 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHModelBrand.swift; sourceTree = "<group>"; };
 		'A3000001' = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Claude Code Hub Bar.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C63241B3849099D5A6742559 /* SettingsWindowManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SettingsWindowManager.swift; path = CCHBar/SettingsWindowManager.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
@@ -80,6 +82,7 @@
 				A2000016,
 				A2000017,
 				A2000018,
+				A2000019,
 				A2000005,
 				A2000011,
 				A2000002,
@@ -182,6 +185,7 @@
 				A1000016,
 				A1000017,
 				A1000018,
+				A1000019,
 				D27441A8A4A175F817E286B9 /* SettingsWindowManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
