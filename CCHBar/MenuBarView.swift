@@ -4307,7 +4307,10 @@ private struct ProviderMiniProbePopover: View {
         guard let latestSample else { return "暂无样本" }
         let totalLatency = latestSample.latencyMs.map(formatProbeLatency) ?? "-"
         let relativeTime = formatRelativeShortTime(latestSample.createdAt)
-        if let ttfbMs = latestSample.ttfbMs {
+        if let ttfbMs = providerMiniProbeSuccessTTFBMs(
+            isSuccess: latestSample.status == .success,
+            ttfbMs: latestSample.ttfbMs
+        ) {
             return "\(probeStatusTitle(latestSample.status)) · 首字节 \(formatProbeLatency(ttfbMs)) · 总延迟 \(totalLatency) · \(relativeTime)"
         }
         return "\(probeStatusTitle(latestSample.status)) · 总延迟 \(totalLatency) · \(relativeTime)"

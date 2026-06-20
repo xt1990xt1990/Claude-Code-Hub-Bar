@@ -52,11 +52,33 @@ private struct ProviderMiniProbeTimingTests {
             120,
             "failure backoff is capped by configured interval"
         )
+
+        expectEqual(
+            providerMiniProbeSuccessTTFBMs(isSuccess: true, ttfbMs: 468),
+            468,
+            "successful probe keeps first-byte timing"
+        )
+        expectNil(
+            providerMiniProbeSuccessTTFBMs(isSuccess: false, ttfbMs: 468),
+            "failed probe should not expose first-byte timing"
+        )
     }
 }
 
 private func expectEqual(_ actual: TimeInterval, _ expected: TimeInterval, _ message: String) {
     guard abs(actual - expected) < 0.001 else {
         fail("\(message): expected \(expected), got \(actual)")
+    }
+}
+
+private func expectEqual(_ actual: Double?, _ expected: Double, _ message: String) {
+    guard let actual, abs(actual - expected) < 0.001 else {
+        fail("\(message): expected \(expected), got \(String(describing: actual))")
+    }
+}
+
+private func expectNil(_ actual: Double?, _ message: String) {
+    guard actual == nil else {
+        fail("\(message): expected nil, got \(String(describing: actual))")
     }
 }

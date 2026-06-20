@@ -1756,7 +1756,7 @@ final class MonitorState: ObservableObject {
             model: result.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? requestedModel : result.model,
             status: status,
             latencyMs: result.latencyMs,
-            ttfbMs: result.ttfbMs,
+            ttfbMs: providerMiniProbeSuccessTTFBMs(isSuccess: status == .success, ttfbMs: result.ttfbMs),
             message: detail
         )
     }

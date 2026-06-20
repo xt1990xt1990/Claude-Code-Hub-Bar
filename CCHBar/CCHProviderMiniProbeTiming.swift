@@ -28,3 +28,7 @@ func providerMiniProbeFailureBackoffSeconds(
     }
     return min(failureBackoff, intervalSeconds)
 }
+
+func providerMiniProbeSuccessTTFBMs(isSuccess: Bool, ttfbMs: Double?) -> Double? {
+    isSuccess ? ttfbMs : nil
+}
