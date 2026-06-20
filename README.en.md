@@ -27,7 +27,10 @@ Private configuration should be entered locally and should not be committed to t
 - Liquid Glass and Endless Dark themes.
 - Log details with provider chain, TTFB, throughput, and cache tokens.
 - Cache hit-rate display for logs and leaderboards.
+- Compact recent-request rows on the dashboard, with adaptive truncation for long provider and model names.
 - Provider group filters, provider group assignment, enable/disable, probe, and circuit reset controls.
+- Provider model tests show first-byte timing and total latency when CCH returns timing data.
+- Mini Probe monitoring for providers, with per-provider enablement, probe model overrides, interval controls, active-hour scheduling, and average first-byte statistics.
 - Upstream rate panel for Sub2API and new-api providers.
 - Groups upstream providers by official website and matches local providers by key suffix.
 - Chrome-based upstream login capture, with credentials stored locally for rate and balance refreshes.
