@@ -21,6 +21,7 @@
 		A1000014 = {isa = PBXBuildFile; fileRef = A2000014; };
 		A1000015 = {isa = PBXBuildFile; fileRef = A2000015; };
 		A1000016 = {isa = PBXBuildFile; fileRef = A2000016; };
+		A1000017 = {isa = PBXBuildFile; fileRef = A2000017; };
 		D27441A8A4A175F817E286B9 /* SettingsWindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C63241B3849099D5A6742559 /* SettingsWindowManager.swift */; };
 /* End PBXBuildFile section */
 
@@ -39,6 +40,7 @@
 		A2000014 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpstreamRateCredentials.swift; sourceTree = "<group>"; };
 		A2000015 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpstreamRateService.swift; sourceTree = "<group>"; };
 		A2000016 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpstreamRateBrowserAuth.swift; sourceTree = "<group>"; };
+		A2000017 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHProviderModelTestParser.swift; sourceTree = "<group>"; };
 		'A3000001' = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Claude Code Hub Bar.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C63241B3849099D5A6742559 /* SettingsWindowManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SettingsWindowManager.swift; path = CCHBar/SettingsWindowManager.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
@@ -74,6 +76,7 @@
 				A2000014,
 				A2000015,
 				A2000016,
+				A2000017,
 				A2000005,
 				A2000011,
 				A2000002,
@@ -174,6 +177,7 @@
 				A1000014,
 				A1000015,
 				A1000016,
+				A1000017,
 				D27441A8A4A175F817E286B9 /* SettingsWindowManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -239,12 +243,12 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 19;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				MARKETING_VERSION = 1.2.0;
+				MARKETING_VERSION = 1.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.cchbar.CCHBar;
 				PRODUCT_NAME = "Claude Code Hub Bar";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -258,12 +262,12 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 19;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				MARKETING_VERSION = 1.2.0;
+				MARKETING_VERSION = 1.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.cchbar.CCHBar;
 				PRODUCT_NAME = "Claude Code Hub Bar";
 				SWIFT_EMIT_LOC_STRINGS = YES;

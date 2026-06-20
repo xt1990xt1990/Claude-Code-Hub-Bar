@@ -110,6 +110,39 @@ private enum CCHProviderModelTestLimits {
     static let storageKey = "provider_custom_test_models_v1"
 }
 
+enum CCHProviderMiniProbeStatus: String, Codable, Equatable {
+    case success
+    case warning
+    case failure
+}
+
+struct CCHProviderMiniProbeSample: Identifiable, Codable, Equatable {
+    let createdAt: Date
+    let model: String
+    let status: CCHProviderMiniProbeStatus
+    let latencyMs: Double?
+    let ttfbMs: Double?
+    let message: String
+
+    var id: String {
+        "\(createdAt.timeIntervalSince1970)-\(model)-\(status.rawValue)"
+    }
+}
+
+enum CCHProviderMiniProbeLimits {
+    static let maxSamples = 8
+    static let minAverageSampleCount = 1.0
+    static let maxAverageSampleCount = Double(maxSamples)
+    static let minIntervalMinutes = 5.0
+    static let maxIntervalMinutes = 360.0
+}
+
+private enum CCHProviderMiniProbeStorage {
+    static let selectedProviderIdsKey = "provider_mini_probe_selected_provider_ids_v1"
+    static let modelOverridesKey = "provider_mini_probe_model_overrides_v1"
+    static let historiesKey = "provider_mini_probe_histories_v1"
+}
+
 private enum CCHUpstreamRateStorage {
     static let selectedProviderIdsKey = "upstream_rate_selected_provider_ids_v1"
     static let ignoredHostsKey = "upstream_rate_ignored_hosts_v1"
@@ -131,6 +164,13 @@ final class MonitorState: ObservableObject {
     @AppStorage("active_session_user_filter") var activeSessionUserFilter = ""
     @AppStorage("show_status_bar_details") var showStatusBarDetails = true
     @AppStorage("check_for_updates") var checkForUpdatesEnabled: Bool = true
+    @AppStorage("provider_mini_probe_enabled") var providerMiniProbeEnabled = false
+    @AppStorage("provider_mini_probe_interval_minutes") var providerMiniProbeIntervalMinutes = 30.0
+    @AppStorage("provider_mini_probe_average_ttfb_enabled") var providerMiniProbeAverageTTFBEnabled = true
+    @AppStorage("provider_mini_probe_average_sample_count") var providerMiniProbeAverageSampleCount = 8.0
+    @AppStorage("provider_mini_probe_schedule_enabled") var providerMiniProbeScheduleEnabled = false
+    @AppStorage("provider_mini_probe_schedule_start_hour") var providerMiniProbeScheduleStartHour = 0.0
+    @AppStorage("provider_mini_probe_schedule_end_hour") var providerMiniProbeScheduleEndHour = 24.0
     @AppStorage("upstream_rate_auto_sync_enabled") var upstreamRateAutoSyncEnabled = false
     @AppStorage("upstream_rate_auto_sync_interval_hours") var upstreamRateAutoSyncIntervalHours = 6.0
     @AppStorage("upstream_rate_auto_sync_last_run_at") var upstreamRateAutoSyncLastRunEpoch: Double = 0
@@ -167,6 +207,10 @@ final class MonitorState: ObservableObject {
     @Published private(set) var providerModelTestResultsByModel: [Int: [String: CCHProviderModelTestResult]] = [:]
     @Published private(set) var providerModelTestProgress: [Int: CCHProviderModelTestProgress] = [:]
     @Published private(set) var providerCustomTestModels: [Int: [String]] = [:]
+    @Published private(set) var providerMiniProbeSelectedProviderIds: Set<Int> = []
+    @Published private(set) var providerMiniProbeModelOverrides: [Int: String] = [:]
+    @Published private(set) var providerMiniProbeHistories: [Int: [CCHProviderMiniProbeSample]] = [:]
+    @Published private(set) var providerMiniProbeRunningIds: Set<Int> = []
     @Published private(set) var providerMultiplierUpdatingIds: Set<Int> = []
     @Published private(set) var upstreamRateSelectedProviderIds: Set<Int> = []
     @Published private(set) var upstreamRateIgnoredHosts: Set<String> = []
@@ -213,6 +257,7 @@ final class MonitorState: ObservableObject {
     private var activeSessionTimer: AnyCancellable?
     private var focusedViewTimer: AnyCancellable?
     private var updateCheckTimer: AnyCancellable?
+    private var providerMiniProbeTimer: AnyCancellable?
     private var upstreamRateAutoSyncTimer: AnyCancellable?
     private var upstreamBalanceRefreshTimer: AnyCancellable?
     private var wakeObserver: NSObjectProtocol?
@@ -366,6 +411,21 @@ final class MonitorState: ObservableObject {
         upstreamRateSites.reduce(0) { $0 + $1.pendingSyncCount }
     }
 
+    var providerMiniProbeSelectedCount: Int {
+        providerMiniProbeSelectedProviderIds.count
+    }
+
+    var providerMiniProbeRecordedSampleCount: Int {
+        providerMiniProbeHistories.values.reduce(0) { $0 + $1.count }
+    }
+
+    var providerMiniProbeAverageSampleCountValue: Int {
+        Int(min(
+            max(providerMiniProbeAverageSampleCount.rounded(), CCHProviderMiniProbeLimits.minAverageSampleCount),
+            CCHProviderMiniProbeLimits.maxAverageSampleCount
+        ))
+    }
+
     func leaderboardCacheHitRate(for entry: CCHLeaderboardEntry) -> Double? {
         entry.cacheHitRate
     }
@@ -381,6 +441,9 @@ final class MonitorState: ObservableObject {
 
     init() {
         providerCustomTestModels = Self.loadProviderCustomTestModels()
+        providerMiniProbeSelectedProviderIds = Self.loadIntSet(key: CCHProviderMiniProbeStorage.selectedProviderIdsKey)
+        providerMiniProbeModelOverrides = Self.loadProviderMiniProbeModelOverrides()
+        providerMiniProbeHistories = Self.loadProviderMiniProbeHistories()
         upstreamRateSelectedProviderIds = Self.loadIntSet(key: CCHUpstreamRateStorage.selectedProviderIdsKey)
         upstreamRateIgnoredHosts = Self.loadStringSet(key: CCHUpstreamRateStorage.ignoredHostsKey)
         upstreamRateSourceTypeOverrides = Self.loadUpstreamRateSourceTypeOverrides()
@@ -390,6 +453,7 @@ final class MonitorState: ObservableObject {
         startRefreshTimer()
         startActiveSessionTimer()
         startUpdateCheckTimer()
+        startProviderMiniProbeTimer()
         startUpstreamRateAutoSyncTimer()
         startUpstreamBalanceRefreshTimer()
         observeSystemWake()
@@ -405,6 +469,7 @@ final class MonitorState: ObservableObject {
         activeSessionTimer?.cancel()
         focusedViewTimer?.cancel()
         updateCheckTimer?.cancel()
+        providerMiniProbeTimer?.cancel()
         upstreamRateAutoSyncTimer?.cancel()
         upstreamBalanceRefreshTimer?.cancel()
         refreshTask?.cancel()
@@ -817,6 +882,199 @@ final class MonitorState: ObservableObject {
             providerModelTestResultsByModel[provider.id]?.removeValue(forKey: normalized)
         }
         saveProviderCustomTestModels()
+    }
+
+    func isProviderMiniProbeEnabled(_ provider: CCHProvider) -> Bool {
+        providerMiniProbeSelectedProviderIds.contains(provider.id)
+    }
+
+    func isProviderMiniProbeRunning(_ provider: CCHProvider) -> Bool {
+        providerMiniProbeRunningIds.contains(provider.id)
+    }
+
+    func providerMiniProbeHistory(for provider: CCHProvider) -> [CCHProviderMiniProbeSample] {
+        providerMiniProbeHistories[provider.id] ?? []
+    }
+
+    func providerMiniProbeAverageTTFB(for provider: CCHProvider) -> Double? {
+        guard providerMiniProbeAverageTTFBEnabled else { return nil }
+        let samples = Array(providerMiniProbeHistory(for: provider)
+            .sorted { $0.createdAt < $1.createdAt }
+            .suffix(providerMiniProbeAverageSampleCountValue))
+        let values = samples.compactMap(\.ttfbMs)
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    func providerMiniProbeModel(for provider: CCHProvider) -> String {
+        providerMiniProbeModelOverrides[provider.id] ?? ""
+    }
+
+    func resolvedProviderMiniProbeModelTitle(for provider: CCHProvider) -> String {
+        resolvedProviderMiniProbeModel(for: provider)
+    }
+
+    func setProviderMiniProbeModel(_ model: String, for provider: CCHProvider) {
+        let normalized = normalizedProviderTestModel(model)
+        if normalized.isEmpty {
+            providerMiniProbeModelOverrides.removeValue(forKey: provider.id)
+            flashActionMessage("已恢复默认探针模型 \(provider.name)")
+        } else {
+            providerMiniProbeModelOverrides[provider.id] = normalized
+            flashActionMessage("已设置探针模型 \(provider.name): \(normalized)")
+        }
+        saveProviderMiniProbeModelOverrides()
+    }
+
+    func setProviderMiniProbe(_ provider: CCHProvider, enabled: Bool) {
+        if enabled {
+            providerMiniProbeSelectedProviderIds.insert(provider.id)
+            flashActionMessage("已开启探针 \(provider.name)")
+        } else {
+            providerMiniProbeSelectedProviderIds.remove(provider.id)
+            flashActionMessage("已关闭探针 \(provider.name)")
+        }
+        saveProviderMiniProbeSelectedProviderIds()
+
+        guard enabled, providerMiniProbeEnabled else { return }
+        Task { await runProviderMiniProbe(provider, silent: true) }
+    }
+
+    func normalizeProviderMiniProbeInterval() {
+        let normalized = min(
+            max(providerMiniProbeIntervalMinutes, CCHProviderMiniProbeLimits.minIntervalMinutes),
+            CCHProviderMiniProbeLimits.maxIntervalMinutes
+        )
+        if abs(providerMiniProbeIntervalMinutes - normalized) > 0.001 {
+            providerMiniProbeIntervalMinutes = normalized
+        }
+    }
+
+    func normalizeProviderMiniProbeAverageSampleCount() {
+        let normalized = min(
+            max(providerMiniProbeAverageSampleCount.rounded(), CCHProviderMiniProbeLimits.minAverageSampleCount),
+            CCHProviderMiniProbeLimits.maxAverageSampleCount
+        )
+        if abs(providerMiniProbeAverageSampleCount - normalized) > 0.001 {
+            providerMiniProbeAverageSampleCount = normalized
+        }
+    }
+
+    func normalizeProviderMiniProbeSchedule() {
+        let normalizedStart = min(max(providerMiniProbeScheduleStartHour, 0), 24)
+        let normalizedEnd = min(max(providerMiniProbeScheduleEndHour, 0), 24)
+        if abs(providerMiniProbeScheduleStartHour - normalizedStart) > 0.001 {
+            providerMiniProbeScheduleStartHour = normalizedStart
+        }
+        if abs(providerMiniProbeScheduleEndHour - normalizedEnd) > 0.001 {
+            providerMiniProbeScheduleEndHour = normalizedEnd
+        }
+    }
+
+    func providerMiniProbeScheduleText() -> String {
+        guard providerMiniProbeScheduleEnabled else { return "全天" }
+        let start = min(max(providerMiniProbeScheduleStartHour, 0), 24)
+        let end = min(max(providerMiniProbeScheduleEndHour, 0), 24)
+        if start <= 0, end >= 24 {
+            return "全天"
+        }
+        let suffix = start > end ? " 次日" : ""
+        return "\(formatProviderMiniProbeHour(start))-\(formatProviderMiniProbeHour(end))\(suffix)"
+    }
+
+    func isProviderMiniProbeWithinSchedule(now: Date = Date()) -> Bool {
+        guard providerMiniProbeScheduleEnabled else { return true }
+        normalizeProviderMiniProbeSchedule()
+        let start = providerMiniProbeScheduleStartHour
+        let end = providerMiniProbeScheduleEndHour
+        if start <= 0, end >= 24 { return true }
+        guard end > start else { return false }
+        let components = Calendar.current.dateComponents([.hour, .minute, .second], from: now)
+        let hour = Double(components.hour ?? 0)
+            + Double(components.minute ?? 0) / 60
+            + Double(components.second ?? 0) / 3600
+        if start < end {
+            return hour >= start && hour < end
+        }
+        if start > end {
+            return hour >= start || hour < end
+        }
+        return false
+    }
+
+    func startProviderMiniProbeTimer(runImmediately: Bool = false) {
+        providerMiniProbeTimer?.cancel()
+        guard providerMiniProbeEnabled else {
+            providerMiniProbeTimer = nil
+            return
+        }
+
+        normalizeProviderMiniProbeInterval()
+        let interval = providerMiniProbeIntervalMinutes * 60
+        providerMiniProbeTimer = Timer.publish(every: interval, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.runScheduledProviderMiniProbes() }
+            }
+
+        if runImmediately {
+            Task { await runScheduledProviderMiniProbes() }
+        }
+    }
+
+    func runScheduledProviderMiniProbes() async {
+        guard providerMiniProbeEnabled else { return }
+        guard isProviderMiniProbeWithinSchedule() else { return }
+        guard !providerMiniProbeSelectedProviderIds.isEmpty else { return }
+
+        if providers.isEmpty {
+            _ = await loadProviders(includeUsage: false)
+        }
+
+        let selectedIds = providerMiniProbeSelectedProviderIds
+        let targets = providers
+            .filter { selectedIds.contains($0.id) && $0.isEnabled }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+        for provider in targets {
+            await runProviderMiniProbe(provider, silent: true)
+        }
+    }
+
+    func runProviderMiniProbe(_ provider: CCHProvider, silent: Bool = true) async {
+        guard providerMiniProbeEnabled else { return }
+        guard isProviderMiniProbeWithinSchedule() else { return }
+        guard providerMiniProbeSelectedProviderIds.contains(provider.id) else { return }
+        guard provider.isEnabled else { return }
+        guard !providerMiniProbeRunningIds.contains(provider.id) else { return }
+        guard !modelTestingProviderIds.contains(provider.id) else { return }
+
+        providerMiniProbeRunningIds.insert(provider.id)
+        defer {
+            providerMiniProbeRunningIds.remove(provider.id)
+        }
+
+        let testModel = resolvedProviderMiniProbeModel(for: provider)
+        do {
+            let result = try await api.testProviderModel(config: config, provider: provider, model: testModel)
+            appendProviderMiniProbeSample(providerId: provider.id, sample: miniProbeSample(from: result, requestedModel: testModel))
+        } catch {
+            appendProviderMiniProbeSample(
+                providerId: provider.id,
+                sample: CCHProviderMiniProbeSample(
+                    createdAt: Date(),
+                    model: testModel,
+                    status: .failure,
+                    latencyMs: nil,
+                    ttfbMs: nil,
+                    message: error.localizedDescription
+                )
+            )
+            if !silent {
+                flashActionMessage("探针 \(provider.name): \(error.localizedDescription)", duration: 5, isWarning: true)
+            }
+        }
     }
 
     func isProviderMultiplierUpdating(_ provider: CCHProvider) -> Bool {
@@ -1281,6 +1539,7 @@ final class MonitorState: ObservableObject {
                     status: "red",
                     message: "模型测试失败",
                     latencyMs: nil,
+                    ttfbMs: nil,
                     model: testModel,
                     httpStatusCode: nil,
                     errorMessage: error.localizedDescription
@@ -1312,7 +1571,7 @@ final class MonitorState: ObservableObject {
                 isWarning: failedCount > 0
             )
         } else if let result = providerModelTestResults[provider.id] {
-            let latency = result.latencyMs.map(formatProbeLatency) ?? "-"
+            let latency = formatProviderModelTestTiming(result)
             let displayModel = result.model.isEmpty ? testModels[0] : result.model
             let status = result.status.lowercased()
             if result.success || status == "green" {
@@ -1325,6 +1584,46 @@ final class MonitorState: ObservableObject {
             }
         }
         _ = await loadProviders()
+    }
+
+    private func resolvedProviderMiniProbeModel(for provider: CCHProvider) -> String {
+        if let providerModel = providerMiniProbeModelOverrides[provider.id],
+           !providerModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return providerModel
+        }
+        return provider.testModel
+    }
+
+    private func miniProbeSample(
+        from result: CCHProviderModelTestResult,
+        requestedModel: String
+    ) -> CCHProviderMiniProbeSample {
+        let status = providerMiniProbeStatus(from: result)
+        let detail = result.errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? result.message
+            : result.errorMessage
+        return CCHProviderMiniProbeSample(
+            createdAt: Date(),
+            model: result.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? requestedModel : result.model,
+            status: status,
+            latencyMs: result.latencyMs,
+            ttfbMs: result.ttfbMs,
+            message: detail
+        )
+    }
+
+    private func providerMiniProbeStatus(from result: CCHProviderModelTestResult) -> CCHProviderMiniProbeStatus {
+        let status = result.status.lowercased()
+        if result.success || status == "green" { return .success }
+        if status == "yellow" { return .warning }
+        return .failure
+    }
+
+    private func appendProviderMiniProbeSample(providerId: Int, sample: CCHProviderMiniProbeSample) {
+        var samples = providerMiniProbeHistories[providerId] ?? []
+        samples.append(sample)
+        providerMiniProbeHistories[providerId] = Array(samples.suffix(CCHProviderMiniProbeLimits.maxSamples))
+        saveProviderMiniProbeHistories()
     }
 
     private func flashActionMessage(_ message: String, duration: TimeInterval = 2.6, isWarning: Bool = false) {
@@ -1599,6 +1898,7 @@ final class MonitorState: ObservableObject {
             uniquingKeysWith: { current, _ in current }
         )
         pruneUpstreamRateSelections()
+        pruneProviderMiniProbeData()
     }
 
     private func computedProviderGroups() -> [String] {
@@ -1880,6 +2180,97 @@ private extension MonitorState {
         }
         if let data = try? JSONEncoder().encode(encodable) {
             UserDefaults.standard.set(data, forKey: CCHProviderModelTestLimits.storageKey)
+        }
+    }
+
+    static func loadProviderMiniProbeHistories() -> [Int: [CCHProviderMiniProbeSample]] {
+        guard
+            let data = UserDefaults.standard.data(forKey: CCHProviderMiniProbeStorage.historiesKey),
+            let decoded = try? JSONDecoder().decode([String: [CCHProviderMiniProbeSample]].self, from: data)
+        else { return [:] }
+
+        var result: [Int: [CCHProviderMiniProbeSample]] = [:]
+        for (key, samples) in decoded {
+            guard let providerId = Int(key) else { continue }
+            let normalized = samples
+                .sorted { $0.createdAt < $1.createdAt }
+                .suffix(CCHProviderMiniProbeLimits.maxSamples)
+            if !normalized.isEmpty {
+                result[providerId] = Array(normalized)
+            }
+        }
+        return result
+    }
+
+    func saveProviderMiniProbeSelectedProviderIds() {
+        UserDefaults.standard.set(
+            providerMiniProbeSelectedProviderIds.sorted(),
+            forKey: CCHProviderMiniProbeStorage.selectedProviderIdsKey
+        )
+    }
+
+    static func loadProviderMiniProbeModelOverrides() -> [Int: String] {
+        guard
+            let data = UserDefaults.standard.data(forKey: CCHProviderMiniProbeStorage.modelOverridesKey),
+            let decoded = try? JSONDecoder().decode([String: String].self, from: data)
+        else { return [:] }
+
+        var result: [Int: String] = [:]
+        for (key, model) in decoded {
+            guard let providerId = Int(key) else { continue }
+            let normalized = normalizedProviderTestModel(model)
+            if !normalized.isEmpty {
+                result[providerId] = normalized
+            }
+        }
+        return result
+    }
+
+    func saveProviderMiniProbeModelOverrides() {
+        let encodable = providerMiniProbeModelOverrides.reduce(into: [String: String]()) { result, entry in
+            let normalized = normalizedProviderTestModel(entry.value)
+            if !normalized.isEmpty {
+                result[String(entry.key)] = normalized
+            }
+        }
+        if let data = try? JSONEncoder().encode(encodable) {
+            UserDefaults.standard.set(data, forKey: CCHProviderMiniProbeStorage.modelOverridesKey)
+        }
+    }
+
+    func saveProviderMiniProbeHistories() {
+        var encodable: [String: [CCHProviderMiniProbeSample]] = [:]
+        for (providerId, samples) in providerMiniProbeHistories {
+            let normalized = samples
+                .sorted { $0.createdAt < $1.createdAt }
+                .suffix(CCHProviderMiniProbeLimits.maxSamples)
+            if !normalized.isEmpty {
+                encodable[String(providerId)] = Array(normalized)
+            }
+        }
+        if let data = try? JSONEncoder().encode(encodable) {
+            UserDefaults.standard.set(data, forKey: CCHProviderMiniProbeStorage.historiesKey)
+        }
+    }
+
+    func pruneProviderMiniProbeData() {
+        let providerIds = Set(providers.map(\.id))
+        let nextSelected = providerMiniProbeSelectedProviderIds.intersection(providerIds)
+        if nextSelected != providerMiniProbeSelectedProviderIds {
+            providerMiniProbeSelectedProviderIds = nextSelected
+            saveProviderMiniProbeSelectedProviderIds()
+        }
+
+        let nextHistories = providerMiniProbeHistories.filter { providerIds.contains($0.key) }
+        if nextHistories != providerMiniProbeHistories {
+            providerMiniProbeHistories = nextHistories
+            saveProviderMiniProbeHistories()
+        }
+
+        let nextModelOverrides = providerMiniProbeModelOverrides.filter { providerIds.contains($0.key) }
+        if nextModelOverrides != providerMiniProbeModelOverrides {
+            providerMiniProbeModelOverrides = nextModelOverrides
+            saveProviderMiniProbeModelOverrides()
         }
     }
 
@@ -2293,6 +2684,28 @@ func formatProbeLatency(_ value: Double?) -> String {
         return value < 10 ? String(format: "%.1fms", value) : String(format: "%.0fms", value)
     }
     return String(format: "%.2fs", value / 1000)
+}
+
+func formatProviderModelTestTiming(_ result: CCHProviderModelTestResult) -> String {
+    var parts: [String] = []
+    if let ttfbMs = result.ttfbMs {
+        parts.append("首字节 \(formatProbeLatency(ttfbMs))")
+    }
+    if let latencyMs = result.latencyMs {
+        parts.append("总延迟 \(formatProbeLatency(latencyMs))")
+    }
+    return parts.isEmpty ? "-" : parts.joined(separator: " · ")
+}
+
+func formatProviderMiniProbeHour(_ value: Double) -> String {
+    let clamped = min(max(value, 0), 24)
+    if clamped >= 24 {
+        return "24:00"
+    }
+    let totalMinutes = Int((clamped * 60).rounded())
+    let hour = totalMinutes / 60
+    let minute = totalMinutes % 60
+    return String(format: "%02d:%02d", hour, minute)
 }
 
 func normalizedProviderTestModel(_ value: String) -> String {

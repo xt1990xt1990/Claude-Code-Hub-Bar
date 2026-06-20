@@ -22,6 +22,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     connectionCard
                     syncCard
+                    probeCard
                     appearanceCard
                     updateCard
                     systemCard
@@ -156,6 +157,82 @@ struct SettingsView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(state.isLoading)
+            }
+        }
+    }
+
+    private var probeCard: some View {
+        SettingsCard(
+            icon: "waveform.path.ecg",
+            title: "Mini 探针",
+            subtitle: "复用供应商模型测试，记录每个渠道最近 8 次结果。",
+            accent: theme.accentOrange
+        ) {
+            SettingsControlRow(
+                title: "总开关",
+                subtitle: state.providerMiniProbeEnabled ? "只会探测已单独开启的渠道。" : "关闭后不会发起后台模型测试请求。"
+            ) {
+                Toggle("启用探针", isOn: $state.providerMiniProbeEnabled)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12, weight: .semibold))
+                    .onChange(of: state.providerMiniProbeEnabled) { _, enabled in
+                        state.startProviderMiniProbeTimer(runImmediately: enabled)
+                    }
+            }
+
+            SettingsControlRow(title: "探针频率", subtitle: "每个已开启渠道按这个间隔执行一次模型测试。") {
+                HStack(spacing: 10) {
+                    Slider(
+                        value: $state.providerMiniProbeIntervalMinutes,
+                        in: CCHProviderMiniProbeLimits.minIntervalMinutes...CCHProviderMiniProbeLimits.maxIntervalMinutes,
+                        step: 5
+                    )
+                    .tint(theme.accentOrange)
+                    .onChange(of: state.providerMiniProbeIntervalMinutes) { _, _ in
+                        state.normalizeProviderMiniProbeInterval()
+                        state.startProviderMiniProbeTimer()
+                    }
+                    Text("\(Int(state.providerMiniProbeIntervalMinutes))m")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(theme.accentOrange)
+                        .frame(width: 48, alignment: .trailing)
+                }
+            }
+
+            SettingsControlRow(title: "平均首字", subtitle: "开启后按最近 1-8 次有首字节数据的探针样本计算平均值。") {
+                HStack(spacing: 10) {
+                    Toggle("", isOn: $state.providerMiniProbeAverageTTFBEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .scaleEffect(0.72)
+                    Slider(
+                        value: $state.providerMiniProbeAverageSampleCount,
+                        in: CCHProviderMiniProbeLimits.minAverageSampleCount...CCHProviderMiniProbeLimits.maxAverageSampleCount,
+                        step: 1
+                    )
+                    .tint(theme.accentOrange)
+                    .disabled(!state.providerMiniProbeAverageTTFBEnabled)
+                    .onChange(of: state.providerMiniProbeAverageSampleCount) { _, _ in
+                        state.normalizeProviderMiniProbeAverageSampleCount()
+                    }
+                    Text("\(state.providerMiniProbeAverageSampleCountValue)次")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(state.providerMiniProbeAverageTTFBEnabled ? theme.accentOrange : theme.textTertiary)
+                        .frame(width: 48, alignment: .trailing)
+                }
+            }
+
+            SettingsControlRow(title: "运行时段", subtitle: "关闭限制时全天 24 小时运行；开启后只在条内选中的时段运行。") {
+                ProviderMiniProbeScheduleControl(state: state)
+            }
+
+            HStack(spacing: 10) {
+                SettingsInfoPill(icon: "switch.2", title: "渠道", value: "\(state.providerMiniProbeSelectedCount)")
+                SettingsInfoPill(icon: "waveform.path.ecg", title: "样本", value: "\(state.providerMiniProbeRecordedSampleCount)")
+                SettingsInfoPill(icon: "timer", title: "频率", value: "\(Int(state.providerMiniProbeIntervalMinutes))m")
+                SettingsInfoPill(icon: "clock", title: "时段", value: state.providerMiniProbeScheduleText())
+                SettingsInfoPill(icon: "timer.circle", title: "首字", value: state.providerMiniProbeAverageTTFBEnabled ? "\(state.providerMiniProbeAverageSampleCountValue)次" : "关")
+                Spacer()
             }
         }
     }
@@ -714,6 +791,182 @@ private struct SettingsInfoPill: View {
         .padding(.vertical, 5)
         .cchSurface(.control)
         .clipShape(Capsule())
+    }
+}
+
+private struct ProviderMiniProbeScheduleControl: View {
+    @ObservedObject var state: MonitorState
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Toggle("限制运行时段", isOn: $state.providerMiniProbeScheduleEnabled)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12, weight: .semibold))
+                    .onChange(of: state.providerMiniProbeScheduleEnabled) { _, _ in
+                        state.normalizeProviderMiniProbeSchedule()
+                    }
+                Spacer()
+                Text(state.providerMiniProbeScheduleText())
+                    .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(state.providerMiniProbeScheduleEnabled ? theme.accentOrange : theme.textSecondary)
+            }
+
+            ProviderMiniProbeTimeRangeSlider(
+                startHour: $state.providerMiniProbeScheduleStartHour,
+                endHour: $state.providerMiniProbeScheduleEndHour,
+                isEnabled: state.providerMiniProbeScheduleEnabled
+            )
+            .frame(height: 46)
+            .opacity(state.providerMiniProbeScheduleEnabled ? 1 : 0.52)
+            .onChange(of: state.providerMiniProbeScheduleStartHour) { _, _ in
+                state.normalizeProviderMiniProbeSchedule()
+            }
+            .onChange(of: state.providerMiniProbeScheduleEndHour) { _, _ in
+                state.normalizeProviderMiniProbeSchedule()
+            }
+        }
+    }
+}
+
+private struct ProviderMiniProbeTimeRangeSlider: View {
+    @Binding var startHour: Double
+    @Binding var endHour: Double
+    let isEnabled: Bool
+    @Environment(\.cchTheme) private var theme
+    @State private var startDragBase: Double?
+    @State private var endDragBase: Double?
+
+    private let handleSize: CGFloat = 16
+    private let ticks = [0, 6, 12, 18, 24]
+
+    private var displayStartHour: Double {
+        isEnabled ? min(max(startHour, 0), 24) : 0
+    }
+
+    private var displayEndHour: Double {
+        isEnabled ? min(max(endHour, 0), 24) : 24
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(1, proxy.size.width - handleSize)
+            let startX = CGFloat(displayStartHour / 24) * width + handleSize / 2
+            let endX = CGFloat(displayEndHour / 24) * width + handleSize / 2
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(theme.textTertiary.opacity(0.18))
+                    .frame(height: 7)
+                    .padding(.horizontal, handleSize / 2)
+                    .offset(y: -7)
+
+                selectedRange(width: width, startX: startX, endX: endX)
+
+                ForEach(ticks, id: \.self) { tick in
+                    VStack(spacing: 4) {
+                        Rectangle()
+                            .fill(theme.textTertiary.opacity(0.34))
+                            .frame(width: 1, height: 6)
+                        Text(tick == 24 ? "24" : "\(tick)")
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                    .frame(width: 24)
+                    .offset(x: CGFloat(Double(tick) / 24) * width + handleSize / 2 - 12, y: 10)
+                }
+
+                rangeHandle(title: formatProviderMiniProbeHour(displayStartHour), active: isEnabled)
+                    .offset(x: startX - handleSize / 2, y: -7)
+                    .gesture(startDrag(width: width))
+
+                rangeHandle(title: formatProviderMiniProbeHour(displayEndHour), active: isEnabled)
+                    .offset(x: endX - handleSize / 2, y: -7)
+                    .gesture(endDrag(width: width))
+            }
+        }
+    }
+
+    private func rangeHandle(title: String, active: Bool) -> some View {
+        Circle()
+            .fill(active ? theme.accentOrange : theme.textTertiary)
+            .frame(width: handleSize, height: handleSize)
+            .overlay(Circle().stroke(Color.white.opacity(active ? 0.68 : 0.28), lineWidth: 1.2))
+            .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
+            .help(title)
+    }
+
+    private func startDrag(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard isEnabled else { return }
+                if startDragBase == nil {
+                    startDragBase = startHour
+                }
+                let base = startDragBase ?? startHour
+                let delta = Double(value.translation.width / max(width, 1)) * 24
+                startHour = min(max(snappedHour(base + delta), 0), 24)
+            }
+            .onEnded { _ in
+                startDragBase = nil
+                normalizeBounds()
+            }
+    }
+
+    private func endDrag(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard isEnabled else { return }
+                if endDragBase == nil {
+                    endDragBase = endHour
+                }
+                let base = endDragBase ?? endHour
+                let delta = Double(value.translation.width / max(width, 1)) * 24
+                endHour = min(max(snappedHour(base + delta), 0), 24)
+            }
+            .onEnded { _ in
+                endDragBase = nil
+                normalizeBounds()
+            }
+    }
+
+    private func snappedHour(_ value: Double) -> Double {
+        (value * 2).rounded() / 2
+    }
+
+    private func normalizeBounds() {
+        startHour = min(max(startHour, 0), 24)
+        endHour = min(max(endHour, 0), 24)
+    }
+
+    @ViewBuilder
+    private func selectedRange(width: CGFloat, startX: CGFloat, endX: CGFloat) -> some View {
+        let trackStart = handleSize / 2
+        let trackEnd = width + handleSize / 2
+        if displayStartHour <= displayEndHour {
+            selectedRangeSegment(x: startX, width: endX - startX)
+        } else {
+            selectedRangeSegment(x: startX, width: trackEnd - startX)
+            selectedRangeSegment(x: trackStart, width: endX - trackStart)
+        }
+    }
+
+    private func selectedRangeSegment(x: CGFloat, width: CGFloat) -> some View {
+        Capsule()
+            .fill(
+                LinearGradient(
+                    colors: [
+                        isEnabled ? theme.accentOrange : theme.textTertiary.opacity(0.45),
+                        isEnabled ? theme.accentOrange.opacity(0.62) : theme.textTertiary.opacity(0.28)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .frame(width: max(0, width), height: 7)
+            .offset(x: x, y: -7)
     }
 }
 

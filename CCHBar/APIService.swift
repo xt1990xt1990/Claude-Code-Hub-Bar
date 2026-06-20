@@ -248,16 +248,6 @@ struct CCHProbeResult {
     let errorMessage: String
 }
 
-struct CCHProviderModelTestResult {
-    let success: Bool
-    let status: String
-    let message: String
-    let latencyMs: Double?
-    let model: String
-    let httpStatusCode: Int?
-    let errorMessage: String
-}
-
 struct CCHProviderModelTestProgress {
     let completed: Int
     let total: Int
@@ -1299,34 +1289,6 @@ private func firstOptionalDouble(_ row: [String: Any], keys: [String]) -> Double
         }
     }
     return nil
-}
-
-private func parseProviderModelTestResult(_ value: Any) -> CCHProviderModelTestResult {
-    let dict = value as? [String: Any] ?? [:]
-    let details = dict["details"] as? [String: Any] ?? [:]
-    let validation = dict["validationDetails"] as? [String: Any] ?? [:]
-    let success = boolValue(dict["success"])
-    let status = stringValue(dict["status"], fallback: success ? "green" : "red")
-    let message = stringValue(dict["message"], fallback: success ? "模型测试成功" : "模型测试失败")
-    let latencyMs = firstOptionalDouble(dict, keys: ["latencyMs", "responseTime"])
-        ?? firstOptionalDouble(details, keys: ["responseTime", "latencyMs"])
-    let model = firstStringValue(dict, keys: ["model"], fallback: firstStringValue(details, keys: ["model"]))
-    let httpStatusCode = firstOptionalInt(dict, keys: ["httpStatusCode", "statusCode"])
-        ?? firstOptionalInt(validation, keys: ["httpStatusCode", "statusCode"])
-    let errorMessage = firstStringValue(
-        dict,
-        keys: ["errorMessage", "error"],
-        fallback: firstStringValue(details, keys: ["error"])
-    )
-    return CCHProviderModelTestResult(
-        success: success,
-        status: status,
-        message: message,
-        latencyMs: latencyMs,
-        model: model,
-        httpStatusCode: httpStatusCode,
-        errorMessage: errorMessage
-    )
 }
 
 private func doubleValue(_ value: Any?, fallback: Double = 0) -> Double {

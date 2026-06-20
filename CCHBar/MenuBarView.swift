@@ -1354,6 +1354,19 @@ private struct ProvidersTabView: View {
                             modelTestResultsByModel: state.providerModelTestResults(for: provider),
                             modelTestProgress: state.providerModelTestProgress(for: provider),
                             customTestModels: state.customTestModels(for: provider),
+                            isMiniProbeFeatureEnabled: state.providerMiniProbeEnabled,
+                            isMiniProbeEnabled: state.isProviderMiniProbeEnabled(provider),
+                            isMiniProbeRunning: state.isProviderMiniProbeRunning(provider),
+                            miniProbeHistory: state.providerMiniProbeHistory(for: provider),
+                            miniProbeAverageTTFB: state.providerMiniProbeAverageTTFB(for: provider),
+                            miniProbeModel: state.providerMiniProbeModel(for: provider),
+                            resolvedMiniProbeModel: state.resolvedProviderMiniProbeModelTitle(for: provider),
+                            setMiniProbeEnabled: { value in
+                                state.setProviderMiniProbe(provider, enabled: value)
+                            },
+                            setMiniProbeModel: { model in
+                                state.setProviderMiniProbeModel(model, for: provider)
+                            },
                             addCustomTestModel: { model in
                                 state.addCustomTestModel(model, for: provider)
                             },
@@ -3671,17 +3684,28 @@ private struct ProviderRow: View {
     let modelTestResultsByModel: [String: CCHProviderModelTestResult]
     let modelTestProgress: CCHProviderModelTestProgress?
     let customTestModels: [String]
+    let isMiniProbeFeatureEnabled: Bool
+    let isMiniProbeEnabled: Bool
+    let isMiniProbeRunning: Bool
+    let miniProbeHistory: [CCHProviderMiniProbeSample]
+    let miniProbeAverageTTFB: Double?
+    let miniProbeModel: String
+    let resolvedMiniProbeModel: String
+    let setMiniProbeEnabled: (Bool) -> Void
+    let setMiniProbeModel: (String) -> Void
     let addCustomTestModel: (String) -> Void
     let removeCustomTestModel: (String) -> Void
     let resetCircuit: () -> Void
     @State private var modelTestInput = ""
     @State private var multiplierInput = ""
+    @State private var miniProbeModelInput = ""
     @State private var renderedEditor: ProviderEditor?
     @State private var editorRevealHeight: CGFloat = 0
     @Environment(\.cchTheme) private var theme
 
     private enum ProviderEditor: Equatable {
         case multiplier
+        case miniProbe
         case modelTest
     }
 
@@ -3775,6 +3799,21 @@ private struct ProviderRow: View {
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
                     Spacer()
+                    ProviderMiniProbeControl(
+                        featureEnabled: isMiniProbeFeatureEnabled,
+                        isEnabled: isMiniProbeEnabled,
+                        isRunning: isMiniProbeRunning,
+                        samples: miniProbeHistory,
+                        averageTTFB: miniProbeAverageTTFB,
+                        resolvedModel: resolvedMiniProbeModel,
+                        toggle: {
+                            setMiniProbeEnabled(!isMiniProbeEnabled)
+                        },
+                        edit: {
+                            miniProbeModelInput = miniProbeModel
+                            toggleEditor(.miniProbe)
+                        }
+                    )
                     Button {
                         probe()
                     } label: {
@@ -3828,6 +3867,21 @@ private struct ProviderRow: View {
                                 ) { value in
                                     closeEditor()
                                     setMultiplier(value)
+                                }
+                            case .miniProbe:
+                                ProviderMiniProbePopover(
+                                    provider: provider,
+                                    model: $miniProbeModelInput,
+                                    resolvedModel: resolvedMiniProbeModel,
+                                    featureEnabled: isMiniProbeFeatureEnabled,
+                                    isEnabled: isMiniProbeEnabled,
+                                    isRunning: isMiniProbeRunning,
+                                    samples: miniProbeHistory,
+                                    averageTTFB: miniProbeAverageTTFB,
+                                    setEnabled: setMiniProbeEnabled
+                                ) { value in
+                                    closeEditor()
+                                    setMiniProbeModel(value)
                                 }
                             case .modelTest:
                                 ProviderModelTestPopover(
@@ -3886,6 +3940,10 @@ private struct ProviderRow: View {
             guard renderedEditor == .modelTest else { return }
             editorRevealHeight = editorHeight(.modelTest)
         }
+        .onChange(of: miniProbeModel) {
+            guard renderedEditor == .miniProbe else { return }
+            miniProbeModelInput = miniProbeModel
+        }
     }
 
     private func toggleEditor(_ editor: ProviderEditor) {
@@ -3925,6 +3983,8 @@ private struct ProviderRow: View {
         switch editor {
         case .multiplier:
             return 70
+        case .miniProbe:
+            return 128
         case .modelTest:
             return customTestModels.isEmpty ? 76 : 112
         }
@@ -4060,6 +4120,259 @@ private struct ProviderMultiplierPopover: View {
         }
     }
 }
+
+private struct ProviderMiniProbeControl: View {
+    let featureEnabled: Bool
+    let isEnabled: Bool
+    let isRunning: Bool
+    let samples: [CCHProviderMiniProbeSample]
+    let averageTTFB: Double?
+    let resolvedModel: String
+    let toggle: () -> Void
+    let edit: () -> Void
+    @Environment(\.cchTheme) private var theme
+    @State private var isEditHovered = false
+
+    private var active: Bool {
+        featureEnabled && isEnabled
+    }
+
+    private var statusColor: Color {
+        guard active else { return theme.textTertiary }
+        if isRunning { return theme.accentOrange }
+        return samples.last.map { providerMiniProbeColor($0.status, theme: theme) } ?? theme.accentBlue
+    }
+
+    private var helpText: String {
+        if !featureEnabled {
+            return "Mini 探针未开启，请在设置中启用"
+        }
+        let status = isEnabled ? "已开启" : "已关闭"
+        let average = averageTTFB.map { " · 平均首字节 \(formatProbeLatency($0))" } ?? ""
+        return "Mini 探针\(status) · \(resolvedModel)\(average)"
+    }
+
+    private var editButtonColor: Color {
+        guard featureEnabled else { return theme.textTertiary }
+        return isEditHovered ? theme.accentOrange : theme.textSecondary
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ProviderMiniProbeNeedles(samples: samples, active: active, isRunning: isRunning)
+                .frame(width: 28, height: 14)
+                .help(helpText)
+
+            if let averageTTFB {
+                Text(formatProbeLatency(averageTTFB))
+                    .font(.system(size: 9.2, weight: .bold, design: .rounded))
+                    .foregroundStyle(active ? statusColor : theme.textTertiary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .help("平均首字节 \(formatProbeLatency(averageTTFB))")
+            }
+
+            Button {
+                toggle()
+            } label: {
+                Group {
+                    if isRunning {
+                        ProgressView()
+                            .scaleEffect(0.42)
+                    } else {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .font(.system(size: 10.5, weight: .bold))
+                    }
+                }
+                .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(statusColor)
+            .disabled(!featureEnabled)
+            .help(helpText)
+
+            Button {
+                edit()
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 16, height: 18)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(isEditHovered && featureEnabled ? theme.accentOrange.opacity(0.16) : Color.clear)
+                    )
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(editButtonColor)
+            .help("设置此渠道探针模型")
+            .onHover { hovering in
+                isEditHovered = hovering
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 1)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(active ? statusColor.opacity(0.08) : theme.textTertiary.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(active ? statusColor.opacity(0.28) : theme.borderSubtle, lineWidth: 1)
+        )
+    }
+}
+
+private struct ProviderMiniProbeNeedles: View {
+    let samples: [CCHProviderMiniProbeSample]
+    let active: Bool
+    let isRunning: Bool
+    @Environment(\.cchTheme) private var theme
+
+    private var orderedSamples: [CCHProviderMiniProbeSample] {
+        Array(samples.sorted { $0.createdAt < $1.createdAt }.suffix(CCHProviderMiniProbeLimits.maxSamples))
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 1.4) {
+            ForEach(0..<CCHProviderMiniProbeLimits.maxSamples, id: \.self) { index in
+                let leadingEmpty = max(0, CCHProviderMiniProbeLimits.maxSamples - orderedSamples.count)
+                let sample = index >= leadingEmpty ? orderedSamples[index - leadingEmpty] : nil
+                Capsule()
+                    .fill(color(for: sample, index: index))
+                    .frame(width: 2, height: height(for: sample, index: index))
+                    .opacity(active || sample != nil ? 1 : 0.55)
+                    .animation(.easeOut(duration: 0.18), value: samples)
+            }
+        }
+    }
+
+    private func color(for sample: CCHProviderMiniProbeSample?, index: Int) -> Color {
+        if isRunning, index == CCHProviderMiniProbeLimits.maxSamples - 1 {
+            return theme.accentOrange
+        }
+        guard let sample else { return theme.textTertiary.opacity(0.34) }
+        return providerMiniProbeColor(sample.status, theme: theme)
+    }
+
+    private func height(for sample: CCHProviderMiniProbeSample?, index: Int) -> CGFloat {
+        if isRunning, index == CCHProviderMiniProbeLimits.maxSamples - 1 {
+            return 9
+        }
+        guard let sample else { return 4 }
+        switch sample.status {
+        case .success: return 7
+        case .warning: return 6
+        case .failure: return 5
+        }
+    }
+}
+
+private struct ProviderMiniProbePopover: View {
+    let provider: CCHProvider
+    @Binding var model: String
+    let resolvedModel: String
+    let featureEnabled: Bool
+    let isEnabled: Bool
+    let isRunning: Bool
+    let samples: [CCHProviderMiniProbeSample]
+    let averageTTFB: Double?
+    let setEnabled: (Bool) -> Void
+    let saveModel: (String) -> Void
+    @Environment(\.cchTheme) private var theme
+
+    private var normalizedModel: String {
+        normalizedProviderTestModel(model)
+    }
+
+    private var latestSample: CCHProviderMiniProbeSample? {
+        samples.sorted { $0.createdAt < $1.createdAt }.last
+    }
+
+    private var latestText: String {
+        guard let latestSample else { return "暂无样本" }
+        let totalLatency = latestSample.latencyMs.map(formatProbeLatency) ?? "-"
+        if let ttfbMs = latestSample.ttfbMs {
+            return "\(probeStatusTitle(latestSample.status)) · 首字节 \(formatProbeLatency(ttfbMs)) · 总延迟 \(totalLatency)"
+        }
+        return "\(probeStatusTitle(latestSample.status)) · 总延迟 \(totalLatency)"
+    }
+
+    private var averageText: String? {
+        averageTTFB.map { "平均首字节 \(formatProbeLatency($0))" }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(featureEnabled && isEnabled ? theme.accentOrange : theme.textTertiary)
+                    .frame(width: 18)
+                Text("Mini 探针")
+                    .font(.system(size: 11.5, weight: .semibold))
+                ProviderMiniProbeNeedles(
+                    samples: samples,
+                    active: featureEnabled && isEnabled,
+                    isRunning: isRunning
+                )
+                .frame(width: 30, height: 14)
+                Text(latestText)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { isEnabled },
+                    set: { setEnabled($0) }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .scaleEffect(0.62)
+                .disabled(!featureEnabled)
+            }
+
+            if let averageText {
+                Text(averageText)
+                    .font(.caption2)
+                    .foregroundStyle(theme.accentOrange)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 8) {
+                TextField("此渠道探针模型", text: $model)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, weight: .medium))
+                    .onSubmit {
+                        saveModel(normalizedModel)
+                    }
+                Button("恢复") {
+                    model = ""
+                    saveModel("")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(normalizedModel.isEmpty)
+                Button("保存") {
+                    saveModel(normalizedModel)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(theme.accentOrange)
+            }
+
+            Text(featureEnabled ? "当前使用 \(resolvedModel)" : "设置中开启总开关后才会发起后台模型测试。当前使用 \(resolvedModel)")
+                .font(.caption2)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            model = normalizedProviderTestModel(model)
+        }
+    }
+}
+
 private struct ProviderModelTestPopover: View {
     let provider: CCHProvider
     @Binding var model: String
@@ -4111,11 +4424,11 @@ private struct ProviderModelTestPopover: View {
 
     private var resultDetail: String {
         guard let result else { return "输入模型名称后开始测试" }
-        let latency = result.latencyMs.map(formatProbeLatency) ?? "-"
+        let timing = formatProviderModelTestTiming(result)
         let displayModel = result.model.isEmpty ? normalizedModel : result.model
         let detail = result.errorMessage.isEmpty ? result.message : result.errorMessage
         if result.success || result.status.lowercased() == "green" || result.status.lowercased() == "yellow" {
-            return "\(latency) · \(displayModel)"
+            return "\(timing) · \(displayModel)"
         }
         return detail.isEmpty ? displayModel : detail
     }
@@ -4123,7 +4436,7 @@ private struct ProviderModelTestPopover: View {
     private var statusId: String {
         if isTesting { return "testing" }
         guard let result else { return "idle" }
-        return "\(result.status)-\(result.success)-\(result.model)-\(result.errorMessage)-\(result.latencyMs ?? -1)"
+        return "\(result.status)-\(result.success)-\(result.model)-\(result.errorMessage)-\(result.ttfbMs ?? -1)-\(result.latencyMs ?? -1)"
     }
 
     private var progressValue: Double {
@@ -4308,6 +4621,9 @@ private struct ProviderModelTestChip: View {
     private var detail: String? {
         guard let result else { return nil }
         if result.success || result.status.lowercased() == "green" || result.status.lowercased() == "yellow" {
+            if let ttfbMs = result.ttfbMs {
+                return formatProbeLatency(ttfbMs)
+            }
             return result.latencyMs.map(formatProbeLatency)
         }
         return "失败"
@@ -4634,6 +4950,22 @@ private func cacheRateColor(_ rate: Double?, theme: CCHThemePalette) -> Color {
         return theme.accentOrange
     default:
         return theme.accentRed
+    }
+}
+
+private func providerMiniProbeColor(_ status: CCHProviderMiniProbeStatus, theme: CCHThemePalette) -> Color {
+    switch status {
+    case .success: return theme.accentGreen
+    case .warning: return theme.accentOrange
+    case .failure: return theme.accentRed
+    }
+}
+
+private func probeStatusTitle(_ status: CCHProviderMiniProbeStatus) -> String {
+    switch status {
+    case .success: return "可用"
+    case .warning: return "波动"
+    case .failure: return "失败"
     }
 }
 
