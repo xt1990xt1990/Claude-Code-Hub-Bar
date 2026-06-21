@@ -35,5 +35,25 @@ private struct ModelBrandTests {
             .openai,
             "openai model text should beat claude in provider name"
         )
+        expectEqual(
+            ModelBrand.resolve(model: "glm-4-plus"),
+            .glm,
+            "plain glm-* model text should resolve to glm"
+        )
+        expectEqual(
+            ModelBrand.resolve(model: "chatglm-4"),
+            .glm,
+            "chatglm-* model text should resolve to glm"
+        )
+        expectEqual(
+            ModelBrand.resolve(model: "", providerType: "ChatGLM", provider: "any"),
+            .glm,
+            "ChatGLM provider type should resolve to glm"
+        )
+        expectEqual(
+            ModelBrand.resolve(model: "glm-4v", provider: "openai-compatible"),
+            .glm,
+            "glm model text should beat openai-compatible provider name"
+        )
     }
 }

@@ -169,65 +169,97 @@ struct SettingsView: View {
             accent: theme.accentOrange
         ) {
             SettingsControlRow(
-                title: "总开关",
+                title: "启用探针",
                 subtitle: state.providerMiniProbeEnabled ? "只会探测已单独开启的渠道。" : "关闭后不会发起后台模型测试请求。"
             ) {
-                Toggle("启用探针", isOn: $state.providerMiniProbeEnabled)
-                    .toggleStyle(.switch)
-                    .font(.system(size: 12, weight: .semibold))
-                    .onChange(of: state.providerMiniProbeEnabled) { _, enabled in
-                        state.startProviderMiniProbeTimer(runImmediately: enabled, forceImmediate: enabled)
-                    }
+                HStack(spacing: 10) {
+                    Spacer()
+                    Toggle("", isOn: $state.providerMiniProbeEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .onChange(of: state.providerMiniProbeEnabled) { _, enabled in
+                            state.startProviderMiniProbeTimer(runImmediately: enabled, forceImmediate: enabled)
+                        }
+                }
             }
 
             SettingsControlRow(title: "探针频率", subtitle: "每个已开启渠道按这个间隔执行一次模型测试。") {
                 HStack(spacing: 10) {
+                    Color.clear.frame(width: 40, height: 1)
                     Slider(
                         value: $state.providerMiniProbeIntervalMinutes,
                         in: CCHProviderMiniProbeLimits.minIntervalMinutes...CCHProviderMiniProbeLimits.maxIntervalMinutes,
                         step: 5
                     )
                     .tint(theme.accentOrange)
+                    .disabled(!state.providerMiniProbeEnabled)
                     .onChange(of: state.providerMiniProbeIntervalMinutes) { _, _ in
                         state.normalizeProviderMiniProbeInterval()
                         state.restartProviderMiniProbeTimerDebounced()
                     }
                     Text("\(Int(state.providerMiniProbeIntervalMinutes))m")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(theme.accentOrange)
+                        .foregroundStyle(state.providerMiniProbeEnabled ? theme.accentOrange : theme.textTertiary)
                         .frame(width: 48, alignment: .trailing)
                 }
+                .opacity(state.providerMiniProbeEnabled ? 1 : 0.5)
             }
 
             SettingsControlRow(title: "平均首字", subtitle: "开启后按最近 1-8 次有首字节数据的探针样本计算平均值。") {
                 HStack(spacing: 10) {
-                    Toggle(isOn: $state.providerMiniProbeAverageTTFBEnabled) {
-                        Label("平均首字节", systemImage: "timer")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(state.providerMiniProbeAverageTTFBEnabled ? theme.textSecondary : theme.textTertiary)
-                    }
+                    Toggle("", isOn: $state.providerMiniProbeAverageTTFBEnabled)
+                        .labelsHidden()
                         .toggleStyle(.switch)
-                        .scaleEffect(0.72, anchor: .leading)
-                        .frame(width: 104, alignment: .leading)
+                        .disabled(!state.providerMiniProbeEnabled)
+                        .frame(width: 40, alignment: .leading)
                     Slider(
                         value: $state.providerMiniProbeAverageSampleCount,
                         in: CCHProviderMiniProbeLimits.minAverageSampleCount...CCHProviderMiniProbeLimits.maxAverageSampleCount,
                         step: 1
                     )
                     .tint(theme.accentOrange)
-                    .disabled(!state.providerMiniProbeAverageTTFBEnabled)
+                    .disabled(!state.providerMiniProbeEnabled || !state.providerMiniProbeAverageTTFBEnabled)
                     .onChange(of: state.providerMiniProbeAverageSampleCount) { _, _ in
                         state.normalizeProviderMiniProbeAverageSampleCount()
                     }
                     Text("\(state.providerMiniProbeAverageSampleCountValue)次")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(state.providerMiniProbeAverageTTFBEnabled ? theme.textSecondary : theme.textTertiary)
+                        .foregroundStyle(state.providerMiniProbeEnabled && state.providerMiniProbeAverageTTFBEnabled ? theme.accentOrange : theme.textTertiary)
                         .frame(width: 48, alignment: .trailing)
                 }
+                .opacity(state.providerMiniProbeEnabled ? 1 : 0.5)
             }
 
             SettingsControlRow(title: "运行时段", subtitle: "关闭限制时全天 24 小时运行；开启后只在条内选中的时段运行。") {
-                ProviderMiniProbeScheduleControl(state: state)
+                HStack(spacing: 10) {
+                    Toggle("", isOn: $state.providerMiniProbeScheduleEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(!state.providerMiniProbeEnabled)
+                        .frame(width: 40, alignment: .leading)
+                        .onChange(of: state.providerMiniProbeScheduleEnabled) { _, _ in
+                            state.normalizeProviderMiniProbeSchedule()
+                        }
+                    ProviderMiniProbeTimeRangeSlider(
+                        startHour: $state.providerMiniProbeScheduleStartHour,
+                        endHour: $state.providerMiniProbeScheduleEndHour,
+                        isEnabled: state.providerMiniProbeEnabled && state.providerMiniProbeScheduleEnabled
+                    )
+                    .frame(height: 46)
+                    .opacity(state.providerMiniProbeEnabled && state.providerMiniProbeScheduleEnabled ? 1 : 0.55)
+                    .onChange(of: state.providerMiniProbeScheduleStartHour) { _, _ in
+                        state.normalizeProviderMiniProbeSchedule()
+                    }
+                    .onChange(of: state.providerMiniProbeScheduleEndHour) { _, _ in
+                        state.normalizeProviderMiniProbeSchedule()
+                    }
+                    Text(state.providerMiniProbeScheduleText())
+                        .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(state.providerMiniProbeEnabled && state.providerMiniProbeScheduleEnabled ? theme.accentOrange : theme.textTertiary)
+                        .frame(width: 120, alignment: .trailing)
+                }
+                .opacity(state.providerMiniProbeEnabled ? 1 : 0.5)
             }
 
             HStack(spacing: 10) {
@@ -795,43 +827,6 @@ private struct SettingsInfoPill: View {
         .padding(.vertical, 5)
         .cchSurface(.control)
         .clipShape(Capsule())
-    }
-}
-
-private struct ProviderMiniProbeScheduleControl: View {
-    @ObservedObject var state: MonitorState
-    @Environment(\.cchTheme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Toggle("限制运行时段", isOn: $state.providerMiniProbeScheduleEnabled)
-                    .toggleStyle(.switch)
-                    .font(.system(size: 12, weight: .semibold))
-                    .onChange(of: state.providerMiniProbeScheduleEnabled) { _, _ in
-                        state.normalizeProviderMiniProbeSchedule()
-                    }
-                Spacer()
-                Text(state.providerMiniProbeScheduleText())
-                    .font(.system(size: 11.5, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(state.providerMiniProbeScheduleEnabled ? theme.accentOrange : theme.textSecondary)
-            }
-
-            ProviderMiniProbeTimeRangeSlider(
-                startHour: $state.providerMiniProbeScheduleStartHour,
-                endHour: $state.providerMiniProbeScheduleEndHour,
-                isEnabled: state.providerMiniProbeScheduleEnabled
-            )
-            .frame(height: 46)
-            .opacity(state.providerMiniProbeScheduleEnabled ? 1 : 0.52)
-            .onChange(of: state.providerMiniProbeScheduleStartHour) { _, _ in
-                state.normalizeProviderMiniProbeSchedule()
-            }
-            .onChange(of: state.providerMiniProbeScheduleEndHour) { _, _ in
-                state.normalizeProviderMiniProbeSchedule()
-            }
-        }
     }
 }
 

@@ -4,6 +4,7 @@ enum ModelBrand: String {
     case openai
     case claude
     case deepseek
+    case glm
     case gemini
 
     var assetName: String {
@@ -11,6 +12,7 @@ enum ModelBrand: String {
         case .openai: return "model-openai"
         case .claude: return "model-claude"
         case .deepseek: return "model-deepseek"
+        case .glm: return "model-glm"
         case .gemini: return "model-gemini"
         }
     }
@@ -29,6 +31,7 @@ enum ModelBrand: String {
         let text = normalized(value)
         if text.isEmpty { return nil }
         if text.contains("deepseek") { return .deepseek }
+        if isGLMText(text) { return .glm }
         if text.contains("gemini") || text.contains("google") { return .gemini }
         if text.contains("openai") || text.contains("codex") { return .openai }
         if text.contains("claude") || text.contains("anthropic") { return .claude }
@@ -39,6 +42,7 @@ enum ModelBrand: String {
         let text = normalized(value)
         if text.isEmpty { return nil }
         if text.contains("deepseek") { return .deepseek }
+        if isGLMText(text) { return .glm }
         if text.contains("gemini") || text.contains("google") { return .gemini }
         if text.contains("claude") || text.contains("anthropic") { return .claude }
         if isOpenAIText(text) { return .openai }
@@ -49,10 +53,17 @@ enum ModelBrand: String {
         let text = normalized(value)
         if text.isEmpty { return nil }
         if text.contains("deepseek") { return .deepseek }
+        if isGLMText(text) { return .glm }
         if text.contains("gemini") || text.contains("google") { return .gemini }
         if isOpenAIText(text) { return .openai }
         if text.contains("claude") || text.contains("anthropic") { return .claude }
         return nil
+    }
+
+    private static func isGLMText(_ text: String) -> Bool {
+        text.contains("glm")
+            || text.contains("zhipu")
+            || text.contains("bigmodel")
     }
 
     private static func isOpenAIText(_ text: String) -> Bool {
