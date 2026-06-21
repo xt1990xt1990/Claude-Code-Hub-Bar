@@ -6,8 +6,8 @@ It surfaces today’s usage, running requests, logs, leaderboards, and provider 
 
 ## Download
 
-- Latest version: [v1.2.1.1](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/tag/v1.2.1.1)
-- Apple Silicon: [CCHBar-v1.2.1.1-arm64.zip](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/download/v1.2.1.1/CCHBar-v1.2.1.1-arm64.zip)
+- Latest version: [v1.2.2](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/tag/v1.2.2)
+- Apple Silicon: [CCHBar-v1.2.2-arm64.zip](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/download/v1.2.2/CCHBar-v1.2.2-arm64.zip)
 
 ## Usage
 

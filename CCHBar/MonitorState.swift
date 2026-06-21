@@ -222,6 +222,7 @@ final class MonitorState: ObservableObject {
     @Published private(set) var upstreamRateLastCheckedAt: Date?
     @Published private(set) var upstreamRateCredentials: [UpstreamRateCredential] = []
     @Published private(set) var upstreamRateFetchingHosts: Set<String> = []
+    @Published private(set) var upstreamRateLastSyncAdjustedProviderIds: Set<Int> = []
     @Published private(set) var isRefreshingUpstreamRates = false
     @Published private(set) var isRefreshingUpstreamBalances = false
     @Published private(set) var upstreamBalanceLastRefreshedAt: Date?
@@ -402,7 +403,8 @@ final class MonitorState: ObservableObject {
             snapshots: upstreamRateSnapshots,
             selectedProviderIds: upstreamRateSelectedProviderIds,
             ignoredHosts: upstreamRateIgnoredHosts,
-            displayNames: upstreamRateHostDisplayNames
+            displayNames: upstreamRateHostDisplayNames,
+            lastSyncAdjustedProviderIds: upstreamRateLastSyncAdjustedProviderIds
         )
     }
 
@@ -1324,7 +1326,18 @@ final class MonitorState: ObservableObject {
             .filter { activeHosts.contains($0.host) }
         saveUpstreamRateSnapshots()
         upstreamRateLastCheckedAt = Date()
+
+        let preSyncMultipliers = Dictionary(
+            uniqueKeysWithValues: providers.map { ($0.id, $0.costMultiplier) }
+        )
         await syncSelectedUpstreamRates(showEmptyMessage: false)
+        upstreamRateLastSyncAdjustedProviderIds = Set(
+            providers.compactMap { provider in
+                guard let previous = preSyncMultipliers[provider.id] else { return nil }
+                return abs(provider.costMultiplier - previous) > 0.0001 ? provider.id : nil
+            }
+        )
+
         if !silent {
             flashActionMessage("上游倍率已检测")
         }

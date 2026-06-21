@@ -146,6 +146,7 @@ struct UpstreamRateProviderRow: Identifiable, Equatable {
     let matchStatus: UpstreamRateMatchStatus
     let isSelectedForSync: Bool
     let isEnabled: Bool
+    let wasAdjustedInLastSync: Bool
 
     var id: Int { providerId }
 
@@ -185,6 +186,10 @@ struct UpstreamRateSite: Identifiable, Equatable {
     var pendingSyncCount: Int {
         syncableRows.filter(\.hasRateChange).count
     }
+
+    var lastSyncAdjustedCount: Int {
+        rows.filter(\.wasAdjustedInLastSync).count
+    }
 }
 
 enum UpstreamRateMatcher {
@@ -193,7 +198,8 @@ enum UpstreamRateMatcher {
         snapshots: [UpstreamRateSnapshot],
         selectedProviderIds: Set<Int>,
         ignoredHosts: Set<String>,
-        displayNames: [String: String] = [:]
+        displayNames: [String: String] = [:],
+        lastSyncAdjustedProviderIds: Set<Int> = []
     ) -> [UpstreamRateSite] {
         let snapshotsByHost = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.host, $0) })
         let grouped = Dictionary(grouping: providers) { provider in
@@ -216,7 +222,8 @@ enum UpstreamRateMatcher {
                         sourceType: sourceType,
                         status: status,
                         snapshot: snapshot,
-                        selectedProviderIds: selectedProviderIds
+                        selectedProviderIds: selectedProviderIds,
+                        lastSyncAdjustedProviderIds: lastSyncAdjustedProviderIds
                     )
                 }
 
@@ -248,7 +255,8 @@ enum UpstreamRateMatcher {
         sourceType: UpstreamRateSourceType,
         status: UpstreamRateSourceStatus,
         snapshot: UpstreamRateSnapshot?,
-        selectedProviderIds: Set<Int>
+        selectedProviderIds: Set<Int>,
+        lastSyncAdjustedProviderIds: Set<Int>
     ) -> UpstreamRateProviderRow {
         let entry = snapshot?.entries.first { $0.providerId == provider.id }
         let unsupported = sourceType == .unknown || status == .unsupported
@@ -272,7 +280,8 @@ enum UpstreamRateMatcher {
             sourceType: sourceType,
             matchStatus: matchStatus,
             isSelectedForSync: selectedProviderIds.contains(provider.id),
-            isEnabled: provider.isEnabled
+            isEnabled: provider.isEnabled,
+            wasAdjustedInLastSync: lastSyncAdjustedProviderIds.contains(provider.id)
         )
     }
 

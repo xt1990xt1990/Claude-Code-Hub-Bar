@@ -1786,6 +1786,17 @@ private struct UpstreamRateSiteCard: View {
         return theme.textTertiary.opacity(0.4)
     }
 
+    private var subtitleText: Text {
+        let base = Text("\(site.matchedCount)/\(site.rows.count) key 已匹配 · \(site.selectedCount) 个跟随")
+        guard site.lastSyncAdjustedCount > 0 else { return base }
+        return base
+            + Text(" · 本轮已调整 ")
+            + Text("\(site.lastSyncAdjustedCount)")
+                .foregroundStyle(theme.accentGreen)
+                .fontWeight(.semibold)
+            + Text(" 个")
+    }
+
     private static let stripHeight: CGFloat = 26
 
     var body: some View {
@@ -1809,7 +1820,7 @@ private struct UpstreamRateSiteCard: View {
                             state.setUpstreamRateHostDisplayName(host: site.host, displayName: name)
                         }
                     )
-                    Text("\(site.matchedCount)/\(site.rows.count) key 已匹配 · \(site.selectedCount) 个跟随")
+                    subtitleText
                         .font(.caption2)
                         .foregroundStyle(theme.textSecondary)
                 }
@@ -2093,8 +2104,16 @@ private struct UpstreamRateProviderSyncRow: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
-        .cchSurface(.row)
+        .background(
+            ZStack {
+                theme.row
+                if row.wasAdjustedInLastSync {
+                    theme.accentGreen.opacity(0.08)
+                }
+            }
+        )
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .animation(.easeOut(duration: 0.18), value: row.wasAdjustedInLastSync)
         .onChange(of: provider.map { state.customTestModels(for: $0) } ?? []) {
             guard renderedEditor == .modelTest, let provider else { return }
             editorRevealHeight = editorHeight(.modelTest, provider: provider)
