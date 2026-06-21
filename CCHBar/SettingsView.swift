@@ -12,6 +12,10 @@ struct SettingsView: View {
     @State private var draftCCHEnvPath = ""
     @State private var isApplyingConnection = false
     @State private var launchError: String?
+    @State private var miniProbeIntervalPreview: Double?
+    @State private var miniProbeAveragePreview: Double?
+    @State private var miniProbeScheduleStartPreview: Double?
+    @State private var miniProbeScheduleEndPreview: Double?
     private var theme: CCHThemePalette { state.selectedTheme.palette }
 
     var body: some View {
@@ -168,12 +172,17 @@ struct SettingsView: View {
             subtitle: "复用供应商模型测试，记录每个渠道最近 8 次结果。",
             accent: theme.accentOrange
         ) {
-            SettingsControlRow(
-                title: "启用探针",
-                subtitle: state.providerMiniProbeEnabled ? "只会探测已单独开启的渠道。" : "关闭后不会发起后台模型测试请求。"
-            ) {
-                HStack(spacing: 10) {
-                    Spacer()
+            MiniProbePanel {
+                HStack(alignment: .center, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("启用探针")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(state.providerMiniProbeEnabled ? "只会探测已单独开启的渠道，关闭后不会发起后台模型测试请求。" : "关闭后不会发起后台模型测试请求。")
+                            .font(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 12)
                     Toggle("", isOn: $state.providerMiniProbeEnabled)
                         .labelsHidden()
                         .toggleStyle(.switch)
@@ -183,94 +192,135 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsControlRow(title: "探针频率", subtitle: "每个已开启渠道按这个间隔执行一次模型测试。") {
-                HStack(spacing: 10) {
-                    Color.clear.frame(width: 40, height: 1)
-                    Slider(
-                        value: $state.providerMiniProbeIntervalMinutes,
-                        in: CCHProviderMiniProbeLimits.minIntervalMinutes...CCHProviderMiniProbeLimits.maxIntervalMinutes,
-                        step: 5
+            HStack(alignment: .top, spacing: 12) {
+                MiniProbePanel(isMuted: !state.providerMiniProbeEnabled) {
+                    MiniProbeControlHeader(
+                        title: "探针频率",
+                        subtitle: "每个已开启渠道按这个间隔执行一次模型测试。",
+                        value: "\(Int(miniProbeIntervalPreview ?? state.providerMiniProbeIntervalMinutes))m",
+                        valueActive: state.providerMiniProbeEnabled
                     )
-                    .tint(theme.accentOrange)
-                    .disabled(!state.providerMiniProbeEnabled)
-                    .onChange(of: state.providerMiniProbeIntervalMinutes) { _, _ in
+                    MiniProbeValueSlider(
+                        value: $state.providerMiniProbeIntervalMinutes,
+                        previewValue: $miniProbeIntervalPreview,
+                        range: CCHProviderMiniProbeLimits.minIntervalMinutes...CCHProviderMiniProbeLimits.maxIntervalMinutes,
+                        step: 5,
+                        ticks: [
+                            MiniProbeSliderTick(value: 5, label: "5m"),
+                            MiniProbeSliderTick(value: 60, label: "1h"),
+                            MiniProbeSliderTick(value: 180, label: "3h"),
+                            MiniProbeSliderTick(value: 360, label: "6h")
+                        ],
+                        isEnabled: state.providerMiniProbeEnabled
+                    ) {
                         state.normalizeProviderMiniProbeInterval()
                         state.restartProviderMiniProbeTimerDebounced()
                     }
-                    Text("\(Int(state.providerMiniProbeIntervalMinutes))m")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(state.providerMiniProbeEnabled ? theme.accentOrange : theme.textTertiary)
-                        .frame(width: 48, alignment: .trailing)
                 }
-                .opacity(state.providerMiniProbeEnabled ? 1 : 0.5)
-            }
-
-            SettingsControlRow(title: "平均首字", subtitle: "开启后按最近 1-8 次有首字节数据的探针样本计算平均值。") {
-                HStack(spacing: 10) {
-                    Toggle("", isOn: $state.providerMiniProbeAverageTTFBEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .disabled(!state.providerMiniProbeEnabled)
-                        .frame(width: 40, alignment: .leading)
-                    Slider(
+                MiniProbePanel(isMuted: !state.providerMiniProbeEnabled) {
+                    MiniProbeControlHeader(
+                        title: "平均首字",
+                        subtitle: "按最近有首字节数据的探针样本计算平均值。",
+                        value: "\(miniProbeAverageDisplayCount)次",
+                        valueActive: state.providerMiniProbeEnabled && state.providerMiniProbeAverageTTFBEnabled
+                    ) {
+                        MiniProbeToggle(
+                            isOn: $state.providerMiniProbeAverageTTFBEnabled,
+                            isEnabled: state.providerMiniProbeEnabled
+                        )
+                    }
+                    MiniProbeValueSlider(
                         value: $state.providerMiniProbeAverageSampleCount,
-                        in: CCHProviderMiniProbeLimits.minAverageSampleCount...CCHProviderMiniProbeLimits.maxAverageSampleCount,
-                        step: 1
-                    )
-                    .tint(theme.accentOrange)
-                    .disabled(!state.providerMiniProbeEnabled || !state.providerMiniProbeAverageTTFBEnabled)
-                    .onChange(of: state.providerMiniProbeAverageSampleCount) { _, _ in
+                        previewValue: $miniProbeAveragePreview,
+                        range: CCHProviderMiniProbeLimits.minAverageSampleCount...CCHProviderMiniProbeLimits.maxAverageSampleCount,
+                        step: 1,
+                        ticks: [
+                            MiniProbeSliderTick(value: 1, label: "1"),
+                            MiniProbeSliderTick(value: 3, label: "3"),
+                            MiniProbeSliderTick(value: 5, label: "5"),
+                            MiniProbeSliderTick(value: 8, label: "8")
+                        ],
+                        isEnabled: state.providerMiniProbeEnabled && state.providerMiniProbeAverageTTFBEnabled
+                    ) {
                         state.normalizeProviderMiniProbeAverageSampleCount()
                     }
-                    Text("\(state.providerMiniProbeAverageSampleCountValue)次")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(state.providerMiniProbeEnabled && state.providerMiniProbeAverageTTFBEnabled ? theme.accentOrange : theme.textTertiary)
-                        .frame(width: 48, alignment: .trailing)
                 }
-                .opacity(state.providerMiniProbeEnabled ? 1 : 0.5)
             }
 
-            SettingsControlRow(title: "运行时段", subtitle: "关闭限制时全天 24 小时运行；开启后只在条内选中的时段运行。") {
-                HStack(spacing: 10) {
-                    Toggle("", isOn: $state.providerMiniProbeScheduleEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .disabled(!state.providerMiniProbeEnabled)
-                        .frame(width: 40, alignment: .leading)
-                        .onChange(of: state.providerMiniProbeScheduleEnabled) { _, _ in
-                            state.normalizeProviderMiniProbeSchedule()
-                        }
-                    ProviderMiniProbeTimeRangeSlider(
-                        startHour: $state.providerMiniProbeScheduleStartHour,
-                        endHour: $state.providerMiniProbeScheduleEndHour,
-                        isEnabled: state.providerMiniProbeEnabled && state.providerMiniProbeScheduleEnabled
+            MiniProbePanel(isMuted: !state.providerMiniProbeEnabled) {
+                MiniProbeControlHeader(
+                    title: "运行时段",
+                    subtitle: "关闭限制时全天 24 小时运行；开启后只在选中的时段运行。",
+                    value: miniProbeScheduleDisplayText,
+                    valueActive: state.providerMiniProbeEnabled && state.providerMiniProbeScheduleEnabled
+                ) {
+                    MiniProbeToggle(
+                        isOn: $state.providerMiniProbeScheduleEnabled,
+                        isEnabled: state.providerMiniProbeEnabled
                     )
-                    .frame(height: 46)
-                    .opacity(state.providerMiniProbeEnabled && state.providerMiniProbeScheduleEnabled ? 1 : 0.55)
-                    .onChange(of: state.providerMiniProbeScheduleStartHour) { _, _ in
+                    .onChange(of: state.providerMiniProbeScheduleEnabled) { _, _ in
                         state.normalizeProviderMiniProbeSchedule()
                     }
-                    .onChange(of: state.providerMiniProbeScheduleEndHour) { _, _ in
-                        state.normalizeProviderMiniProbeSchedule()
-                    }
-                    Text(state.providerMiniProbeScheduleText())
-                        .font(.system(size: 11.5, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(state.providerMiniProbeEnabled && state.providerMiniProbeScheduleEnabled ? theme.accentOrange : theme.textTertiary)
-                        .frame(width: 120, alignment: .trailing)
                 }
-                .opacity(state.providerMiniProbeEnabled ? 1 : 0.5)
+                ProviderMiniProbeTimeRangeSlider(
+                    startHour: $state.providerMiniProbeScheduleStartHour,
+                    endHour: $state.providerMiniProbeScheduleEndHour,
+                    previewStartHour: $miniProbeScheduleStartPreview,
+                    previewEndHour: $miniProbeScheduleEndPreview,
+                    isEnabled: state.providerMiniProbeEnabled && state.providerMiniProbeScheduleEnabled
+                ) {
+                    state.normalizeProviderMiniProbeSchedule()
+                }
+                .frame(height: 50)
+                .opacity(state.providerMiniProbeEnabled && state.providerMiniProbeScheduleEnabled ? 1 : 0.55)
             }
 
-            HStack(spacing: 10) {
-                SettingsInfoPill(icon: "switch.2", title: "渠道", value: "\(state.providerMiniProbeSelectedCount)")
-                SettingsInfoPill(icon: "waveform.path.ecg", title: "样本", value: "\(state.providerMiniProbeRecordedSampleCount)")
-                SettingsInfoPill(icon: "timer", title: "频率", value: "\(Int(state.providerMiniProbeIntervalMinutes))m")
-                SettingsInfoPill(icon: "clock", title: "时段", value: state.providerMiniProbeScheduleText())
-                SettingsInfoPill(icon: "timer.circle", title: "首字", value: state.providerMiniProbeAverageTTFBEnabled ? "\(state.providerMiniProbeAverageSampleCountValue)次" : "关")
-                Spacer()
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    providerMiniProbeInfoPills
+                    Spacer(minLength: 0)
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        SettingsInfoPill(icon: "switch.2", title: "渠道", value: "\(state.providerMiniProbeSelectedCount)")
+                        SettingsInfoPill(icon: "waveform.path.ecg", title: "样本", value: "\(state.providerMiniProbeRecordedSampleCount)")
+                        SettingsInfoPill(icon: "timer", title: "频率", value: "\(Int(miniProbeIntervalPreview ?? state.providerMiniProbeIntervalMinutes))m")
+                        Spacer(minLength: 0)
+                    }
+                    HStack(spacing: 10) {
+                        SettingsInfoPill(icon: "clock", title: "时段", value: miniProbeScheduleDisplayText)
+                        SettingsInfoPill(icon: "timer.circle", title: "首字", value: state.providerMiniProbeAverageTTFBEnabled ? "\(miniProbeAverageDisplayCount)次" : "关")
+                        Spacer(minLength: 0)
+                    }
+                }
             }
         }
+    }
+
+    @ViewBuilder
+    private var providerMiniProbeInfoPills: some View {
+        SettingsInfoPill(icon: "switch.2", title: "渠道", value: "\(state.providerMiniProbeSelectedCount)")
+        SettingsInfoPill(icon: "waveform.path.ecg", title: "样本", value: "\(state.providerMiniProbeRecordedSampleCount)")
+        SettingsInfoPill(icon: "timer", title: "频率", value: "\(Int(miniProbeIntervalPreview ?? state.providerMiniProbeIntervalMinutes))m")
+        SettingsInfoPill(icon: "clock", title: "时段", value: miniProbeScheduleDisplayText)
+        SettingsInfoPill(icon: "timer.circle", title: "首字", value: state.providerMiniProbeAverageTTFBEnabled ? "\(miniProbeAverageDisplayCount)次" : "关")
+    }
+
+    private var miniProbeAverageDisplayCount: Int {
+        Int(min(
+            max((miniProbeAveragePreview ?? state.providerMiniProbeAverageSampleCount).rounded(), CCHProviderMiniProbeLimits.minAverageSampleCount),
+            CCHProviderMiniProbeLimits.maxAverageSampleCount
+        ))
+    }
+
+    private var miniProbeScheduleDisplayText: String {
+        guard state.providerMiniProbeScheduleEnabled else { return "全天" }
+        let start = min(max(miniProbeScheduleStartPreview ?? state.providerMiniProbeScheduleStartHour, 0), 24)
+        let end = min(max(miniProbeScheduleEndPreview ?? state.providerMiniProbeScheduleEndHour, 0), 24)
+        if start <= 0, end >= 24 { return "全天" }
+        if abs(start - end) < 0.001 { return "已停用" }
+        let suffix = start > end ? " 次日" : ""
+        return "\(formatProviderMiniProbeHour(start))-\(formatProviderMiniProbeHour(end))\(suffix)"
     }
 
     private var updateCard: some View {
@@ -804,6 +854,228 @@ private struct SettingsStatusPill: View {
     }
 }
 
+private struct MiniProbePanel<Content: View>: View {
+    var isMuted = false
+    @ViewBuilder let content: () -> Content
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            content()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cchSurface(.row)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(theme.borderSubtle, lineWidth: 1)
+        )
+        .opacity(isMuted ? 0.62 : 1)
+    }
+}
+
+private struct MiniProbeControlHeader<Accessory: View>: View {
+    let title: String
+    let subtitle: String
+    let value: String
+    let valueActive: Bool
+    @ViewBuilder var accessory: () -> Accessory
+    @Environment(\.cchTheme) private var theme
+
+    init(
+        title: String,
+        subtitle: String,
+        value: String,
+        valueActive: Bool,
+        @ViewBuilder accessory: @escaping () -> Accessory
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.value = value
+        self.valueActive = valueActive
+        self.accessory = accessory
+    }
+
+    init(
+        title: String,
+        subtitle: String,
+        value: String,
+        valueActive: Bool
+    ) where Accessory == EmptyView {
+        self.title = title
+        self.subtitle = subtitle
+        self.value = value
+        self.valueActive = valueActive
+        self.accessory = { EmptyView() }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                accessory()
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(theme.textPrimary)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 10)
+            Text(value)
+                .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(valueActive ? theme.accentOrange : theme.textTertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+        }
+    }
+}
+
+private struct MiniProbeToggle: View {
+    @Binding var isOn: Bool
+    let isEnabled: Bool
+
+    var body: some View {
+        Toggle("", isOn: $isOn)
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(!isEnabled)
+            .frame(width: 50, alignment: .leading)
+    }
+}
+
+private struct MiniProbeSliderTick: Identifiable {
+    let value: Double
+    let label: String
+
+    var id: Double { value }
+}
+
+private struct MiniProbeValueSlider: View {
+    @Binding var value: Double
+    @Binding var previewValue: Double?
+    let range: ClosedRange<Double>
+    let step: Double
+    let ticks: [MiniProbeSliderTick]
+    let isEnabled: Bool
+    let onCommit: () -> Void
+    @Environment(\.cchTheme) private var theme
+    @State private var draftValue: Double
+    @State private var isEditing = false
+
+    init(
+        value: Binding<Double>,
+        previewValue: Binding<Double?>,
+        range: ClosedRange<Double>,
+        step: Double,
+        ticks: [MiniProbeSliderTick],
+        isEnabled: Bool,
+        onCommit: @escaping () -> Void
+    ) {
+        self._value = value
+        self._previewValue = previewValue
+        self.range = range
+        self.step = step
+        self.ticks = ticks
+        self.isEnabled = isEnabled
+        self.onCommit = onCommit
+        self._draftValue = State(initialValue: value.wrappedValue)
+    }
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Slider(
+                value: $draftValue,
+                in: range,
+                step: step,
+                onEditingChanged: { editing in
+                    isEditing = editing
+                    if editing {
+                        draftValue = value
+                        previewValue = draftValue
+                    } else {
+                        let committedValue = clampedValue(draftValue)
+                        draftValue = committedValue
+                        value = committedValue
+                        previewValue = nil
+                        onCommit()
+                    }
+                }
+            )
+                .tint(theme.accentOrange)
+                .disabled(!isEnabled)
+                .frame(height: 20)
+                .onChange(of: value) { _, newValue in
+                    guard !isEditing else { return }
+                    draftValue = newValue
+                    previewValue = nil
+                }
+                .onChange(of: draftValue) { _, newValue in
+                    guard isEditing else { return }
+                    previewValue = clampedValue(newValue)
+                }
+                .onChange(of: isEnabled) { _, enabled in
+                    guard !enabled else { return }
+                    isEditing = false
+                    draftValue = value
+                    previewValue = nil
+                }
+            MiniProbeSliderScale(range: range, ticks: ticks, isEnabled: isEnabled)
+        }
+        .opacity(isEnabled ? 1 : 0.58)
+    }
+
+    private func clampedValue(_ value: Double) -> Double {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+private struct MiniProbeSliderScale: View {
+    let range: ClosedRange<Double>
+    let ticks: [MiniProbeSliderTick]
+    let isEnabled: Bool
+    @Environment(\.cchTheme) private var theme
+
+    private let labelWidth: CGFloat = 34
+
+    var body: some View {
+        GeometryReader { proxy in
+            let usableWidth = max(1, proxy.size.width - labelWidth)
+            ZStack(alignment: .leading) {
+                ForEach(ticks) { tick in
+                    VStack(spacing: 3) {
+                        Rectangle()
+                            .fill(theme.textTertiary.opacity(isEnabled ? 0.36 : 0.20))
+                            .frame(width: 1, height: 5)
+                        Text(tick.label)
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(isEnabled ? theme.textTertiary : theme.textTertiary.opacity(0.62))
+                    }
+                    .frame(width: labelWidth)
+                    .offset(x: tickOffset(tick.value, usableWidth: usableWidth))
+                }
+            }
+        }
+        .frame(height: 20)
+    }
+
+    private func tickOffset(_ value: Double, usableWidth: CGFloat) -> CGFloat {
+        let lower = range.lowerBound
+        let upper = range.upperBound
+        guard upper > lower else { return 0 }
+        let ratio = min(max((value - lower) / (upper - lower), 0), 1)
+        return CGFloat(ratio) * usableWidth
+    }
+}
+
 private struct SettingsInfoPill: View {
     let icon: String
     let title: String
@@ -833,20 +1105,25 @@ private struct SettingsInfoPill: View {
 private struct ProviderMiniProbeTimeRangeSlider: View {
     @Binding var startHour: Double
     @Binding var endHour: Double
+    @Binding var previewStartHour: Double?
+    @Binding var previewEndHour: Double?
     let isEnabled: Bool
+    let onCommit: () -> Void
     @Environment(\.cchTheme) private var theme
     @State private var startDragBase: Double?
     @State private var endDragBase: Double?
+    @State private var draftStartHour: Double?
+    @State private var draftEndHour: Double?
 
     private let handleSize: CGFloat = 16
     private let ticks = [0, 6, 12, 18, 24]
 
     private var displayStartHour: Double {
-        isEnabled ? min(max(startHour, 0), 24) : 0
+        isEnabled ? min(max(draftStartHour ?? startHour, 0), 24) : 0
     }
 
     private var displayEndHour: Double {
-        isEnabled ? min(max(endHour, 0), 24) : 24
+        isEnabled ? min(max(draftEndHour ?? endHour, 0), 24) : 24
     }
 
     var body: some View {
@@ -920,14 +1197,24 @@ private struct ProviderMiniProbeTimeRangeSlider: View {
                 guard isEnabled else { return }
                 if startDragBase == nil {
                     startDragBase = startHour
+                    draftStartHour = startHour
+                    previewStartHour = startHour
                 }
                 let base = startDragBase ?? startHour
                 let delta = Double(value.translation.width / max(width, 1)) * 24
-                startHour = min(max(snappedHour(base + delta), 0), 24)
+                let draft = clampedHour(snappedHour(base + delta))
+                draftStartHour = draft
+                previewStartHour = draft
             }
             .onEnded { _ in
+                if let draftStartHour {
+                    startHour = draftStartHour
+                    previewStartHour = nil
+                    onCommit()
+                }
                 startDragBase = nil
-                normalizeBounds()
+                draftStartHour = nil
+                previewStartHour = nil
             }
     }
 
@@ -937,14 +1224,24 @@ private struct ProviderMiniProbeTimeRangeSlider: View {
                 guard isEnabled else { return }
                 if endDragBase == nil {
                     endDragBase = endHour
+                    draftEndHour = endHour
+                    previewEndHour = endHour
                 }
                 let base = endDragBase ?? endHour
                 let delta = Double(value.translation.width / max(width, 1)) * 24
-                endHour = min(max(snappedHour(base + delta), 0), 24)
+                let draft = clampedHour(snappedHour(base + delta))
+                draftEndHour = draft
+                previewEndHour = draft
             }
             .onEnded { _ in
+                if let draftEndHour {
+                    endHour = draftEndHour
+                    previewEndHour = nil
+                    onCommit()
+                }
                 endDragBase = nil
-                normalizeBounds()
+                draftEndHour = nil
+                previewEndHour = nil
             }
     }
 
@@ -952,9 +1249,8 @@ private struct ProviderMiniProbeTimeRangeSlider: View {
         (value * 2).rounded() / 2
     }
 
-    private func normalizeBounds() {
-        startHour = min(max(startHour, 0), 24)
-        endHour = min(max(endHour, 0), 24)
+    private func clampedHour(_ value: Double) -> Double {
+        min(max(value, 0), 24)
     }
 
     @ViewBuilder
