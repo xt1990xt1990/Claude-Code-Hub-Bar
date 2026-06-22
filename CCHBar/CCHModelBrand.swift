@@ -67,13 +67,28 @@ enum ModelBrand: String {
     }
 
     private static func isOpenAIText(_ text: String) -> Bool {
-        text.contains("openai")
-            || text.contains("codex")
-            || text.contains("gpt")
-            || text.contains("o1")
-            || text.contains("o3")
-            || text.contains("o4")
-            || text.contains("o5")
+        if text.contains("openai") || text.contains("codex") { return true }
+        let tokens = modelTokens(from: text)
+        return tokens.contains { token in
+            token == "gpt"
+                || token.hasPrefix("gpt-")
+                || token.range(of: #"^gpt[0-9]"#, options: .regularExpression) != nil
+                || token == "o1"
+                || token.hasPrefix("o1-")
+                || token == "o3"
+                || token.hasPrefix("o3-")
+                || token == "o4"
+                || token.hasPrefix("o4-")
+                || token == "o5"
+                || token.hasPrefix("o5-")
+        }
+    }
+
+    private static func modelTokens(from text: String) -> [String] {
+        text.split { character in
+            !(character.isLetter || character.isNumber || character == "-")
+        }
+        .map(String.init)
     }
 
     private static func normalized(_ value: String) -> String {

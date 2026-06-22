@@ -33,7 +33,6 @@ final class CCHStatusBarView: NSView {
             needsDisplay = true
         }
     }
-    private var marqueeStartTime: CFTimeInterval = CACurrentMediaTime()
     private var marqueeText = ""
     private var shouldMarqueePrimaryText = false
     private var wasRunning = false
@@ -280,7 +279,6 @@ final class CCHStatusBarView: NSView {
         let nextText = trimmed.isEmpty ? "Provider" : trimmed
         if marqueeText != nextText {
             marqueeText = nextText
-            marqueeStartTime = CACurrentMediaTime()
             lastMarqueeConfiguration = nil
             CATransaction.begin()
             CATransaction.setDisableActions(true)

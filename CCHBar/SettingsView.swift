@@ -345,6 +345,7 @@ struct SettingsView: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .onChange(of: state.checkForUpdatesEnabled) { _, newValue in
+                        state.startUpdateCheckTimer()
                         if newValue {
                             Task { await state.checkForUpdates(force: true) }
                         }

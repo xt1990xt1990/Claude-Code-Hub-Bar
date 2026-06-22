@@ -291,7 +291,7 @@ enum APIError: LocalizedError {
         case .missingToken: return "缺少 CCH API Key"
         case .httpError(let code): return "HTTP 错误 \(code)"
         case .parseError: return "数据解析失败"
-        case .actionError(let message): return message
+        case .actionError(let message): return CCHDisplaySanitizer.backendError(message)
         }
     }
 }

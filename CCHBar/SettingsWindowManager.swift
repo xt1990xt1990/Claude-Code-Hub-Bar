@@ -1,6 +1,6 @@
 import SwiftUI
 
-final class SettingsWindowManager {
+final class SettingsWindowManager: NSObject, NSWindowDelegate {
     static let shared = SettingsWindowManager()
     private var window: NSWindow?
 
@@ -23,11 +23,17 @@ final class SettingsWindowManager {
         w.title = "Claude Code Hub 设置"
         w.titlebarAppearsTransparent = true
         w.contentView = hostingView
+        w.delegate = self
         w.center()
         w.isReleasedWhenClosed = false
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         self.window = w
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        window = nil
     }
 }

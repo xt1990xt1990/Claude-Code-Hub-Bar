@@ -12,6 +12,12 @@ private func expectEqual(_ actual: ModelBrand?, _ expected: ModelBrand, _ messag
     }
 }
 
+private func expectNil(_ actual: ModelBrand?, _ message: String) {
+    guard actual == nil else {
+        fail("\(message): expected nil, got \(actual?.rawValue ?? "nil")")
+    }
+}
+
 @main
 private struct ModelBrandTests {
     static func main() {
@@ -54,6 +60,18 @@ private struct ModelBrandTests {
             ModelBrand.resolve(model: "glm-4v", provider: "openai-compatible"),
             .glm,
             "glm model text should beat openai-compatible provider name"
+        )
+        expectNil(
+            ModelBrand.resolve(model: "foo3-router"),
+            "plain names ending with 3 should not resolve to OpenAI"
+        )
+        expectNil(
+            ModelBrand.resolve(model: "hello1-provider"),
+            "plain names ending with 1 should not resolve to OpenAI"
+        )
+        expectNil(
+            ModelBrand.resolve(model: "gptx-router"),
+            "gpt-like prefixes without a boundary should not resolve to OpenAI"
         )
     }
 }

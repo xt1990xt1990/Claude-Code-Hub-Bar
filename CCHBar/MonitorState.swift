@@ -2297,6 +2297,10 @@ final class MonitorState: ObservableObject {
 
     func startUpdateCheckTimer() {
         updateCheckTimer?.cancel()
+        guard checkForUpdatesEnabled else {
+            updateCheckTimer = nil
+            return
+        }
         let interval: TimeInterval = 6 * 60 * 60
         updateCheckTimer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
@@ -3137,8 +3141,17 @@ private enum CCHDateParser {
 
     static var cache: [String: Date] = [:]
     static var cacheOrder: [String] = []
+    static let cacheLock = NSLock()
+
+    static func cachedDate(for key: String) -> Date? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cache[key]
+    }
 
     static func remember(_ date: Date, for key: String) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
         if cache[key] == nil {
             cacheOrder.append(key)
         }
@@ -3156,7 +3169,7 @@ private enum CCHDateParser {
 func parsedCCHDate(_ raw: String) -> Date? {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
-    if let cached = CCHDateParser.cache[trimmed] {
+    if let cached = CCHDateParser.cachedDate(for: trimmed) {
         return cached
     }
 

@@ -99,7 +99,12 @@ struct UpstreamRateCredentialStore {
         if status == errSecItemNotFound {
             query[kSecValueData as String] = data
             let addStatus = SecItemAdd(query as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw UpstreamRateCredentialStoreError.writeFailed(addStatus) }
+            if addStatus == errSecDuplicateItem {
+                let retryStatus = SecItemUpdate(baseQuery as CFDictionary, attributes as CFDictionary)
+                guard retryStatus == errSecSuccess else { throw UpstreamRateCredentialStoreError.writeFailed(retryStatus) }
+            } else if addStatus != errSecSuccess {
+                throw UpstreamRateCredentialStoreError.writeFailed(addStatus)
+            }
         } else if status != errSecSuccess {
             throw UpstreamRateCredentialStoreError.writeFailed(status)
         }
