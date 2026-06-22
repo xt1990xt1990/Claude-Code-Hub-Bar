@@ -272,6 +272,74 @@ private struct CCHSegmentedTabBar: View {
     }
 }
 
+private struct SlidingSegmentedControl<Option: Hashable & Identifiable>: View {
+    let options: [Option]
+    @Binding var selection: Option
+    let title: (Option) -> String
+    let width: CGFloat
+    var accent: Color
+    var action: (Option) -> Void = { _ in }
+    @Environment(\.cchTheme) private var theme
+    private let animation = Animation.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.28)
+    private let segmentSpacing: CGFloat = 4
+    private let controlPadding: CGFloat = 3
+
+    private var selectedIndex: Int {
+        options.firstIndex(of: selection) ?? 0
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let count = max(options.count, 1)
+            let contentWidth = max(0, proxy.size.width - controlPadding * 2)
+            let segmentWidth = max(0, (contentWidth - segmentSpacing * CGFloat(count - 1)) / CGFloat(count))
+            let indicatorX = controlPadding + CGFloat(selectedIndex) * (segmentWidth + segmentSpacing)
+            let indicatorHeight = max(0, proxy.size.height - controlPadding * 2)
+
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(theme.control)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(theme.border.opacity(0.72), lineWidth: 0.5)
+                    )
+
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(accent)
+                    .frame(width: segmentWidth, height: indicatorHeight)
+                    .shadow(color: accent.opacity(0.34), radius: 6, y: 2)
+                    .offset(x: indicatorX)
+                    .animation(animation, value: selection)
+                    .animation(animation, value: accent)
+
+                HStack(spacing: segmentSpacing) {
+                    ForEach(options) { option in
+                        let isActive = selection == option
+                        Button {
+                            guard selection != option else { return }
+                            withAnimation(animation) {
+                                selection = option
+                            }
+                            action(option)
+                        } label: {
+                            Text(title(option))
+                                .font(.system(size: 12, weight: isActive ? .bold : .semibold, design: .rounded))
+                                .foregroundStyle(isActive ? Color.white : theme.textSecondary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.86)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(controlPadding)
+            }
+        }
+        .frame(width: width, height: 34)
+    }
+}
+
 struct MenuBarView: View {
     @ObservedObject var state: MonitorState
     @State private var builtTabs: Set<CCHPanelTab>
@@ -1097,25 +1165,23 @@ private struct LeaderboardTabView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Picker("", selection: $state.leaderboardPeriod) {
-                    ForEach(CCHLeaderboardPeriod.allCases) { period in
-                        Text(period.title).tag(period)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 230)
-                .onChange(of: state.leaderboardPeriod) { _, _ in
+                SlidingSegmentedControl(
+                    options: CCHLeaderboardPeriod.allCases,
+                    selection: $state.leaderboardPeriod,
+                    title: \.title,
+                    width: 230,
+                    accent: theme.accentBlue
+                ) { _ in
                     Task { await state.refreshLeaderboardOnly() }
                 }
 
-                Picker("", selection: $state.leaderboardScope) {
-                    ForEach(CCHLeaderboardScope.allCases) { scope in
-                        Text(scope.title).tag(scope)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 260)
-                .onChange(of: state.leaderboardScope) { _, _ in
+                SlidingSegmentedControl(
+                    options: CCHLeaderboardScope.allCases,
+                    selection: $state.leaderboardScope,
+                    title: \.title,
+                    width: 260,
+                    accent: accent
+                ) { _ in
                     Task { await state.refreshLeaderboardOnly() }
                 }
 
@@ -1164,7 +1230,6 @@ private struct LeaderboardTabView: View {
         }
         .frame(width: CCHPanelLayout.contentWidth, alignment: .topLeading)
         .animation(nil, value: state.leaderboard.map(\.id))
-        .animation(nil, value: state.leaderboardScope)
     }
 }
 
