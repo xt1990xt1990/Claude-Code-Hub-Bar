@@ -2709,7 +2709,7 @@ private struct ProviderGroupChips: View {
                 .font(.caption)
                 .foregroundStyle(theme.textSecondary)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 7) {
+                HStack(spacing: 4) {
                     ForEach(state.providerGroups, id: \.self) { group in
                         Button {
                             withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
@@ -2718,34 +2718,42 @@ private struct ProviderGroupChips: View {
                         } label: {
                             let selected = state.isProviderGroupSelected(group)
                             let color = group == "全部" ? theme.accentBlue : providerGroupColor(group, theme: theme)
-                            HStack(spacing: 4) {
-                                if selected {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 8, weight: .black))
-                                        .transition(.scale.combined(with: .opacity))
-                                }
+                            VStack(spacing: 3) {
                                 Text(group)
                                     .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                Capsule()
+                                    .fill(selected ? color : Color.clear)
+                                    .frame(height: 2.5)
+                                    .shadow(color: selected ? color.opacity(0.42) : .clear, radius: 4, y: 1)
                             }
-                            .font(.system(size: 10.5, weight: selected ? .bold : .semibold))
-                            .padding(.horizontal, selected ? 10 : 8)
-                            .padding(.vertical, 4)
+                            .font(.system(size: 10.8, weight: selected ? .bold : .semibold))
+                            .foregroundStyle(selected ? Color.white : color.opacity(0.9))
+                            .padding(.horizontal, 8)
+                            .padding(.top, 4)
+                            .padding(.bottom, 2)
                             .background(
-                                Capsule()
-                                    .fill(selected ? color.opacity(0.34) : color.opacity(0.12))
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(selected ? theme.panelSoft.opacity(0.65) : Color.clear)
                             )
-                            .foregroundStyle(selected ? Color.white : color.opacity(0.92))
                             .overlay(
-                                Capsule()
-                                    .stroke(color.opacity(selected ? 0.88 : 0.28), lineWidth: selected ? 1.4 : 1)
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .stroke(selected ? theme.border.opacity(0.42) : Color.clear, lineWidth: 0.8)
                             )
-                            .shadow(color: selected ? color.opacity(0.26) : .clear, radius: selected ? 5 : 0, y: 1)
+                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                         }
                         .buttonStyle(.plain)
                     }
                 }
+                .padding(.horizontal, 3)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(theme.border.opacity(0.38))
+                        .frame(height: 1)
+                        .allowsHitTesting(false)
+                }
             }
-            .frame(height: 26)
+            .frame(height: 30)
         }
     }
 }
