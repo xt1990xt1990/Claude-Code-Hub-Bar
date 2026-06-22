@@ -598,6 +598,24 @@ enum UpstreamRateServiceError: LocalizedError {
     case invalidResponse(String)
     case missingCredential(String)
 
+    var isAuthenticationExpired: Bool {
+        switch self {
+        case .http(let code):
+            return code == 401 || code == 403
+        case .invalidResponse(let message):
+            let normalized = message.lowercased()
+            return normalized.contains("invalid refresh token")
+                || normalized.contains("invalid token")
+                || normalized.contains("token expired")
+                || normalized.contains("unauthorized")
+                || normalized.contains("forbidden")
+                || normalized.contains("登录")
+                || normalized.contains("授权")
+        case .invalidURL, .missingCredential:
+            return false
+        }
+    }
+
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "上游地址无效"

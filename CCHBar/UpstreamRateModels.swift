@@ -17,6 +17,7 @@ enum UpstreamRateSourceType: String, Codable, Equatable {
 enum UpstreamRateSourceStatus: String, Codable, Equatable {
     case available
     case needsLogin
+    case authExpired
     case unsupported
 }
 
@@ -102,11 +103,22 @@ struct UpstreamRateSnapshot: Codable, Equatable {
     static func mergeLatest(cached: [UpstreamRateSnapshot], refreshed: [UpstreamRateSnapshot]) -> [UpstreamRateSnapshot] {
         var merged = Dictionary(uniqueKeysWithValues: cached.map { ($0.host, $0) })
         for snapshot in refreshed {
+            if snapshot.status == .authExpired, let previous = merged[snapshot.host] {
+                merged[snapshot.host] = UpstreamRateSnapshot(
+                    host: previous.host,
+                    sourceType: previous.sourceType,
+                    status: .authExpired,
+                    entries: previous.entries,
+                    balance: previous.balance
+                )
+                continue
+            }
             if
                 let previous = merged[snapshot.host],
                 previous.status == .available,
                 !previous.entries.isEmpty,
                 snapshot.status != .available,
+                snapshot.status != .authExpired,
                 snapshot.entries.isEmpty {
                 continue
             }
@@ -158,6 +170,14 @@ struct UpstreamRateProviderRow: Identifiable, Equatable {
     var canSync: Bool {
         matchStatus == .matched && isSelectedForSync && upstreamRate != nil
     }
+
+    var isSelectableForSync: Bool {
+        matchStatus != .unsupported
+    }
+
+    var shouldRefreshSnapshotOnSyncSelection: Bool {
+        matchStatus == .unmatched
+    }
 }
 
 struct UpstreamRateSite: Identifiable, Equatable {
@@ -172,7 +192,8 @@ struct UpstreamRateSite: Identifiable, Equatable {
     var id: String { host }
 
     var syncableRows: [UpstreamRateProviderRow] {
-        rows.filter(\.canSync)
+        guard status == .available else { return [] }
+        return rows.filter(\.canSync)
     }
 
     var matchedCount: Int {
@@ -301,7 +322,7 @@ enum UpstreamRateMatcher {
         if sourceType == .unknown || status == .unsupported {
             return .unsupported
         }
-        if status == .available {
+        if status == .available || status == .authExpired {
             return .syncable
         }
         return .needsConfiguration
@@ -350,4 +371,35 @@ func normalizedUpstreamHost(_ rawValue: String) -> String? {
         return String(host.dropFirst(4))
     }
     return host
+}
+
+func shouldRefreshUpstreamRateSnapshots(
+    providers: [UpstreamRateProviderInput],
+    snapshots: [UpstreamRateSnapshot]
+) -> Bool {
+    let snapshotsByHost = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.host, $0) })
+    let providersByHost = Dictionary(grouping: providers) { provider in
+        UpstreamRateMatcher.providerHost(provider) ?? "unknown-\(provider.id)"
+    }
+
+    for (host, providers) in providersByHost {
+        guard let snapshot = snapshotsByHost[host], snapshot.status == .available else { continue }
+        let matchedProviderIds = Set(snapshot.entries.compactMap(\.providerId))
+        let currentProviderIds = Set(providers.map(\.id))
+        if !currentProviderIds.isSubset(of: matchedProviderIds) {
+            return true
+        }
+    }
+
+    return false
+}
+
+func upstreamRateProviderSnapshotSignature(providers: [UpstreamRateProviderInput]) -> String {
+    providers
+        .map { provider in
+            let host = UpstreamRateMatcher.providerHost(provider) ?? "unknown-\(provider.id)"
+            return "\(host)#\(provider.id)"
+        }
+        .sorted()
+        .joined(separator: "|")
 }

@@ -1387,8 +1387,8 @@ private struct UpstreamRatesTabView: View {
 
                 if !state.upstreamRateNeedsConfigurationSites.isEmpty {
                     siteSection(
-                        title: "待配置 / 登录失效",
-                        subtitle: "识别到 Sub2API 或 new-api，但还没有可用登录态",
+                        title: "待配置",
+                        subtitle: "识别到 Sub2API 或 new-api，但还没有登录态",
                         sites: state.upstreamRateNeedsConfigurationSites,
                         emptyText: "",
                         showConfigure: true
@@ -1405,6 +1405,8 @@ private struct UpstreamRatesTabView: View {
             didInitialRefresh = true
             if state.upstreamRateSnapshots.isEmpty {
                 await state.refreshUpstreamRates(silent: true)
+            } else {
+                await state.refreshUpstreamRatesIfSnapshotIsStale()
             }
             await state.refreshUpstreamBalances(silent: true)
         }
@@ -1581,6 +1583,9 @@ private struct UpstreamRatesTabView: View {
                                 }
                             } : nil,
                             configureCredential: showConfigure ? {
+                                editingCredential = state.draftUpstreamCredential(for: site)
+                            } : nil,
+                            reauthorizeCredential: site.status == .authExpired ? {
                                 editingCredential = state.draftUpstreamCredential(for: site)
                             } : nil
                         )
@@ -1774,6 +1779,7 @@ private struct UpstreamRateSiteCard: View {
     var isExpanded = true
     var toggleExpanded: (() -> Void)?
     var configureCredential: (() -> Void)?
+    var reauthorizeCredential: (() -> Void)?
     @Environment(\.cchTheme) private var theme
     @State private var isEditingDisplayName = false
     @State private var draftDisplayName = ""
@@ -1826,10 +1832,31 @@ private struct UpstreamRateSiteCard: View {
                 }
                 Spacer()
                 HStack(spacing: 4) {
+                    if let reauthorizeCredential {
+                        Button {
+                            reauthorizeCredential()
+                        } label: {
+                            Label("重新获取", systemImage: "key.fill")
+                                .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                                .symbolRenderingMode(.monochrome)
+                                .foregroundStyle(theme.accentOrange)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(theme.accentOrange.opacity(0.14))
+                                .clipShape(Capsule())
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("登录态已失效，重新获取登录态")
+                    }
                     if let balance = site.balance {
                         UpstreamBalanceCapsule(balance: balance)
                     }
-                    if let configureCredential {
+                    if site.status == .authExpired {
+                        StatusCapsule(text: "登录失效", color: theme.accentOrange)
+                    } else if let configureCredential {
                         Button {
                             configureCredential()
                         } label: {
@@ -2093,8 +2120,8 @@ private struct UpstreamRateProviderSyncRow: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(row.isSelectedForSync ? theme.accentBlue : theme.textTertiary)
-                .disabled(row.matchStatus != .matched)
-                .help(row.isSelectedForSync ? "取消跟随上游" : "跟随上游，倍率变化后自动应用")
+                .disabled(!row.isSelectableForSync || state.isRefreshingUpstreamRates)
+                .help(syncSelectionHelp)
             }
 
             if let provider, let renderedEditor {
@@ -2177,6 +2204,16 @@ private struct UpstreamRateProviderSyncRow: View {
                 }
             }
         }
+    }
+
+    private var syncSelectionHelp: String {
+        if row.isSelectedForSync {
+            return "取消跟随上游"
+        }
+        if row.shouldRefreshSnapshotOnSyncSelection {
+            return "跟随上游，并刷新 snapshot 重新匹配 key"
+        }
+        return "跟随上游，倍率变化后自动应用"
     }
 
     private func toggleModelTest(_ provider: CCHProvider) {

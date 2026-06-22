@@ -263,6 +263,7 @@ final class MonitorState: ObservableObject {
     private var providerMiniProbeTimer: AnyCancellable?
     private var upstreamRateAutoSyncTimer: AnyCancellable?
     private var upstreamBalanceRefreshTimer: AnyCancellable?
+    private var upstreamRateSnapshotRefreshSignature = ""
     private var workspaceWakeObservers: [NSObjectProtocol] = []
     private var distributedWakeObservers: [NSObjectProtocol] = []
     private var refreshTask: Task<Void, Never>?
@@ -426,6 +427,24 @@ final class MonitorState: ObservableObject {
 
     var upstreamRatePendingSyncCount: Int {
         upstreamRateSites.reduce(0) { $0 + $1.pendingSyncCount }
+    }
+
+    func upstreamRateSnapshotsNeedRefresh() -> Bool {
+        shouldRefreshUpstreamRateSnapshots(
+            providers: providers.map(upstreamProviderInput),
+            snapshots: upstreamRateSnapshots
+        )
+    }
+
+    func refreshUpstreamRatesIfSnapshotIsStale() async {
+        guard !isRefreshingUpstreamRates else { return }
+        let inputs = providers.map(upstreamProviderInput)
+        let signature = upstreamRateProviderSnapshotSignature(providers: inputs)
+        guard signature != upstreamRateSnapshotRefreshSignature else { return }
+        guard shouldRefreshUpstreamRateSnapshots(providers: inputs, snapshots: upstreamRateSnapshots) else { return }
+
+        upstreamRateSnapshotRefreshSignature = signature
+        await refreshUpstreamRates(silent: true)
     }
 
     var providerMiniProbeSelectedCount: Int {
@@ -1241,18 +1260,21 @@ final class MonitorState: ObservableObject {
     }
 
     func toggleUpstreamRateSyncSelection(_ row: UpstreamRateProviderRow) async {
-        guard row.matchStatus == .matched else { return }
+        guard row.isSelectableForSync else { return }
         if upstreamRateSelectedProviderIds.contains(row.providerId) {
             upstreamRateSelectedProviderIds.remove(row.providerId)
-        } else {
-            upstreamRateSelectedProviderIds.insert(row.providerId)
             saveUpstreamRateSelectedProviderIds()
-            if row.hasRateChange {
-                await syncUpstreamRate(row, showNoopMessage: false)
-            }
             return
         }
+
+        upstreamRateSelectedProviderIds.insert(row.providerId)
         saveUpstreamRateSelectedProviderIds()
+
+        if row.shouldRefreshSnapshotOnSyncSelection {
+            await refreshUpstreamRates(silent: true)
+        } else if row.hasRateChange {
+            await syncUpstreamRate(row, showNoopMessage: false)
+        }
     }
 
     @discardableResult
@@ -1370,6 +1392,13 @@ final class MonitorState: ObservableObject {
                             credential: outcome.credential,
                             errorMessage: nil
                         )
+                    } catch let error as UpstreamRateServiceError where error.isAuthenticationExpired {
+                        return UpstreamRateHostRefreshResult(
+                            host: credential.host,
+                            snapshot: UpstreamRateSnapshot(host: credential.host, sourceType: credential.sourceType, status: .authExpired),
+                            credential: nil,
+                            errorMessage: error.localizedDescription
+                        )
                     } catch {
                         return UpstreamRateHostRefreshResult(
                             host: credential.host,
@@ -1393,6 +1422,8 @@ final class MonitorState: ObservableObject {
         for result in results {
             if let snapshot = result.snapshot, snapshot.balance != nil {
                 balanceSnapshots.append(snapshot)
+            } else if let snapshot = result.snapshot, snapshot.status == .authExpired {
+                balanceSnapshots.append(snapshot)
             }
             if let credential = result.credential {
                 nextCredentials.removeAll { $0.host == credential.host }
@@ -1410,9 +1441,14 @@ final class MonitorState: ObservableObject {
             flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
         }
         if !balanceSnapshots.isEmpty {
+            let authExpiredSnapshots = balanceSnapshots.filter { $0.status == .authExpired }
+            upstreamRateSnapshots = UpstreamRateSnapshot.mergeLatest(
+                cached: upstreamRateSnapshots,
+                refreshed: authExpiredSnapshots
+            )
             upstreamRateSnapshots = UpstreamRateSnapshot.mergeBalances(
                 cached: upstreamRateSnapshots,
-                balances: balanceSnapshots
+                balances: balanceSnapshots.filter { $0.balance != nil }
             )
             saveUpstreamRateSnapshots()
         }
@@ -1436,6 +1472,13 @@ final class MonitorState: ObservableObject {
                 let targets = await upstreamRateTargets(for: values, config: config, api: api)
                 let outcome = try await upstreamRateService.fetchSnapshot(credential: credential, targets: targets)
                 return UpstreamRateHostRefreshResult(host: host, snapshot: outcome.snapshot, credential: outcome.credential, errorMessage: nil)
+            } catch let error as UpstreamRateServiceError where error.isAuthenticationExpired {
+                return UpstreamRateHostRefreshResult(
+                    host: host,
+                    snapshot: UpstreamRateSnapshot(host: host, sourceType: credential.sourceType, status: .authExpired),
+                    credential: nil,
+                    errorMessage: error.localizedDescription
+                )
             } catch {
                 return UpstreamRateHostRefreshResult(
                     host: host,
@@ -2007,6 +2050,9 @@ final class MonitorState: ObservableObject {
             selectedProviderGroups = selectedProviderGroups.intersection(Set(allGroups))
             rebuildProviderFilterSnapshot(groups: allGroups)
             updateStatusBarSnapshot()
+            if selectedTab == .upstreamRates {
+                Task { await refreshUpstreamRatesIfSnapshotIsStale() }
+            }
             return nil
         } catch {
             return "渠道: \(error.localizedDescription)"
