@@ -1953,11 +1953,13 @@ private struct UpstreamRateProviderSyncRow: View {
     @Environment(\.cchTheme) private var theme
     @State private var modelTestInput = ""
     @State private var multiplierInput = ""
+    @State private var miniProbeModelInput = ""
     @State private var renderedEditor: ProviderEditor?
     @State private var editorRevealHeight: CGFloat = 0
 
     private enum ProviderEditor: Equatable {
         case multiplier
+        case miniProbe
         case modelTest
     }
 
@@ -1971,6 +1973,10 @@ private struct UpstreamRateProviderSyncRow: View {
 
     private var provider: CCHProvider? {
         state.provider(forUpstreamRateRow: row)
+    }
+
+    private var displayGroupTitles: [String] {
+        provider.map { state.displayGroupTitles(for: $0) } ?? []
     }
 
     private var rateDirection: RateChangeDirection {
@@ -1989,6 +1995,10 @@ private struct UpstreamRateProviderSyncRow: View {
                         Text(row.providerName)
                             .font(.system(size: 11.5, weight: .semibold))
                             .lineLimit(1)
+                        ForEach(displayGroupTitles.prefix(2), id: \.self) { group in
+                            ProviderTag(group, color: providerGroupColor(group, theme: theme))
+                                .transition(.scale(scale: 0.86).combined(with: .opacity))
+                        }
                         UpstreamHostBadge(host: row.host, isInteractive: true) {
                             openUpstreamHost(row.host)
                         }
@@ -2030,6 +2040,26 @@ private struct UpstreamRateProviderSyncRow: View {
                                 .font(.caption2)
                                 .foregroundStyle(theme.textSecondary)
                                 .lineLimit(1)
+                        }
+                        if let provider {
+                            ProviderMiniProbeControl(
+                                featureEnabled: state.providerMiniProbeEnabled,
+                                isEnabled: state.isProviderMiniProbeEnabled(provider),
+                                isRunning: state.isProviderMiniProbeRunning(provider),
+                                samples: state.providerMiniProbeHistory(for: provider),
+                                averageTTFB: state.providerMiniProbeAverageTTFB(for: provider),
+                                resolvedModel: state.resolvedProviderMiniProbeModelTitle(for: provider),
+                                toggle: {
+                                    state.setProviderMiniProbe(
+                                        provider,
+                                        enabled: !state.isProviderMiniProbeEnabled(provider)
+                                    )
+                                },
+                                edit: {
+                                    miniProbeModelInput = state.providerMiniProbeModel(for: provider)
+                                    toggleEditor(.miniProbe, provider: provider)
+                                }
+                            )
                         }
                     }
                 }
@@ -2083,6 +2113,23 @@ private struct UpstreamRateProviderSyncRow: View {
                                 closeEditor()
                                 Task { await state.updateProviderMultiplier(provider, multiplier: value) }
                             }
+                        case .miniProbe:
+                            ProviderMiniProbePopover(
+                                provider: provider,
+                                model: $miniProbeModelInput,
+                                resolvedModel: state.resolvedProviderMiniProbeModelTitle(for: provider),
+                                featureEnabled: state.providerMiniProbeEnabled,
+                                isEnabled: state.isProviderMiniProbeEnabled(provider),
+                                isRunning: state.isProviderMiniProbeRunning(provider),
+                                samples: state.providerMiniProbeHistory(for: provider),
+                                averageTTFB: state.providerMiniProbeAverageTTFB(for: provider),
+                                setEnabled: { value in
+                                    state.setProviderMiniProbe(provider, enabled: value)
+                                }
+                            ) { value in
+                                closeEditor()
+                                state.setProviderMiniProbeModel(value, for: provider)
+                            }
                         case .modelTest:
                             ProviderModelTestPopover(
                                 provider: provider,
@@ -2118,6 +2165,11 @@ private struct UpstreamRateProviderSyncRow: View {
             guard renderedEditor == .modelTest, let provider else { return }
             editorRevealHeight = editorHeight(.modelTest, provider: provider)
         }
+        .onChange(of: provider.map { state.providerMiniProbeModel(for: $0) } ?? "") { _, model in
+            guard renderedEditor == .miniProbe else { return }
+            miniProbeModelInput = model
+        }
+        .animation(.spring(response: 0.22, dampingFraction: 0.84), value: displayGroupTitles)
         .onChange(of: row.isSelectedForSync) { _, selected in
             if selected {
                 if renderedEditor == .multiplier {
@@ -2178,6 +2230,8 @@ private struct UpstreamRateProviderSyncRow: View {
         switch editor {
         case .multiplier:
             return 70
+        case .miniProbe:
+            return 128
         case .modelTest:
             return state.customTestModels(for: provider).isEmpty ? 76 : 112
         }
