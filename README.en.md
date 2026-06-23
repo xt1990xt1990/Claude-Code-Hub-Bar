@@ -6,8 +6,8 @@ It surfaces today’s usage, running requests, logs, leaderboards, and provider 
 
 ## Download
 
-- Latest version: [v1.2.2.1](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/tag/v1.2.2.1)
-- Apple Silicon: [CCHBar-v1.2.2.1-arm64.zip](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/download/v1.2.2.1/CCHBar-v1.2.2.1-arm64.zip)
+- Latest version: [v1.2.3](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/tag/v1.2.3)
+- Apple Silicon: [CCHBar-v1.2.3-arm64.zip](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/download/v1.2.3/CCHBar-v1.2.3-arm64.zip)
 
 ## Usage
 
@@ -36,6 +36,7 @@ Private configuration should be entered locally and should not be committed to t
 - Provider group filters, provider group assignment, enable/disable, probe, and circuit reset controls.
 - Provider model tests show first-byte timing and total latency when CCH returns timing data.
 - Mini Probe monitoring for providers, with per-provider enablement, probe model overrides, compact interval controls, active-hour scheduling, and average first-byte statistics.
+- Status bar polling now has separate idle/active refresh intervals and an optional reduced-motion mode.
 - Upstream rate panel for Sub2API and new-api providers.
 - Groups upstream providers by official website and matches local providers by key suffix.
 - Upstream rate rows show provider groups and reuse the provider Mini Probe controls, status, and history.

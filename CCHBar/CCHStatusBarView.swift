@@ -33,6 +33,22 @@ final class CCHStatusBarView: NSView {
             needsDisplay = true
         }
     }
+    var reducedMotion = false {
+        didSet {
+            guard reducedMotion != oldValue else { return }
+            if reducedMotion {
+                stopRunningAnimation()
+                primaryTextLayer.removeAnimation(forKey: "marquee")
+                cacheIndicatorLayer.removeAnimation(forKey: "breath")
+            } else {
+                lastMarqueeConfiguration = nil
+                lastCacheIndicatorConfiguration = nil
+            }
+            updateLabels()
+            needsLayout = true
+            needsDisplay = true
+        }
+    }
     private var marqueeText = ""
     private var shouldMarqueePrimaryText = false
     private var wasRunning = false
@@ -297,7 +313,7 @@ final class CCHStatusBarView: NSView {
 
     private func layoutPrimaryText(textWidth: CGFloat) {
         let primarySize = measuredPrimaryTextWidth()
-        let shouldMarquee = shouldMarqueePrimaryText && primarySize > textWidth + 2
+        let shouldMarquee = !reducedMotion && shouldMarqueePrimaryText && primarySize > textWidth + 2
         guard shouldMarquee else {
             primaryTextLayer.removeAnimation(forKey: "marquee")
             lastMarqueeConfiguration = nil
@@ -371,7 +387,7 @@ final class CCHStatusBarView: NSView {
             CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
             cacheIndicatorLayer.backgroundColor = target.cgColor
             CATransaction.commit()
-            if isRunning {
+            if isRunning && !reducedMotion {
                 applyBreathingAnimation(period: 2.8, minOpacity: 0.45, maxOpacity: 1.0)
             } else {
                 cacheIndicatorLayer.removeAnimation(forKey: "breath")
@@ -385,7 +401,12 @@ final class CCHStatusBarView: NSView {
             CATransaction.setDisableActions(true)
             cacheIndicatorLayer.backgroundColor = NSColor.systemRed.withAlphaComponent(0.95).cgColor
             CATransaction.commit()
-            applyBreathingAnimation(period: 0.55, minOpacity: 0.55, maxOpacity: 1.0)
+            if reducedMotion {
+                cacheIndicatorLayer.removeAnimation(forKey: "breath")
+                cacheIndicatorLayer.opacity = 1
+            } else {
+                applyBreathingAnimation(period: 0.55, minOpacity: 0.55, maxOpacity: 1.0)
+            }
         }
     }
 
@@ -437,6 +458,10 @@ final class CCHStatusBarView: NSView {
     }
 
     private func startRunningAnimation(color: NSColor = .systemBlue) {
+        guard !reducedMotion else {
+            stopRunningAnimation()
+            return
+        }
         updateRunningRingPath()
         runningRingLayer.strokeColor = color.withAlphaComponent(0.92).cgColor
         if runningRingLayer.animation(forKey: "pulse") != nil {

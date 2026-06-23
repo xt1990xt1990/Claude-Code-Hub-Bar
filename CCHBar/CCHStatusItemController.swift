@@ -98,6 +98,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         let semanticSnapshotChanged = lastAppliedSnapshot != snapshot
         lastAppliedSnapshot = snapshot
         statusView.showsDetails = snapshot.showsDetails
+        statusView.reducedMotion = snapshot.reducedMotion
         let payload: CCHStatusBarView.Payload
         let tooltip: String
         if let item = snapshot.runningItems.first {

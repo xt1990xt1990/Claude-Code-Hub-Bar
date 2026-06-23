@@ -1,8 +1,6 @@
 import Foundation
 
 struct CCHStatusBarPollingPolicy {
-    let idleInterval: TimeInterval = 3
-    let runningInterval: TimeInterval = 1
     let trailingFastWindow: TimeInterval = 5
     let overviewInterval: TimeInterval = 3
 
@@ -10,6 +8,8 @@ struct CCHStatusBarPollingPolicy {
         lastRefresh: Date?,
         hasRunningItems: Bool,
         lastRunningSeenAt: Date?,
+        idleInterval: TimeInterval = 3,
+        activeInterval: TimeInterval = 1,
         now: Date = Date()
     ) -> Bool {
         guard let lastRefresh else { return true }
@@ -17,7 +17,7 @@ struct CCHStatusBarPollingPolicy {
             hasRunningItems: hasRunningItems,
             lastRunningSeenAt: lastRunningSeenAt,
             now: now
-        ) ? runningInterval : idleInterval
+        ) ? activeInterval : idleInterval
         return now.timeIntervalSince(lastRefresh) >= interval
     }
 

@@ -52,6 +52,7 @@ struct CCHStatusRunningItem: Identifiable, Equatable {
 
 struct CCHStatusBarSnapshot: Equatable {
     let showsDetails: Bool
+    let reducedMotion: Bool
     let idlePrimary: String
     let idleDetail: String
     let idleCacheState: CCHCacheVisibilityState
@@ -61,6 +62,7 @@ struct CCHStatusBarSnapshot: Equatable {
 
     static func == (lhs: CCHStatusBarSnapshot, rhs: CCHStatusBarSnapshot) -> Bool {
         lhs.showsDetails == rhs.showsDetails
+            && lhs.reducedMotion == rhs.reducedMotion
             && lhs.idlePrimary == rhs.idlePrimary
             && lhs.idleDetail == rhs.idleDetail
             && lhs.idleCacheState == rhs.idleCacheState

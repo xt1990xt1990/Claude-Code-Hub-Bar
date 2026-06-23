@@ -125,6 +125,48 @@ struct SettingsView: View {
                 SettingsInputField(text: $state.activeSessionUserFilter, placeholder: "用户名称，可留空")
             }
 
+            SettingsControlRow(title: "状态栏轮询", subtitle: "空闲用于发现新任务，活跃用于任务进行中的状态更新。") {
+                HStack(spacing: 8) {
+                    Text("空闲")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    Picker("", selection: Binding(
+                        get: {
+                            CCHActiveSessionRefreshInterval.sanitizedIdleSeconds(state.activeSessionIdleRefreshIntervalSeconds)
+                        },
+                        set: { seconds in
+                            state.setActiveSessionIdleRefreshIntervalSeconds(seconds)
+                        }
+                    )) {
+                        ForEach(CCHActiveSessionRefreshInterval.allowedIdleSeconds, id: \.self) { seconds in
+                            Text("\(seconds)s").tag(seconds)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 132)
+
+                    Text("活跃")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    Picker("", selection: Binding(
+                        get: {
+                            CCHActiveSessionRefreshInterval.sanitizedActiveSeconds(state.activeSessionActiveRefreshIntervalSeconds)
+                        },
+                        set: { seconds in
+                            state.setActiveSessionActiveRefreshIntervalSeconds(seconds)
+                        }
+                    )) {
+                        ForEach(CCHActiveSessionRefreshInterval.allowedActiveSeconds, id: \.self) { seconds in
+                            Text("\(seconds)s").tag(seconds)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 90)
+                }
+            }
+
             SettingsControlRow(title: "后台刷新", subtitle: "抽屉打开时当前页会更频繁同步。") {
                 HStack(spacing: 10) {
                     Slider(value: $state.refreshInterval, in: 8...120, step: 1)
@@ -140,11 +182,16 @@ struct SettingsView: View {
             }
 
             SettingsControlRow(title: "顶栏信息", subtitle: "刘海屏可一键收起秒数和缓存灯，状态栏会自动缩短。") {
-                Toggle("显示详情", isOn: $state.showStatusBarDetails)
-                    .toggleStyle(.switch)
-                    .font(.system(size: 12, weight: .semibold))
+                SettingsTrailingToggle(label: "显示详情", isOn: $state.showStatusBarDetails)
             }
             .onChange(of: state.showStatusBarDetails) { _, _ in
+                state.refreshStatusBarSnapshotForPreferencesChange()
+            }
+
+            SettingsControlRow(title: "低功耗动效", subtitle: "关闭状态栏运行光环、滚动文字和缓存呼吸灯；默认保留完整特效。") {
+                SettingsTrailingToggle(label: "低功耗", isOn: $state.statusBarReducedMotion)
+            }
+            .onChange(of: state.statusBarReducedMotion) { _, _ in
                 state.refreshStatusBarSnapshotForPreferencesChange()
             }
 
@@ -727,6 +774,27 @@ private struct SettingsControlRow<Content: View>: View {
             content()
                 .frame(maxWidth: .infinity)
         }
+    }
+}
+
+private struct SettingsTrailingToggle: View {
+    let label: String
+    @Binding var isOn: Bool
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Spacer(minLength: 0)
+            Text(label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(theme.textPrimary)
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .frame(width: 220, alignment: .trailing)
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 

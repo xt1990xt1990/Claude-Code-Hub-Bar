@@ -165,7 +165,10 @@ final class MonitorState: ObservableObject {
     @AppStorage("cch_env_path") var cchEnvPath = ""
     @AppStorage("refreshInterval") var refreshInterval: Double = 15
     @AppStorage("active_session_user_filter") var activeSessionUserFilter = ""
+    @AppStorage("active_session_idle_refresh_interval_seconds") var activeSessionIdleRefreshIntervalSeconds = CCHActiveSessionRefreshInterval.defaultIdleSeconds
+    @AppStorage("active_session_active_refresh_interval_seconds") var activeSessionActiveRefreshIntervalSeconds = CCHActiveSessionRefreshInterval.defaultActiveSeconds
     @AppStorage("show_status_bar_details") var showStatusBarDetails = true
+    @AppStorage("status_bar_reduced_motion") var statusBarReducedMotion = false
     @AppStorage("check_for_updates") var checkForUpdatesEnabled: Bool = true
     @AppStorage("provider_mini_probe_enabled") var providerMiniProbeEnabled = false
     @AppStorage("provider_mini_probe_interval_minutes") var providerMiniProbeIntervalMinutes = 30.0
@@ -246,6 +249,7 @@ final class MonitorState: ObservableObject {
     @Published private(set) var providerFilterSnapshot = CCHProviderFilterSnapshot()
     @Published private(set) var statusBarSnapshot = CCHStatusBarSnapshot(
         showsDetails: true,
+        reducedMotion: false,
         idlePrimary: "TTL $0.00",
         idleDetail: "0 req",
         idleCacheState: .normal,
@@ -668,6 +672,14 @@ final class MonitorState: ObservableObject {
                 guard let self else { return }
                 Task { await self.refreshStatusBarDataOnly() }
             }
+    }
+
+    func setActiveSessionIdleRefreshIntervalSeconds(_ seconds: Int) {
+        activeSessionIdleRefreshIntervalSeconds = CCHActiveSessionRefreshInterval.sanitizedIdleSeconds(seconds)
+    }
+
+    func setActiveSessionActiveRefreshIntervalSeconds(_ seconds: Int) {
+        activeSessionActiveRefreshIntervalSeconds = CCHActiveSessionRefreshInterval.sanitizedActiveSeconds(seconds)
     }
 
     func setPanelVisible(_ visible: Bool) {
@@ -1921,6 +1933,8 @@ final class MonitorState: ObservableObject {
             lastRefresh: lastStatusBarDataRefresh,
             hasRunningItems: !cachedMenuBarRunningLogs.isEmpty,
             lastRunningSeenAt: lastStatusBarRunningSeenAt,
+            idleInterval: CCHActiveSessionRefreshInterval.idleTimeInterval(seconds: activeSessionIdleRefreshIntervalSeconds),
+            activeInterval: CCHActiveSessionRefreshInterval.activeTimeInterval(seconds: activeSessionActiveRefreshIntervalSeconds),
             now: now
         )
     }
@@ -2282,6 +2296,7 @@ final class MonitorState: ObservableObject {
 
         let next = CCHStatusBarSnapshot(
             showsDetails: showStatusBarDetails,
+            reducedMotion: statusBarReducedMotion,
             idlePrimary: menuBarText,
             idleDetail: menuBarIdleDetail,
             idleCacheState: statusBarCacheState,

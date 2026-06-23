@@ -6,8 +6,8 @@
 
 ## 下载
 
-- 最新版本：[v1.2.2.1](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/tag/v1.2.2.1)
-- Apple Silicon：[CCHBar-v1.2.2.1-arm64.zip](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/download/v1.2.2.1/CCHBar-v1.2.2.1-arm64.zip)
+- 最新版本：[v1.2.3](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/tag/v1.2.3)
+- Apple Silicon：[CCHBar-v1.2.3-arm64.zip](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/download/v1.2.3/CCHBar-v1.2.3-arm64.zip)
 
 ## 使用
 
@@ -35,6 +35,7 @@
 - 渠道页支持模型测试首字节和总延迟展示,便于区分连接等待和整体响应耗时。
 - 支持 Mini 探针系统,可按渠道单独启用后台模型测试探针,自定义探针模型、频率、运行时段和平均首字节统计。
 - Mini 探针设置页支持更紧凑的时段、频率和平均首字节控制。
+- 状态栏轮询支持空闲/活跃两组刷新频率,并提供可选低功耗动效模式。
 - 上游倍率页支持按官网聚合 Sub2API / new-api 供应商,通过 key 后四位匹配本地渠道。
 - 上游倍率页显示渠道分组,并复用渠道页的 Mini 探针开关、状态和历史数据。
 - 支持从本机 Chrome 获取上游登录态,登录完成后自动保存,用于刷新倍率和余额。
