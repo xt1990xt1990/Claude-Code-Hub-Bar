@@ -104,6 +104,7 @@ private enum CCHRetentionLimits {
     static let recentLogHistory = 240
     static let knownLogIds = 1_200
     static let parsedDateCache = 1_500
+    static let maxLoadedLogs = 500
 }
 
 private enum CCHProviderModelTestLimits {
@@ -2009,6 +2010,9 @@ final class MonitorState: ObservableObject {
             } else {
                 let existingIds = Set(logs.map(\.id))
                 logs.append(contentsOf: page.logs.filter { !existingIds.contains($0.id) })
+                if logs.count > CCHRetentionLimits.maxLoadedLogs {
+                    logs = Array(logs.suffix(CCHRetentionLimits.maxLoadedLogs))
+                }
             }
             if logModelFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                logStatusFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,

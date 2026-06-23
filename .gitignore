@@ -18,6 +18,7 @@ xcuserdata/
 *.ipa
 *.app.dSYM.zip
 release/
+package/*.zip
 
 # Secrets / credentials
 .env
