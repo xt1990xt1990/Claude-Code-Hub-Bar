@@ -69,21 +69,21 @@ private struct UpstreamRateStaleSnapshotTests {
             "adding a provider should change the upstream rate provider signature"
         )
         expectTrue(
-            normalizedUpstreamHost("https://www.supertoken.lol/") == "www.supertoken.lol",
+            normalizedUpstreamHost("https://www.example-upstream.test/") == "www.example-upstream.test",
             "upstream rate host normalization should preserve www-only upstream domains"
         )
         expectTrue(
             UpstreamRateMatcher.providerHost(
                 UpstreamRateProviderInput(
                     id: 10,
-                    name: "SuperToken",
-                    apiURL: "https://api.supertoken.lol/v1",
-                    websiteURL: "https://www.supertoken.lol/",
+                    name: "Example Upstream",
+                    apiURL: "https://api.example-upstream.test/v1",
+                    websiteURL: "https://www.example-upstream.test/",
                     groupTag: "default",
                     costMultiplier: 1,
                     isEnabled: true
                 )
-            ) == "www.supertoken.lol",
+            ) == "www.example-upstream.test",
             "upstream rate provider grouping should keep the configured website host"
         )
 
