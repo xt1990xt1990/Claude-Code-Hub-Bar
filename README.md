@@ -4,11 +4,6 @@
 
 它会把今日用量、运行中的请求、日志、排行和渠道健康状态放进菜单栏，方便在本地快速查看当前状态。
 
-## 下载
-
-- 最新版本：[v1.2.3](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/tag/v1.2.3)
-- Apple Silicon：[CCHBar-v1.2.3-arm64.zip](https://github.com/xt1990xt1990/Claude-Code-Hub-Bar/releases/download/v1.2.3/CCHBar-v1.2.3-arm64.zip)
-
 ## 使用
 
 1. 打开应用。

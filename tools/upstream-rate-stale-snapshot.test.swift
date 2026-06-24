@@ -68,6 +68,24 @@ private struct UpstreamRateStaleSnapshotTests {
                 != upstreamRateProviderSnapshotSignature(providers: Array(providers.prefix(3))),
             "adding a provider should change the upstream rate provider signature"
         )
+        expectTrue(
+            normalizedUpstreamHost("https://www.supertoken.lol/") == "www.supertoken.lol",
+            "upstream rate host normalization should preserve www-only upstream domains"
+        )
+        expectTrue(
+            UpstreamRateMatcher.providerHost(
+                UpstreamRateProviderInput(
+                    id: 10,
+                    name: "SuperToken",
+                    apiURL: "https://api.supertoken.lol/v1",
+                    websiteURL: "https://www.supertoken.lol/",
+                    groupTag: "default",
+                    costMultiplier: 1,
+                    isEnabled: true
+                )
+            ) == "www.supertoken.lol",
+            "upstream rate provider grouping should keep the configured website host"
+        )
 
         let pendingSelectionSite = UpstreamRateMatcher.buildSites(
             providers: providers,

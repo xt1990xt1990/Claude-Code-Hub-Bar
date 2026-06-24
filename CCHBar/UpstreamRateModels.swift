@@ -367,9 +367,6 @@ func normalizedUpstreamHost(_ rawValue: String) -> String? {
         return nil
     }
 
-    if host.hasPrefix("www.") {
-        return String(host.dropFirst(4))
-    }
     return host
 }
 
