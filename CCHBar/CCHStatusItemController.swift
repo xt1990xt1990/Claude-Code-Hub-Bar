@@ -8,12 +8,14 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private enum PopoverFade {
         static let fadeInDuration: TimeInterval = 0.07
         static let fadeOutDuration: TimeInterval = 0.20
+        static let releaseDelay: TimeInterval = 10
     }
 
     private let state = MonitorState()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let statusView = CCHStatusBarView(frame: NSRect(x: 0, y: 0, width: CCHStatusBarView.fixedWidth(showDetails: true), height: 22))
     private let popover = NSPopover()
+    private var popoverContentController: NSViewController?
     private var stateCancellable: AnyCancellable?
     private var rotationTimer: AnyCancellable?
     private var outsideClickMonitor: Any?
@@ -22,6 +24,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private var lastTooltip: String?
     private var lastLength: CGFloat = 0
     private var isClosingPopover = false
+    private var releasePopoverContentTask: Task<Void, Never>?
 
     override init() {
         super.init()
@@ -61,7 +64,12 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private func ensurePopoverContentController() -> NSViewController {
-        if let controller = popover.contentViewController {
+        releasePopoverContentTask?.cancel()
+        releasePopoverContentTask = nil
+        if let controller = popoverContentController {
+            if popover.contentViewController !== controller {
+                popover.contentViewController = controller
+            }
             return controller
         }
 
@@ -69,6 +77,7 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         host.view.wantsLayer = true
         host.view.layer?.backgroundColor = NSColor.clear.cgColor
         host.view.layer?.masksToBounds = false
+        popoverContentController = host
         popover.contentViewController = host
         return host
     }
@@ -165,9 +174,9 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
     private func showPopoverLightly(relativeTo rect: NSRect, of button: NSView) {
         isClosingPopover = false
         let contentController = ensurePopoverContentController()
-        state.setPanelVisible(true)
         contentController.view.alphaValue = 0
         popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
+        state.setPanelVisible(true)
 
         guard let window = contentController.view.window else {
             contentController.view.alphaValue = 1
@@ -247,6 +256,22 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             popover.contentViewController?.view.window?.alphaValue = 1
             popover.contentViewController?.view.alphaValue = 1
         }
-        popover.contentViewController = nil
+        if let controller = popoverContentController {
+            popover.contentViewController = controller
+        }
+        schedulePopoverContentRelease()
+    }
+
+    private func schedulePopoverContentRelease() {
+        releasePopoverContentTask?.cancel()
+        releasePopoverContentTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(PopoverFade.releaseDelay * 1_000_000_000))
+            await MainActor.run {
+                guard let self, !self.popover.isShown else { return }
+                self.popover.contentViewController = nil
+                self.popoverContentController = nil
+                self.releasePopoverContentTask = nil
+            }
+        }
     }
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-struct CCHProviderModelTestResult {
+struct CCHProviderModelTestResult: Equatable {
     let success: Bool
     let status: String
     let message: String

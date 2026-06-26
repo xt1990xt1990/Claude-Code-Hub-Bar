@@ -206,7 +206,7 @@ final class MonitorState: ObservableObject {
     @Published var isLoadingMoreLogs = false
     @Published var providers: [CCHProvider] = []
     @Published private(set) var assignableProviderGroups: [CCHProviderGroup] = []
-    @Published private var providerGroupAssignmentOverrides: [Int: Set<String>] = [:]
+    @Published private(set) var providerGroupAssignmentOverrides: [Int: Set<String>] = [:]
     @Published private(set) var highlightedLogIds: Set<Int> = []
     @Published private(set) var modelTestingProviderIds: Set<Int> = []
     @Published private(set) var providerModelTestResults: [Int: CCHProviderModelTestResult] = [:]
@@ -247,6 +247,8 @@ final class MonitorState: ObservableObject {
     @Published private(set) var isCheckingForUpdate = false
     @Published private(set) var leaderboardSummary = CCHLeaderboardSummary()
     @Published private(set) var providerFilterSnapshot = CCHProviderFilterSnapshot()
+    private var providerRowViewModels: [Int: ProviderRowViewModel] = [:]
+    private var providerSortState = CCHProviderSortState()
     @Published private(set) var statusBarSnapshot = CCHStatusBarSnapshot(
         showsDetails: true,
         reducedMotion: false,
@@ -590,7 +592,9 @@ final class MonitorState: ObservableObject {
     func toggleProviderGroup(_ group: String) {
         guard group != "全部" else {
             selectedProviderGroups = []
-            rebuildProviderFilterSnapshot()
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+                rebuildProviderFilterSnapshot(sortMode: .commitSorted)
+            }
             return
         }
 
@@ -601,7 +605,9 @@ final class MonitorState: ObservableObject {
             next.insert(group)
         }
         selectedProviderGroups = next
-        rebuildProviderFilterSnapshot()
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+            rebuildProviderFilterSnapshot(sortMode: .commitSorted)
+        }
     }
 
     func assignedGroupNames(for provider: CCHProvider) -> Set<String> {
@@ -683,10 +689,11 @@ final class MonitorState: ObservableObject {
     }
 
     func setPanelVisible(_ visible: Bool) {
+        guard panelVisible != visible else { return }
         panelVisible = visible
         if visible {
             startFocusedViewTimer()
-            Task { await refreshFocusedView() }
+            Task { await refreshFocusedView(commitProviderSort: selectedTab == .providers) }
         } else {
             focusedViewTimer?.cancel()
             focusedViewTimer = nil
@@ -707,7 +714,7 @@ final class MonitorState: ObservableObject {
             }
     }
 
-    func refresh() async {
+    func refresh(commitProviderSort: Bool = false) async {
         if isLoading { return }
         isLoading = true
         errorMessage = nil
@@ -716,7 +723,9 @@ final class MonitorState: ObservableObject {
         async let sessionsResult = runRefresh(.activeSessions) { await self.loadActiveSessions() }
         async let leaderboardResult = runRefresh(.leaderboard) { await self.loadLeaderboard() }
         async let logsResult = runRefresh(.logs(includeStats: true)) { await self.loadLogs(includeStats: true) }
-        async let providersResult = runRefresh(.providers(usage: true)) { await self.loadProviders(includeUsage: true) }
+        async let providersResult = runRefresh(.providers(usage: true)) {
+            await self.loadProviders(includeUsage: true, sortMode: commitProviderSort ? .commitSorted : .preserveCurrentOrder)
+        }
 
         let errors = await [
             overviewResult,
@@ -771,7 +780,7 @@ final class MonitorState: ObservableObject {
         isLoading = false
     }
 
-    func refreshFocusedView() async {
+    func refreshFocusedView(commitProviderSort: Bool = false) async {
         if isLoadingFocusedView { return }
         isLoadingFocusedView = true
         defer { isLoadingFocusedView = false }
@@ -789,7 +798,9 @@ final class MonitorState: ObservableObject {
         case .leaderboard:
             error = await runRefresh(.leaderboard) { await self.loadLeaderboard() }
         case .providers:
-            error = await runRefresh(.providers(usage: true)) { await self.loadProviders(includeUsage: true) }
+            error = await runRefresh(.providers(usage: true)) {
+                await self.loadProviders(includeUsage: true, sortMode: commitProviderSort ? .commitSorted : .preserveCurrentOrder)
+            }
         case .upstreamRates:
             error = await runRefresh(.providers(usage: true)) { await self.loadProviders(includeUsage: true) }
         }
@@ -956,14 +967,14 @@ final class MonitorState: ObservableObject {
 
     func providerMiniProbeAverageTTFB(for provider: CCHProvider) -> Double? {
         guard providerMiniProbeAverageTTFBEnabled else { return nil }
-        let samples = Array(providerMiniProbeHistory(for: provider)
+        let samples = providerMiniProbeHistory(for: provider)
             .sorted { $0.createdAt < $1.createdAt }
-            .suffix(providerMiniProbeAverageSampleCountValue))
-        let values = samples.compactMap { sample in
-            sample.status == .success ? sample.ttfbMs : nil
-        }
-        guard !values.isEmpty else { return nil }
-        return values.reduce(0, +) / Double(values.count)
+        return providerMiniProbeAverageSuccessTTFB(
+            samples,
+            maxCount: providerMiniProbeAverageSampleCountValue,
+            isSuccess: { $0.status == .success },
+            ttfbMs: { $0.ttfbMs }
+        )
     }
 
     func providerMiniProbeModel(for provider: CCHProvider) -> String {
@@ -1004,6 +1015,7 @@ final class MonitorState: ObservableObject {
             flashActionMessage("已关闭探针 \(provider.name)")
         }
         saveProviderMiniProbeSelectedProviderIds()
+        rebuildProviderFilterSnapshot()
 
         guard enabled, providerMiniProbeEnabled else { return }
         startProviderMiniProbeTask(provider, silent: true, respectingInterval: false)
@@ -1261,6 +1273,10 @@ final class MonitorState: ObservableObject {
     }
 
     func isProviderMultiplierUpdating(_ provider: CCHProvider) -> Bool {
+        providerMultiplierUpdatingIds.contains(provider.id)
+    }
+
+    func isProviderDispatchSettingsUpdating(_ provider: CCHProvider) -> Bool {
         providerMultiplierUpdatingIds.contains(provider.id)
     }
 
@@ -1723,6 +1739,28 @@ final class MonitorState: ObservableObject {
         }
     }
 
+    func updateProviderDispatchSettings(_ provider: CCHProvider, settings: CCHProviderDispatchSettings) async {
+        if providerMultiplierUpdatingIds.contains(provider.id) {
+            return
+        }
+
+        actionMessageDismissTask?.cancel()
+        actionMessage = "更新调度 \(provider.name): 优先级 \(settings.priority) · 权重 \(settings.weight)..."
+        actionMessageIsWarning = false
+        providerMultiplierUpdatingIds.insert(provider.id)
+        defer {
+            providerMultiplierUpdatingIds.remove(provider.id)
+        }
+
+        do {
+            try await api.setProviderDispatchSettings(config: config, providerId: provider.id, settings: settings)
+            flashActionMessage("调度已更新 \(provider.name): 优先级 \(settings.priority) · 权重 \(settings.weight)")
+            _ = await loadProviders()
+        } catch {
+            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+        }
+    }
+
     func testProviderModel(_ provider: CCHProvider, model: String? = nil) async {
         let requestedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         await testProviderModels(provider, models: [requestedModel?.isEmpty == false ? requestedModel! : provider.testModel])
@@ -2049,7 +2087,10 @@ final class MonitorState: ObservableObject {
         }
     }
 
-    private func loadProviders(includeUsage: Bool = true) async -> String? {
+    private func loadProviders(
+        includeUsage: Bool = true,
+        sortMode: CCHProviderSortMode = .preserveCurrentOrder
+    ) async -> String? {
         do {
             providers = try await api.fetchProviders(config: config, includeUsage: includeUsage)
             if shouldRefreshProviderGroups() {
@@ -2066,7 +2107,7 @@ final class MonitorState: ObservableObject {
             rebuildProviderLookup()
             let allGroups = computedProviderGroups()
             selectedProviderGroups = selectedProviderGroups.intersection(Set(allGroups))
-            rebuildProviderFilterSnapshot(groups: allGroups)
+            rebuildProviderFilterSnapshot(groups: allGroups, sortMode: sortMode)
             updateStatusBarSnapshot()
             if selectedTab == .upstreamRates {
                 Task { await refreshUpstreamRatesIfSnapshotIsStale() }
@@ -2175,6 +2216,33 @@ final class MonitorState: ObservableObject {
         )
         pruneUpstreamRateSelections()
         pruneProviderMiniProbeData()
+        reconcileProviderRowViewModels()
+    }
+
+    private func reconcileProviderRowViewModels() {
+        let currentIds = Set(providers.map(\.id))
+        for staleId in providerRowViewModels.keys where !currentIds.contains(staleId) {
+            providerRowViewModels.removeValue(forKey: staleId)
+        }
+        for provider in providers where providerRowViewModels[provider.id] == nil {
+            providerRowViewModels[provider.id] = ProviderRowViewModel(provider: provider, state: self)
+        }
+    }
+
+    func providerRowViewModel(for provider: CCHProvider) -> ProviderRowViewModel {
+        if let existing = providerRowViewModels[provider.id] {
+            return existing
+        }
+        let model = ProviderRowViewModel(provider: provider, state: self)
+        providerRowViewModels[provider.id] = model
+        return model
+    }
+
+    func commitProviderSortIfNeeded() {
+        guard selectedTab == .providers, providerSortState.hasPendingSort else { return }
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+            rebuildProviderFilterSnapshot(sortMode: .commitSorted)
+        }
     }
 
     private func computedProviderGroups() -> [String] {
@@ -2229,7 +2297,10 @@ final class MonitorState: ObservableObject {
         providerGroupAssignmentOverrides = nextOverrides
     }
 
-    private func rebuildProviderFilterSnapshot(groups: [String]? = nil) {
+    private func rebuildProviderFilterSnapshot(
+        groups: [String]? = nil,
+        sortMode: CCHProviderSortMode = .preserveCurrentOrder
+    ) {
         let resolvedGroups = groups ?? computedProviderGroups()
         let filtered: [CCHProvider]
         if selectedProviderGroups.isEmpty {
@@ -2239,9 +2310,16 @@ final class MonitorState: ObservableObject {
                 !Set(displayGroupTitles(for: provider)).isDisjoint(with: selectedProviderGroups)
             }
         }
+        let orderedProviders = providerSortState.order(filtered, mode: sortMode) { provider in
+            CCHProviderSortDescriptor(
+                id: provider.id,
+                isEnabled: provider.isEnabled,
+                hasMiniProbe: providerMiniProbeSelectedProviderIds.contains(provider.id)
+            )
+        }
         providerFilterSnapshot = CCHProviderFilterSnapshot(
             groups: resolvedGroups,
-            providers: filtered,
+            providers: orderedProviders,
             enabledCount: filtered.filter(\.isEnabled).count,
             unhealthyCount: filtered.filter { $0.health.circuitState.lowercased() != "closed" || $0.health.failureCount > 0 }.count
         )
@@ -2271,62 +2349,31 @@ final class MonitorState: ObservableObject {
     }
 
     private func rebuildMenuBarRunningLogs() {
-        let ordered = recentLogs.sorted { lhs, rhs in
-            if lhs.id != rhs.id { return lhs.id > rhs.id }
-            if lhs.requestSequence != rhs.requestSequence {
-                return lhs.requestSequence > rhs.requestSequence
-            }
-            return (parsedCCHDate(lhs.createdAt) ?? .distantPast) > (parsedCCHDate(rhs.createdAt) ?? .distantPast)
-        }
-
-        var seenSessionIds = Set<String>()
-        cachedMenuBarRunningLogs = ordered.compactMap { log in
-            guard log.statusCode == nil else { return nil }
-            let key = log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId
-            guard seenSessionIds.insert(key).inserted else { return nil }
-            return log
-        }
+        cachedMenuBarRunningLogs = CCHMenuBarRunningLogBuilder.runningLogs(from: recentLogs)
         if !cachedMenuBarRunningLogs.isEmpty {
             lastStatusBarRunningSeenAt = Date()
         }
     }
 
     private func updateStatusBarSnapshot() {
-        let runningItems = statusBarRunningItems()
-
-        let next = CCHStatusBarSnapshot(
-            showsDetails: showStatusBarDetails,
-            reducedMotion: statusBarReducedMotion,
-            idlePrimary: menuBarText,
-            idleDetail: menuBarIdleDetail,
-            idleCacheState: statusBarCacheState,
-            runningItems: runningItems,
-            hasRecentLogs: !recentLogs.isEmpty,
-            generatedAt: Date()
+        let next = CCHStatusBarSnapshotBuilder.makeSnapshot(
+            CCHStatusBarSnapshotInput(
+                showsDetails: showStatusBarDetails,
+                reducedMotion: statusBarReducedMotion,
+                idlePrimary: menuBarText,
+                idleDetail: menuBarIdleDetail,
+                idleCacheState: statusBarCacheState,
+                recentLogs: recentLogs,
+                runningLogs: cachedMenuBarRunningLogs,
+                cacheStatusByLogId: cacheStatusByLogId,
+                cacheAlertLogIds: Set([menuBarCacheAlertLogId, simulatedCacheAlertLogId].compactMap { $0 }),
+                generatedAt: Date()
+            )
         )
 
         if statusBarSnapshot != next {
             statusBarSnapshot = next
         }
-    }
-
-    private func statusBarRunningItems() -> [CCHStatusRunningItem] {
-        cachedMenuBarRunningLogs.map(statusBarRunningItem)
-    }
-
-    private func statusBarRunningItem(from log: CCHLogEntry) -> CCHStatusRunningItem {
-        let model = firstNonEmpty(log.model, log.originalModel, "model")
-        return CCHStatusRunningItem(
-            id: log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId,
-            logId: log.id,
-            providerName: firstNonEmpty(log.providerName, "Provider"),
-            model: model,
-            multiplier: log.costMultiplier,
-            isFastTier: log.isFastTier,
-            isRetrying: false,
-            startedAt: parsedCCHDate(log.createdAt),
-            cacheState: cacheStatus(for: log).state
-        )
     }
 
     private func mergeRecentLogHistory(_ values: [CCHLogEntry]) {

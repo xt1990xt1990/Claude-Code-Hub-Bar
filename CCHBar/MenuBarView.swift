@@ -407,7 +407,7 @@ struct MenuBarView: View {
                 transitioningTab = oldTab
                 Task {
                     try? await Task.sleep(nanoseconds: 340_000_000)
-                    await state.refreshFocusedView()
+                    await state.refreshFocusedView(commitProviderSort: newTab == .providers)
                 }
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 340_000_000)
@@ -539,7 +539,7 @@ private struct HeaderView: View {
                     .scaleEffect(0.72)
             }
             Button {
-                Task { await state.refresh() }
+                Task { await state.refresh(commitProviderSort: true) }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -1360,62 +1360,13 @@ private struct ProvidersTabView: View {
                 LazyVStack(spacing: 8) {
                     ForEach(state.filteredProviders) { provider in
                         ProviderRow(
-                            provider: provider,
+                            viewModel: state.providerRowViewModel(for: provider),
                             assignableGroups: state.assignableProviderGroups,
-                            assignedGroupNames: state.assignedGroupNames(for: provider),
-                            displayGroupTitles: state.displayGroupTitles(for: provider),
-                            setEnabled: { value in
-                                Task { await state.setProvider(provider, enabled: value) }
-                            },
-                            toggleGroup: { group in
-                                Task { await state.toggleProviderGroupAssignment(group, for: provider) }
-                            },
-                            setMultiplier: { multiplier in
-                                Task { await state.updateProviderMultiplier(provider, multiplier: multiplier) }
-                            },
-                            isMultiplierUpdating: state.isProviderMultiplierUpdating(provider),
-                            probe: {
-                                Task { await state.probe(provider) }
-                            },
-                            testModel: { model in
-                                Task { await state.testProviderModel(provider, model: model) }
-                            },
-                            testModels: { models in
-                                Task { await state.testProviderModels(provider, models: models) }
-                            },
-                            isModelTesting: state.isProviderModelTesting(provider),
-                            modelTestResult: state.providerModelTestResult(for: provider),
-                            modelTestResultsByModel: state.providerModelTestResults(for: provider),
-                            modelTestProgress: state.providerModelTestProgress(for: provider),
-                            customTestModels: state.customTestModels(for: provider),
-                            isMiniProbeFeatureEnabled: state.providerMiniProbeEnabled,
-                            isMiniProbeEnabled: state.isProviderMiniProbeEnabled(provider),
-                            isMiniProbeRunning: state.isProviderMiniProbeRunning(provider),
-                            miniProbeHistory: state.providerMiniProbeHistory(for: provider),
-                            miniProbeAverageTTFB: state.providerMiniProbeAverageTTFB(for: provider),
-                            miniProbeModel: state.providerMiniProbeModel(for: provider),
-                            resolvedMiniProbeModel: state.resolvedProviderMiniProbeModelTitle(for: provider),
-                            setMiniProbeEnabled: { value in
-                                state.setProviderMiniProbe(provider, enabled: value)
-                            },
-                            setMiniProbeModel: { model in
-                                state.setProviderMiniProbeModel(model, for: provider)
-                            },
-                            addCustomTestModel: { model in
-                                state.addCustomTestModel(model, for: provider)
-                            },
-                            removeCustomTestModel: { model in
-                                state.removeCustomTestModel(model, for: provider)
-                            },
-                            resetCircuit: {
-                                Task { await state.resetCircuit(provider) }
-                            }
+                            isMiniProbeFeatureEnabled: state.providerMiniProbeEnabled
                         )
                     }
                 }
-                .animation(.spring(response: 0.24, dampingFraction: 0.86), value: state.filteredProviders.map { provider in
-                    "\(provider.id):\(state.displayGroupTitles(for: provider).joined(separator: ","))"
-                })
+                .animation(.spring(response: 0.26, dampingFraction: 0.86), value: state.filteredProviders.map(\.id))
             }
         }
     }
@@ -2048,6 +1999,7 @@ private struct UpstreamRateProviderSyncRow: View {
     @State private var miniProbeModelInput = ""
     @State private var renderedEditor: ProviderEditor?
     @State private var editorRevealHeight: CGFloat = 0
+    @State private var editorTransitionId = 0
 
     private enum ProviderEditor: Equatable {
         case multiplier
@@ -2200,6 +2152,7 @@ private struct UpstreamRateProviderSyncRow: View {
                             ProviderMultiplierPopover(
                                 provider: provider,
                                 multiplier: $multiplierInput,
+                                upstreamRate: row.upstreamRate,
                                 isUpdating: state.isProviderMultiplierUpdating(provider)
                             ) { value in
                                 closeEditor()
@@ -2302,14 +2255,27 @@ private struct UpstreamRateProviderSyncRow: View {
         }
 
         let targetHeight = editorHeight(editor, provider: provider)
+        editorTransitionId += 1
+        let transitionId = editorTransitionId
         if renderedEditor == nil {
-            renderedEditor = editor
-            editorRevealHeight = 0
-            withAnimation(editorOpenAnimation) {
-                editorRevealHeight = targetHeight
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                renderedEditor = editor
+                editorRevealHeight = 0
+            }
+            DispatchQueue.main.async {
+                guard editorTransitionId == transitionId, renderedEditor == editor, editorRevealHeight == 0 else { return }
+                withAnimation(editorOpenAnimation) {
+                    editorRevealHeight = targetHeight
+                }
             }
         } else {
-            renderedEditor = editor
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                renderedEditor = editor
+            }
             withAnimation(editorOpenAnimation) {
                 editorRevealHeight = targetHeight
             }
@@ -2317,6 +2283,7 @@ private struct UpstreamRateProviderSyncRow: View {
     }
 
     private func closeEditor() {
+        editorTransitionId += 1
         let closingEditor = renderedEditor
         withAnimation(editorCloseAnimation) {
             editorRevealHeight = 0
@@ -3841,42 +3808,23 @@ private struct ProviderChainRow: View {
 }
 
 private struct ProviderRow: View {
-    let provider: CCHProvider
+    @ObservedObject var viewModel: ProviderRowViewModel
     let assignableGroups: [CCHProviderGroup]
-    let assignedGroupNames: Set<String>
-    let displayGroupTitles: [String]
-    let setEnabled: (Bool) -> Void
-    let toggleGroup: (CCHProviderGroup) -> Void
-    let setMultiplier: (Double) -> Void
-    let isMultiplierUpdating: Bool
-    let probe: () -> Void
-    let testModel: (String) -> Void
-    let testModels: ([String]) -> Void
-    let isModelTesting: Bool
-    let modelTestResult: CCHProviderModelTestResult?
-    let modelTestResultsByModel: [String: CCHProviderModelTestResult]
-    let modelTestProgress: CCHProviderModelTestProgress?
-    let customTestModels: [String]
     let isMiniProbeFeatureEnabled: Bool
-    let isMiniProbeEnabled: Bool
-    let isMiniProbeRunning: Bool
-    let miniProbeHistory: [CCHProviderMiniProbeSample]
-    let miniProbeAverageTTFB: Double?
-    let miniProbeModel: String
-    let resolvedMiniProbeModel: String
-    let setMiniProbeEnabled: (Bool) -> Void
-    let setMiniProbeModel: (String) -> Void
-    let addCustomTestModel: (String) -> Void
-    let removeCustomTestModel: (String) -> Void
-    let resetCircuit: () -> Void
     @State private var modelTestInput = ""
     @State private var multiplierInput = ""
+    @State private var priorityInput = ""
+    @State private var weightInput = ""
     @State private var miniProbeModelInput = ""
     @State private var renderedEditor: ProviderEditor?
     @State private var editorRevealHeight: CGFloat = 0
+    @State private var editorTransitionId = 0
     @Environment(\.cchTheme) private var theme
 
+    private var provider: CCHProvider { viewModel.provider }
+
     private enum ProviderEditor: Equatable {
+        case dispatch
         case multiplier
         case miniProbe
         case modelTest
@@ -3912,21 +3860,37 @@ private struct ProviderRow: View {
                             Text(provider.name)
                                 .font(.system(size: 12, weight: .semibold))
                                 .lineLimit(1)
-                            ForEach(displayGroupTitles.prefix(2), id: \.self) { group in
+                            ForEach(viewModel.displayGroupTitles.prefix(2), id: \.self) { group in
                                 ProviderTag(group, color: providerGroupColor(group, theme: theme))
                                     .transition(.scale(scale: 0.86).combined(with: .opacity))
                             }
                         }
-                        .animation(.spring(response: 0.22, dampingFraction: 0.84), value: displayGroupTitles)
+                        .animation(.spring(response: 0.22, dampingFraction: 0.84), value: viewModel.displayGroupTitles)
                         HStack(spacing: 6) {
-                            ProviderTag("优先级 \(provider.priority)", color: theme.textSecondary)
-                            ProviderTag("权重 \(provider.weight)", color: theme.textSecondary)
+                            Button {
+                                priorityInput = String(provider.priority)
+                                weightInput = String(provider.weight)
+                                toggleEditor(.dispatch)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    if viewModel.isDispatchSettingsUpdating {
+                                        ProgressView()
+                                            .scaleEffect(0.4)
+                                            .frame(width: 14, height: 14)
+                                    }
+                                    ProviderTag("优先级 \(provider.priority)", color: theme.textSecondary)
+                                    ProviderTag("权重 \(provider.weight)", color: theme.textSecondary)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(viewModel.isDispatchSettingsUpdating)
+                            .help("编辑优先级和权重")
                             Button {
                                 multiplierInput = multiplierInputString(provider.costMultiplier)
                                 toggleEditor(.multiplier)
                             } label: {
                                 Group {
-                                    if isMultiplierUpdating {
+                                    if viewModel.isMultiplierUpdating {
                                         ProgressView()
                                             .scaleEffect(0.45)
                                             .frame(width: 28, height: 16)
@@ -3936,7 +3900,7 @@ private struct ProviderRow: View {
                                 }
                             }
                             .buttonStyle(.plain)
-                            .disabled(isMultiplierUpdating)
+                            .disabled(viewModel.isMultiplierUpdating)
                             .help("编辑倍率")
                         }
                     }
@@ -3951,7 +3915,7 @@ private struct ProviderRow: View {
                     Toggle("", isOn: Binding(
                         get: { provider.isEnabled },
                         set: { value in
-                            setEnabled(value)
+                            viewModel.setEnabled(value)
                         }
                     ))
                     .toggleStyle(.switch)
@@ -3975,21 +3939,21 @@ private struct ProviderRow: View {
                     Spacer()
                     ProviderMiniProbeControl(
                         featureEnabled: isMiniProbeFeatureEnabled,
-                        isEnabled: isMiniProbeEnabled,
-                        isRunning: isMiniProbeRunning,
-                        samples: miniProbeHistory,
-                        averageTTFB: miniProbeAverageTTFB,
-                        resolvedModel: resolvedMiniProbeModel,
+                        isEnabled: viewModel.isMiniProbeEnabled,
+                        isRunning: viewModel.isMiniProbeRunning,
+                        samples: viewModel.miniProbeHistory,
+                        averageTTFB: viewModel.miniProbeAverageTTFB,
+                        resolvedModel: viewModel.resolvedMiniProbeModel,
                         toggle: {
-                            setMiniProbeEnabled(!isMiniProbeEnabled)
+                            viewModel.setMiniProbeEnabled(!viewModel.isMiniProbeEnabled)
                         },
                         edit: {
-                            miniProbeModelInput = miniProbeModel
+                            miniProbeModelInput = viewModel.miniProbeModel
                             toggleEditor(.miniProbe)
                         }
                     )
                     Button {
-                        probe()
+                        viewModel.probe()
                     } label: {
                         Image(systemName: "waveform.path.ecg")
                             .font(.system(size: 11, weight: .semibold))
@@ -4005,7 +3969,7 @@ private struct ProviderRow: View {
                         toggleEditor(.modelTest)
                     } label: {
                         Group {
-                            if isModelTesting {
+                            if viewModel.isModelTesting {
                                 ProgressView()
                                     .scaleEffect(0.45)
                             } else {
@@ -4017,11 +3981,11 @@ private struct ProviderRow: View {
                     }
                     .buttonStyle(.borderless)
                     .foregroundStyle(theme.accentOrange)
-                    .disabled(isModelTesting)
+                    .disabled(viewModel.isModelTesting)
                     .help("供应商模型测试")
                     if provider.health.circuitState.lowercased() == "open" {
                         Button("重置") {
-                            resetCircuit()
+                            viewModel.resetCircuit()
                         }
                         .buttonStyle(.borderless)
                     }
@@ -4033,43 +3997,54 @@ private struct ProviderRow: View {
                     ) {
                         ProviderInlineEditorContainer {
                             switch renderedEditor {
+                            case .dispatch:
+                                ProviderDispatchSettingsPopover(
+                                    provider: provider,
+                                    priority: $priorityInput,
+                                    weight: $weightInput,
+                                    isUpdating: viewModel.isDispatchSettingsUpdating
+                                ) { settings in
+                                    closeEditor()
+                                    viewModel.setDispatchSettings(settings)
+                                }
                             case .multiplier:
                                 ProviderMultiplierPopover(
                                     provider: provider,
                                     multiplier: $multiplierInput,
-                                    isUpdating: isMultiplierUpdating
+                                    upstreamRate: nil,
+                                    isUpdating: viewModel.isMultiplierUpdating
                                 ) { value in
                                     closeEditor()
-                                    setMultiplier(value)
+                                    viewModel.setMultiplier(value)
                                 }
                             case .miniProbe:
                                 ProviderMiniProbePopover(
                                     provider: provider,
                                     model: $miniProbeModelInput,
-                                    resolvedModel: resolvedMiniProbeModel,
+                                    resolvedModel: viewModel.resolvedMiniProbeModel,
                                     featureEnabled: isMiniProbeFeatureEnabled,
-                                    isEnabled: isMiniProbeEnabled,
-                                    isRunning: isMiniProbeRunning,
-                                    samples: miniProbeHistory,
-                                    averageTTFB: miniProbeAverageTTFB,
-                                    setEnabled: setMiniProbeEnabled
+                                    isEnabled: viewModel.isMiniProbeEnabled,
+                                    isRunning: viewModel.isMiniProbeRunning,
+                                    samples: viewModel.miniProbeHistory,
+                                    averageTTFB: viewModel.miniProbeAverageTTFB,
+                                    setEnabled: { viewModel.setMiniProbeEnabled($0) }
                                 ) { value in
                                     closeEditor()
-                                    setMiniProbeModel(value)
+                                    viewModel.setMiniProbeModel(value)
                                 }
                             case .modelTest:
                                 ProviderModelTestPopover(
                                     provider: provider,
                                     model: $modelTestInput,
-                                    isTesting: isModelTesting,
-                                    result: modelTestResult,
-                                    resultsByModel: modelTestResultsByModel,
-                                    progress: modelTestProgress,
-                                    customModels: customTestModels,
-                                    addModel: addCustomTestModel,
-                                    removeModel: removeCustomTestModel,
-                                    runSingle: testModel,
-                                    runBatch: testModels
+                                    isTesting: viewModel.isModelTesting,
+                                    result: viewModel.modelTestResult,
+                                    resultsByModel: viewModel.modelTestResultsByModel,
+                                    progress: viewModel.modelTestProgress,
+                                    customModels: viewModel.customTestModels,
+                                    addModel: { viewModel.addCustomTestModel($0) },
+                                    removeModel: { viewModel.removeCustomTestModel($0) },
+                                    runSingle: { viewModel.testModel($0) },
+                                    runBatch: { viewModel.testModels($0) }
                                 )
                             }
                         }
@@ -4083,10 +4058,10 @@ private struct ProviderRow: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 6) {
                                 ForEach(assignableGroups) { group in
-                                    let selected = assignedGroupNames.contains(group.name)
+                                    let selected = viewModel.assignedGroupNames.contains(group.name)
                                     Button {
                                         withAnimation(.spring(response: 0.2, dampingFraction: 0.82)) {
-                                            toggleGroup(group)
+                                            viewModel.toggleGroup(group)
                                         }
                                     } label: {
                                         ProviderAssignmentChip(
@@ -4102,7 +4077,7 @@ private struct ProviderRow: View {
                         }
                         .frame(height: 21)
                     }
-                    .animation(.spring(response: 0.2, dampingFraction: 0.86), value: assignedGroupNames)
+                    .animation(.spring(response: 0.2, dampingFraction: 0.86), value: viewModel.assignedGroupNames)
                 }
             }
         }
@@ -4110,13 +4085,13 @@ private struct ProviderRow: View {
         .padding(.vertical, 9)
         .cchSurface(.row)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .onChange(of: customTestModels) {
+        .onChange(of: viewModel.customTestModels) {
             guard renderedEditor == .modelTest else { return }
             editorRevealHeight = editorHeight(.modelTest)
         }
-        .onChange(of: miniProbeModel) {
+        .onChange(of: viewModel.miniProbeModel) {
             guard renderedEditor == .miniProbe else { return }
-            miniProbeModelInput = miniProbeModel
+            miniProbeModelInput = viewModel.miniProbeModel
         }
     }
 
@@ -4127,14 +4102,27 @@ private struct ProviderRow: View {
         }
 
         let targetHeight = editorHeight(editor)
+        editorTransitionId += 1
+        let transitionId = editorTransitionId
         if renderedEditor == nil {
-            renderedEditor = editor
-            editorRevealHeight = 0
-            withAnimation(editorOpenAnimation) {
-                editorRevealHeight = targetHeight
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                renderedEditor = editor
+                editorRevealHeight = 0
+            }
+            DispatchQueue.main.async {
+                guard editorTransitionId == transitionId, renderedEditor == editor, editorRevealHeight == 0 else { return }
+                withAnimation(editorOpenAnimation) {
+                    editorRevealHeight = targetHeight
+                }
             }
         } else {
-            renderedEditor = editor
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                renderedEditor = editor
+            }
             withAnimation(editorOpenAnimation) {
                 editorRevealHeight = targetHeight
             }
@@ -4142,6 +4130,7 @@ private struct ProviderRow: View {
     }
 
     private func closeEditor() {
+        editorTransitionId += 1
         let closingEditor = renderedEditor
         withAnimation(editorCloseAnimation) {
             editorRevealHeight = 0
@@ -4149,18 +4138,21 @@ private struct ProviderRow: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             if renderedEditor == closingEditor, editorRevealHeight == 0 {
                 renderedEditor = nil
+                viewModel.commitProviderSortIfNeeded()
             }
         }
     }
 
     private func editorHeight(_ editor: ProviderEditor) -> CGFloat {
         switch editor {
+        case .dispatch:
+            return 62
         case .multiplier:
             return 70
         case .miniProbe:
             return 128
         case .modelTest:
-            return customTestModels.isEmpty ? 76 : 112
+            return viewModel.customTestModels.isEmpty ? 76 : 112
         }
     }
 
@@ -4210,14 +4202,93 @@ private struct ProviderInlineEditorContainer<Content: View>: View {
     }
 }
 
+private struct ProviderDispatchSettingsPopover: View {
+    let provider: CCHProvider
+    @Binding var priority: String
+    @Binding var weight: String
+    let isUpdating: Bool
+    let apply: (CCHProviderDispatchSettings) -> Void
+    @Environment(\.cchTheme) private var theme
+
+    private var settings: CCHProviderDispatchSettings? {
+        CCHProviderDispatchSettings(priorityText: priority, weightText: weight)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.up.arrow.down.circle")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(theme.accentOrange)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("优先级")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(theme.textSecondary)
+                TextField("0", text: $priority)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .frame(width: 76)
+                    .onSubmit { submitIfValid() }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("权重")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(theme.textSecondary)
+                TextField("1", text: $weight)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .frame(width: 76)
+                    .onSubmit { submitIfValid() }
+            }
+
+            Spacer()
+
+            Button {
+                submitIfValid()
+            } label: {
+                if isUpdating {
+                    ProgressView()
+                        .scaleEffect(0.55)
+                        .frame(width: 18, height: 18)
+                } else {
+                    Label("保存", systemImage: "checkmark")
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(theme.accentOrange)
+            .disabled(isUpdating || settings == nil)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            if priority.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                priority = String(provider.priority)
+            }
+            if weight.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                weight = String(provider.weight)
+            }
+        }
+    }
+
+    private func submitIfValid() {
+        guard let settings, !isUpdating else { return }
+        apply(settings)
+    }
+}
+
 private struct ProviderMultiplierPopover: View {
     let provider: CCHProvider
     @Binding var multiplier: String
+    let upstreamRate: Double?
     let isUpdating: Bool
     let apply: (Double) -> Void
     @Environment(\.cchTheme) private var theme
 
-    private let quickValues: [Double] = [0, 0.05, 0.1, 0.2, 0.5, 1, 2]
+    private var quickValues: [Double] {
+        providerMultiplierQuickValues(upstreamRate: upstreamRate)
+    }
 
     private var normalizedMultiplier: Double? {
         parseMultiplierInput(multiplier)
@@ -4409,22 +4480,31 @@ private struct ProviderMiniProbeNeedles: View {
     @Environment(\.cchTheme) private var theme
     @State private var runningPulse = false
 
-    private var orderedSamples: [CCHProviderMiniProbeSample] {
-        Array(samples.sorted { $0.createdAt < $1.createdAt }.suffix(CCHProviderMiniProbeLimits.maxSamples))
+    private let orderedSamples: [CCHProviderMiniProbeSample]
+
+    init(samples: [CCHProviderMiniProbeSample], active: Bool, isRunning: Bool) {
+        self.samples = samples
+        self.active = active
+        self.isRunning = isRunning
+        self.orderedSamples = Array(
+            samples.sorted { $0.createdAt < $1.createdAt }
+                .suffix(CCHProviderMiniProbeLimits.maxSamples)
+        )
     }
 
     var body: some View {
         HStack(alignment: .center, spacing: 1.4) {
+            let leadingEmpty = max(0, CCHProviderMiniProbeLimits.maxSamples - orderedSamples.count)
+            let lastIndex = CCHProviderMiniProbeLimits.maxSamples - 1
             ForEach(0..<CCHProviderMiniProbeLimits.maxSamples, id: \.self) { index in
-                let leadingEmpty = max(0, CCHProviderMiniProbeLimits.maxSamples - orderedSamples.count)
                 let sample = index >= leadingEmpty ? orderedSamples[index - leadingEmpty] : nil
                 Capsule()
                     .fill(color(for: sample, index: index))
                     .frame(width: 2, height: height(for: sample, index: index))
                     .opacity(opacity(for: sample, index: index))
                     .scaleEffect(sample == nil ? 0.86 : 1, anchor: .bottom)
-                    .animation(.spring(response: 0.32, dampingFraction: 0.78), value: orderedSamples.map(\.id))
-                    .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: runningPulse)
+                    .animation(.spring(response: 0.32, dampingFraction: 0.78), value: orderedSamples.count)
+                    .modifier(MiniProbePulseModifier(active: isRunning && index == lastIndex, value: runningPulse))
             }
         }
         .onAppear {
@@ -4455,6 +4535,19 @@ private struct ProviderMiniProbeNeedles: View {
             return 7
         }
         return sample == nil ? 4 : 7
+    }
+}
+
+private struct MiniProbePulseModifier: ViewModifier {
+    let active: Bool
+    let value: Bool
+
+    func body(content: Content) -> some View {
+        if active {
+            content.animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: value)
+        } else {
+            content
+        }
     }
 }
 

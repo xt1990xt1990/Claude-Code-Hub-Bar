@@ -187,7 +187,7 @@ struct CCHCacheStatusContext: Equatable {
     let readTokens: Int
 }
 
-struct CCHProviderHealth {
+struct CCHProviderHealth: Equatable {
     var circuitState: String = "closed"
     var failureCount: Int = 0
     var lastFailureTime: Int?
@@ -195,7 +195,7 @@ struct CCHProviderHealth {
     var recoveryMinutes: Int?
 }
 
-struct CCHProvider: Identifiable {
+struct CCHProvider: Identifiable, Equatable {
     let id: Int
     let name: String
     let providerType: String
@@ -250,7 +250,7 @@ struct CCHProbeResult {
     let errorMessage: String
 }
 
-struct CCHProviderModelTestProgress {
+struct CCHProviderModelTestProgress: Equatable {
     let completed: Int
     let total: Int
     let currentModel: String
@@ -590,6 +590,25 @@ actor APIService {
                 module: "providers",
                 action: "editProvider",
                 body: ["providerId": providerId, "costMultiplier": multiplier]
+            )
+        }
+    }
+
+    func setProviderDispatchSettings(config: CCHConfig, providerId: Int, settings: CCHProviderDispatchSettings) async throws {
+        do {
+            _ = try await patchV1(
+                config: config,
+                path: "/api/v1/providers/\(providerId)",
+                body: settings.patchBody
+            )
+        } catch where shouldFallbackToActions(error) {
+            var body = settings.patchBody
+            body["providerId"] = providerId
+            _ = try await postAction(
+                config: config,
+                module: "providers",
+                action: "editProvider",
+                body: body
             )
         }
     }

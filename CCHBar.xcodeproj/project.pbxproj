@@ -27,6 +27,11 @@
 		A1000020 = {isa = PBXBuildFile; fileRef = A2000020; };
 		A1000021 = {isa = PBXBuildFile; fileRef = A2000021; };
 		A1000022 = {isa = PBXBuildFile; fileRef = A2000022; };
+		A1000023 = {isa = PBXBuildFile; fileRef = A2000023; };
+		A1000024 = {isa = PBXBuildFile; fileRef = A2000024; };
+		A1000025 = {isa = PBXBuildFile; fileRef = A2000025; };
+		A1000026 = {isa = PBXBuildFile; fileRef = A2000026; };
+		A1000027 = {isa = PBXBuildFile; fileRef = A2000027; };
 		D27441A8A4A175F817E286B9 /* SettingsWindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C63241B3849099D5A6742559 /* SettingsWindowManager.swift */; };
 /* End PBXBuildFile section */
 
@@ -51,6 +56,11 @@
 		A2000020 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpstreamRateAutoSyncTiming.swift; sourceTree = "<group>"; };
 		A2000021 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHDisplaySanitizer.swift; sourceTree = "<group>"; };
 		A2000022 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHActiveSessionRefreshInterval.swift; sourceTree = "<group>"; };
+		A2000023 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHProviderDispatchSettings.swift; sourceTree = "<group>"; };
+		A2000024 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHProviderRowViewModel.swift; sourceTree = "<group>"; };
+		A2000025 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHProviderMultiplierPresets.swift; sourceTree = "<group>"; };
+		A2000026 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHStatusBarSnapshotBuilder.swift; sourceTree = "<group>"; };
+		A2000027 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCHMenuBarRunningLogBuilder.swift; sourceTree = "<group>"; };
 		'A3000001' = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Claude Code Hub Bar.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C63241B3849099D5A6742559 /* SettingsWindowManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SettingsWindowManager.swift; path = CCHBar/SettingsWindowManager.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
@@ -92,6 +102,11 @@
 				A2000020,
 				A2000021,
 				A2000022,
+				A2000023,
+				A2000024,
+				A2000025,
+				A2000026,
+				A2000027,
 				A2000005,
 				A2000011,
 				A2000002,
@@ -198,6 +213,11 @@
 				A1000020,
 				A1000021,
 				A1000022,
+				A1000023,
+				A1000024,
+				A1000025,
+				A1000026,
+				A1000027,
 				D27441A8A4A175F817E286B9 /* SettingsWindowManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -268,7 +288,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				MARKETING_VERSION = 1.2.3.1;
+				MARKETING_VERSION = 1.2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.cchbar.CCHBar;
 				PRODUCT_NAME = "Claude Code Hub Bar";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -287,7 +307,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				MARKETING_VERSION = 1.2.3.1;
+				MARKETING_VERSION = 1.2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.cchbar.CCHBar;
 				PRODUCT_NAME = "Claude Code Hub Bar";
 				SWIFT_EMIT_LOC_STRINGS = YES;

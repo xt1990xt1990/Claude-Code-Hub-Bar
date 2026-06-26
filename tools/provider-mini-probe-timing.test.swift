@@ -62,7 +62,35 @@ private struct ProviderMiniProbeTimingTests {
             providerMiniProbeSuccessTTFBMs(isSuccess: false, ttfbMs: 468),
             "failed probe should not expose first-byte timing"
         )
+
+        let samples = [
+            MiniProbeTimingSample(isSuccess: true, ttfbMs: 100),
+            MiniProbeTimingSample(isSuccess: true, ttfbMs: 300),
+            MiniProbeTimingSample(isSuccess: false, ttfbMs: nil),
+            MiniProbeTimingSample(isSuccess: false, ttfbMs: nil)
+        ]
+        expectEqual(
+            providerMiniProbeAverageSuccessTTFB(samples, maxCount: 2, isSuccess: \.isSuccess, ttfbMs: \.ttfbMs),
+            200,
+            "failed probes should not consume the average TTFB sample window"
+        )
+
+        let missingTTFBSamples = [
+            MiniProbeTimingSample(isSuccess: true, ttfbMs: 100),
+            MiniProbeTimingSample(isSuccess: true, ttfbMs: nil),
+            MiniProbeTimingSample(isSuccess: true, ttfbMs: 300)
+        ]
+        expectEqual(
+            providerMiniProbeAverageSuccessTTFB(missingTTFBSamples, maxCount: 2, isSuccess: \.isSuccess, ttfbMs: \.ttfbMs),
+            200,
+            "successful probes without first-byte timing should not consume the average TTFB sample window"
+        )
     }
+}
+
+private struct MiniProbeTimingSample {
+    let isSuccess: Bool
+    let ttfbMs: Double?
 }
 
 private func expectEqual(_ actual: TimeInterval, _ expected: TimeInterval, _ message: String) {

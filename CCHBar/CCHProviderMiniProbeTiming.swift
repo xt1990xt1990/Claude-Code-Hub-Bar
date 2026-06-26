@@ -32,3 +32,19 @@ func providerMiniProbeFailureBackoffSeconds(
 func providerMiniProbeSuccessTTFBMs(isSuccess: Bool, ttfbMs: Double?) -> Double? {
     isSuccess ? ttfbMs : nil
 }
+
+func providerMiniProbeAverageSuccessTTFB<T>(
+    _ samples: [T],
+    maxCount: Int,
+    isSuccess: (T) -> Bool,
+    ttfbMs: (T) -> Double?
+) -> Double? {
+    let values = samples
+        .compactMap { sample -> Double? in
+            guard isSuccess(sample) else { return nil }
+            return ttfbMs(sample)
+        }
+        .suffix(max(0, maxCount))
+    guard !values.isEmpty else { return nil }
+    return values.reduce(0, +) / Double(values.count)
+}
