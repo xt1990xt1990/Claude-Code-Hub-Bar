@@ -70,6 +70,7 @@ final class CCHStatusBarView: NSView {
     private let cacheIndicatorLayer = CALayer()
     private var lastCacheIndicatorConfiguration: (state: CCHCacheVisibilityState, isRunning: Bool, showsDetails: Bool)?
     private var lastMarqueeConfiguration: (text: String, textWidth: CGFloat, textRunWidth: CGFloat)?
+    private var lastPrimaryTextLayerState: (text: String, fontSize: CGFloat, color: NSColor, scale: CGFloat)?
 
     var preferredWidth: CGFloat {
         Self.fixedWidth(showDetails: showsDetails)
@@ -351,7 +352,24 @@ final class CCHStatusBarView: NSView {
     }
 
     private func updatePrimaryTextLayer() {
-        primaryTextLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        if let lastPrimaryTextLayerState,
+           lastPrimaryTextLayerState.text == marqueeText,
+           lastPrimaryTextLayerState.fontSize == primaryTextFont.pointSize,
+           lastPrimaryTextLayerState.color == primaryTextColor,
+           abs(lastPrimaryTextLayerState.scale - scale) < 0.01 {
+            return
+        }
+
+        lastPrimaryTextLayerState = (
+            text: marqueeText,
+            fontSize: primaryTextFont.pointSize,
+            color: primaryTextColor,
+            scale: scale
+        )
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        primaryTextLayer.contentsScale = scale
         primaryTextLayer.foregroundColor = primaryTextColor.cgColor
         primaryTextLayer.fontSize = primaryTextFont.pointSize
         primaryTextLayer.string = NSAttributedString(
@@ -361,6 +379,7 @@ final class CCHStatusBarView: NSView {
                 .foregroundColor: primaryTextColor
             ]
         )
+        CATransaction.commit()
     }
 
     private func updateCacheIndicator(state: CCHCacheVisibilityState, isRunning: Bool) {

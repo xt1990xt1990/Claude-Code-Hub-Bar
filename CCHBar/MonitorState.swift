@@ -204,9 +204,22 @@ final class MonitorState: ObservableObject {
     @Published var logTotal = 0
     @Published var logPage = 1
     @Published var isLoadingMoreLogs = false
-    @Published var providers: [CCHProvider] = []
+    @Published var providers: [CCHProvider] = [] {
+        didSet {
+            providerStatsSnapshot = CCHProviderStatsBuilder.makeSnapshot(providers: providers)
+            providerGroupPresentationCache.removeAll(keepingCapacity: true)
+            providerFilterGroupsCache = nil
+            assignableProviderGroupsCache = nil
+            rebuildProviderIndexes()
+        }
+    }
     @Published private(set) var assignableProviderGroups: [CCHProviderGroup] = []
-    @Published private(set) var providerGroupAssignmentOverrides: [Int: Set<String>] = [:]
+    @Published private(set) var providerGroupAssignmentOverrides: [Int: Set<String>] = [:] {
+        didSet {
+            providerGroupPresentationCache.removeAll(keepingCapacity: true)
+            providerFilterGroupsCache = nil
+        }
+    }
     @Published private(set) var highlightedLogIds: Set<Int> = []
     @Published private(set) var modelTestingProviderIds: Set<Int> = []
     @Published private(set) var providerModelTestResults: [Int: CCHProviderModelTestResult] = [:]
@@ -215,7 +228,12 @@ final class MonitorState: ObservableObject {
     @Published private(set) var providerCustomTestModels: [Int: [String]] = [:]
     @Published private(set) var providerMiniProbeSelectedProviderIds: Set<Int> = []
     @Published private(set) var providerMiniProbeModelOverrides: [Int: String] = [:]
-    @Published private(set) var providerMiniProbeHistories: [Int: [CCHProviderMiniProbeSample]] = [:]
+    @Published private(set) var providerMiniProbeHistories: [Int: [CCHProviderMiniProbeSample]] = [:] {
+        didSet {
+            providerMiniProbeAverageTTFBCache.removeAll(keepingCapacity: true)
+            providerMiniProbeRecordedSampleTotal = CCHProviderStatsBuilder.miniProbeRecordedSampleCount(providerMiniProbeHistories)
+        }
+    }
     @Published private(set) var providerMiniProbeRunningIds: Set<Int> = []
     @Published private(set) var providerMultiplierUpdatingIds: Set<Int> = []
     @Published private(set) var upstreamRateSelectedProviderIds: Set<Int> = []
@@ -300,9 +318,20 @@ final class MonitorState: ObservableObject {
     private var knownLogPageIds = Set<Int>()
     private var knownLogPageIdOrder: [Int] = []
     private var recentLogHistory: [CCHLogEntry] = []
+    private var activeSessionMenuCache: (sessions: [CCHActiveSession], filter: String, snapshot: CCHActiveSessionMenuSnapshot)?
+    private var providerById: [Int: CCHProvider] = [:]
     private var providerMultiplierByName: [String: Double] = [:]
     private var providerMultiplierByProviderId: [Int: Double] = [:]
+    private var upstreamProviderInputs: [UpstreamRateProviderInput] = []
+    private var upstreamRateSitesCacheInput: CCHUpstreamRateSitesSnapshotInput?
+    private var upstreamRateSitesCache: CCHUpstreamRateSitesSnapshot?
     private var cachedMenuBarRunningLogs: [CCHLogEntry] = []
+    private var providerStatsSnapshot = CCHProviderStatsSnapshot.empty
+    private var providerMiniProbeAverageTTFBCache: [Int: (input: CCHProviderMiniProbeAverageTTFBInput, value: Double?)] = [:]
+    private var providerGroupPresentationCache: [Int: (input: CCHProviderGroupPresentationInput, snapshot: CCHProviderGroupPresentationSnapshot)] = [:]
+    private var providerFilterGroupsCache: (input: CCHProviderFilterGroupsInput, groups: [String])?
+    private var assignableProviderGroupsCache: (input: CCHAssignableProviderGroupsInput, groups: [CCHProviderGroup])?
+    private var providerMiniProbeRecordedSampleTotal = 0
     private var refreshTasks: [CCHRefreshKey: CCHRefreshTaskSlot] = [:]
     private var lastProviderUsageRefresh: Date?
     private var lastProviderGroupsRefresh: Date?
@@ -350,19 +379,11 @@ final class MonitorState: ObservableObject {
     }
 
     var filteredActiveSessions: [CCHActiveSession] {
-        let ordered = activeSessions.sorted { $0.startTime > $1.startTime }
-        let filter = activeSessionUserFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !filter.isEmpty else { return ordered }
-        return ordered.filter { $0.userName.lowercased().contains(filter) }
+        activeSessionMenuSnapshot.filteredSessions
     }
 
     var menuBarActiveSessions: [CCHActiveSession] {
-        let filtered = filteredActiveSessions
-        return filtered.filter { session in
-            session.concurrentCount > 0
-                || session.durationMs <= 0
-                || isRunningStatus(session.status)
-        }
+        activeSessionMenuSnapshot.menuBarSessions
     }
 
     var menuBarRunningLogs: [CCHLogEntry] {
@@ -370,23 +391,32 @@ final class MonitorState: ObservableObject {
     }
 
     var currentMenuBarSession: CCHActiveSession? {
-        menuBarActiveSessions.sorted { lhs, rhs in
-            let lhsScore = menuBarActivityScore(lhs)
-            let rhsScore = menuBarActivityScore(rhs)
-            if lhsScore != rhsScore {
-                return lhsScore > rhsScore
-            }
-            return lhs.startTime > rhs.startTime
+        activeSessionMenuSnapshot.currentMenuBarSession
+    }
+
+    private var activeSessionMenuSnapshot: CCHActiveSessionMenuSnapshot {
+        if
+            let cached = activeSessionMenuCache,
+            cached.sessions == activeSessions,
+            cached.filter == activeSessionUserFilter
+        {
+            return cached.snapshot
         }
-        .first
+
+        let snapshot = CCHActiveSessionMenuBuilder.makeSnapshot(
+            from: activeSessions,
+            userFilter: activeSessionUserFilter
+        )
+        activeSessionMenuCache = (activeSessions, activeSessionUserFilter, snapshot)
+        return snapshot
     }
 
     var enabledProviderCount: Int {
-        providers.filter(\.isEnabled).count
+        providerStatsSnapshot.enabledCount
     }
 
     var unhealthyProviderCount: Int {
-        providers.filter { $0.health.circuitState.lowercased() != "closed" || $0.health.failureCount > 0 }.count
+        providerStatsSnapshot.unhealthyCount
     }
 
     var providerGroups: [String] {
@@ -406,46 +436,58 @@ final class MonitorState: ObservableObject {
     }
 
     var upstreamRateSites: [UpstreamRateSite] {
-        UpstreamRateMatcher.buildSites(
-            providers: providers.map(upstreamProviderInput),
+        upstreamRateSitesSnapshot.sites
+    }
+
+    var upstreamRateSyncableSites: [UpstreamRateSite] {
+        upstreamRateSitesSnapshot.syncableSites
+    }
+
+    var upstreamRateNeedsConfigurationSites: [UpstreamRateSite] {
+        upstreamRateSitesSnapshot.needsConfigurationSites
+    }
+
+    var upstreamRateUnsupportedSites: [UpstreamRateSite] {
+        upstreamRateSitesSnapshot.unsupportedSites
+    }
+
+    var upstreamRateCheckedSyncCount: Int {
+        upstreamRateSitesSnapshot.checkedSyncCount
+    }
+
+    var upstreamRatePendingSyncCount: Int {
+        upstreamRateSitesSnapshot.pendingSyncCount
+    }
+
+    private var upstreamRateSitesSnapshot: CCHUpstreamRateSitesSnapshot {
+        let input = CCHUpstreamRateSitesSnapshotInput(
+            providers: upstreamProviderInputs,
             snapshots: upstreamRateSnapshots,
             selectedProviderIds: upstreamRateSelectedProviderIds,
             ignoredHosts: upstreamRateIgnoredHosts,
             displayNames: upstreamRateHostDisplayNames,
             lastSyncAdjustedProviderIds: upstreamRateLastSyncAdjustedProviderIds
         )
-    }
+        if upstreamRateSitesCacheInput == input, let cached = upstreamRateSitesCache {
+            return cached
+        }
 
-    var upstreamRateSyncableSites: [UpstreamRateSite] {
-        upstreamRateSites.filter { $0.section == .syncable }
-    }
-
-    var upstreamRateNeedsConfigurationSites: [UpstreamRateSite] {
-        upstreamRateSites.filter { $0.section == .needsConfiguration }
-    }
-
-    var upstreamRateUnsupportedSites: [UpstreamRateSite] {
-        upstreamRateSites.filter { $0.section == .unsupported }
-    }
-
-    var upstreamRateCheckedSyncCount: Int {
-        upstreamRateSites.flatMap(\.syncableRows).count
-    }
-
-    var upstreamRatePendingSyncCount: Int {
-        upstreamRateSites.reduce(0) { $0 + $1.pendingSyncCount }
+        let snapshot = CCHUpstreamRateSitesSnapshotBuilder.makeSnapshot(input)
+        upstreamRateSitesCacheInput = input
+        upstreamRateSitesCache = snapshot
+        return snapshot
     }
 
     func upstreamRateSnapshotsNeedRefresh() -> Bool {
         shouldRefreshUpstreamRateSnapshots(
-            providers: providers.map(upstreamProviderInput),
+            providers: upstreamProviderInputs,
             snapshots: upstreamRateSnapshots
         )
     }
 
     func refreshUpstreamRatesIfSnapshotIsStale() async {
         guard !isRefreshingUpstreamRates else { return }
-        let inputs = providers.map(upstreamProviderInput)
+        let inputs = upstreamProviderInputs
         let signature = upstreamRateProviderSnapshotSignature(providers: inputs)
         guard signature != upstreamRateSnapshotRefreshSignature else { return }
         guard shouldRefreshUpstreamRateSnapshots(providers: inputs, snapshots: upstreamRateSnapshots) else { return }
@@ -459,7 +501,7 @@ final class MonitorState: ObservableObject {
     }
 
     var providerMiniProbeRecordedSampleCount: Int {
-        providerMiniProbeHistories.values.reduce(0) { $0 + $1.count }
+        providerMiniProbeRecordedSampleTotal
     }
 
     var providerMiniProbeAverageSampleCountValue: Int {
@@ -487,6 +529,7 @@ final class MonitorState: ObservableObject {
         providerMiniProbeSelectedProviderIds = Self.loadIntSet(key: CCHProviderMiniProbeStorage.selectedProviderIdsKey)
         providerMiniProbeModelOverrides = Self.loadProviderMiniProbeModelOverrides()
         providerMiniProbeHistories = Self.loadProviderMiniProbeHistories()
+        providerMiniProbeRecordedSampleTotal = CCHProviderStatsBuilder.miniProbeRecordedSampleCount(providerMiniProbeHistories)
         providerMiniProbeLastRunAtByProviderId = Self.latestProviderMiniProbeRunDates(from: providerMiniProbeHistories)
         upstreamRateSelectedProviderIds = Self.loadIntSet(key: CCHUpstreamRateStorage.selectedProviderIdsKey)
         upstreamRateIgnoredHosts = Self.loadStringSet(key: CCHUpstreamRateStorage.ignoredHostsKey)
@@ -611,13 +654,26 @@ final class MonitorState: ObservableObject {
     }
 
     func assignedGroupNames(for provider: CCHProvider) -> Set<String> {
-        providerGroupAssignmentOverrides[provider.id] ?? storedGroupNames(for: provider)
+        providerGroupPresentationSnapshot(for: provider).assignedGroupNames
     }
 
     func displayGroupTitles(for provider: CCHProvider) -> [String] {
-        let groups = assignedGroupNames(for: provider)
-            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        return groups.isEmpty ? ["默认"] : groups
+        providerGroupPresentationSnapshot(for: provider).displayGroupTitles
+    }
+
+    private func providerGroupPresentationSnapshot(for provider: CCHProvider) -> CCHProviderGroupPresentationSnapshot {
+        let input = CCHProviderGroupPresentationInput(
+            providerId: provider.id,
+            groupTag: provider.groupTag,
+            overrideNames: providerGroupAssignmentOverrides[provider.id]
+        )
+        if let cached = providerGroupPresentationCache[provider.id], cached.input == input {
+            return cached.snapshot
+        }
+
+        let snapshot = CCHProviderGroupPresentationBuilder.makeSnapshot(input)
+        providerGroupPresentationCache[provider.id] = (input, snapshot)
+        return snapshot
     }
 
     func toggleProviderGroupAssignment(_ group: CCHProviderGroup, for provider: CCHProvider) async {
@@ -966,15 +1022,18 @@ final class MonitorState: ObservableObject {
     }
 
     func providerMiniProbeAverageTTFB(for provider: CCHProvider) -> Double? {
-        guard providerMiniProbeAverageTTFBEnabled else { return nil }
-        let samples = providerMiniProbeHistory(for: provider)
-            .sorted { $0.createdAt < $1.createdAt }
-        return providerMiniProbeAverageSuccessTTFB(
-            samples,
+        let input = CCHProviderMiniProbeAverageTTFBInput(
+            isEnabled: providerMiniProbeAverageTTFBEnabled,
             maxCount: providerMiniProbeAverageSampleCountValue,
-            isSuccess: { $0.status == .success },
-            ttfbMs: { $0.ttfbMs }
+            samples: providerMiniProbeHistory(for: provider)
         )
+        if let cached = providerMiniProbeAverageTTFBCache[provider.id], cached.input == input {
+            return cached.value
+        }
+
+        let value = CCHProviderMiniProbeMetricsBuilder.averageTTFB(input)
+        providerMiniProbeAverageTTFBCache[provider.id] = (input, value)
+        return value
     }
 
     func providerMiniProbeModel(for provider: CCHProvider) -> String {
@@ -1285,7 +1344,7 @@ final class MonitorState: ObservableObject {
     }
 
     func provider(forUpstreamRateRow row: UpstreamRateProviderRow) -> CCHProvider? {
-        providers.first { $0.id == row.providerId }
+        providerById[row.providerId]
     }
 
     func toggleUpstreamRateSyncSelection(_ row: UpstreamRateProviderRow) async {
@@ -1317,7 +1376,7 @@ final class MonitorState: ObservableObject {
         }
 
         let credentialsByHost = Dictionary(uniqueKeysWithValues: upstreamRateCredentials.map { ($0.host, $0) })
-        let grouped = Dictionary(grouping: providers.map(upstreamProviderInput)) { input in
+        let grouped = Dictionary(grouping: upstreamProviderInputs) { input in
             UpstreamRateMatcher.providerHost(input) ?? "unknown-\(input.id)"
         }
         let sortedGroups = grouped.sorted { $0.key < $1.key }
@@ -1372,15 +1431,16 @@ final class MonitorState: ObservableObject {
             flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
         }
         let activeHosts = Set(sortedGroups.map(\.key))
-        upstreamRateSnapshots = UpstreamRateSnapshot
+        let mergedSnapshots = UpstreamRateSnapshot
             .mergeLatest(cached: upstreamRateSnapshots, refreshed: nextSnapshots)
             .filter { activeHosts.contains($0.host) }
+        if upstreamRateSnapshots != mergedSnapshots {
+            upstreamRateSnapshots = mergedSnapshots
+        }
         saveUpstreamRateSnapshots()
         upstreamRateLastCheckedAt = Date()
 
-        let preSyncMultipliers = Dictionary(
-            uniqueKeysWithValues: providers.map { ($0.id, $0.costMultiplier) }
-        )
+        let preSyncMultipliers = providerMultiplierByProviderId
         await syncSelectedUpstreamRates(showEmptyMessage: false)
         upstreamRateLastSyncAdjustedProviderIds = Set(
             providers.compactMap { provider in
@@ -1471,14 +1531,17 @@ final class MonitorState: ObservableObject {
         }
         if !balanceSnapshots.isEmpty {
             let authExpiredSnapshots = balanceSnapshots.filter { $0.status == .authExpired }
-            upstreamRateSnapshots = UpstreamRateSnapshot.mergeLatest(
+            let authMergedSnapshots = UpstreamRateSnapshot.mergeLatest(
                 cached: upstreamRateSnapshots,
                 refreshed: authExpiredSnapshots
             )
-            upstreamRateSnapshots = UpstreamRateSnapshot.mergeBalances(
-                cached: upstreamRateSnapshots,
+            let mergedSnapshots = UpstreamRateSnapshot.mergeBalances(
+                cached: authMergedSnapshots,
                 balances: balanceSnapshots.filter { $0.balance != nil }
             )
+            if upstreamRateSnapshots != mergedSnapshots {
+                upstreamRateSnapshots = mergedSnapshots
+            }
             saveUpstreamRateSnapshots()
         }
         upstreamBalanceLastRefreshedAt = Date()
@@ -2033,6 +2096,11 @@ final class MonitorState: ObservableObject {
                 includeStats: false
             )
             registerIncomingLogs(page.logs, isReset: true, context: .recent)
+            guard recentLogs != page.logs else {
+                lastStatusBarDataRefresh = Date()
+                return nil
+            }
+
             recentLogs = page.logs
             mergeRecentLogHistory(page.logs)
             rebuildCacheStatus()
@@ -2099,7 +2167,10 @@ final class MonitorState: ObservableObject {
                     lastProviderGroupsRefresh = Date()
                 }
             }
-            assignableProviderGroups = mergedAssignableProviderGroups(officialProviderGroups)
+            let nextAssignableGroups = mergedAssignableProviderGroups(officialProviderGroups)
+            if assignableProviderGroups != nextAssignableGroups {
+                assignableProviderGroups = nextAssignableGroups
+            }
             if includeUsage {
                 lastProviderUsageRefresh = Date()
             }
@@ -2197,15 +2268,31 @@ final class MonitorState: ObservableObject {
     }
 
     private func rebuildCacheStatus() {
-        let combined = uniqueLogs(recentLogs + logs + recentLogHistory)
-        let next = buildCacheStatusMap(for: combined)
-        cacheStatusByLogId = next
+        let snapshot = CCHCacheStatusMapBuilder.makeSnapshot(
+            recentLogs: recentLogs,
+            logs: logs,
+            history: recentLogHistory
+        )
+        if cacheStatusByLogId != snapshot.statusByLogId {
+            cacheStatusByLogId = snapshot.statusByLogId
+        }
         rebuildMenuBarRunningLogs()
-        announceLatestCacheAlert(from: combined, statusMap: next)
+        announceLatestCacheAlert(logId: snapshot.latestRebuildingLogId)
         updateStatusBarSnapshot()
     }
 
     private func rebuildProviderLookup() {
+        rebuildProviderIndexes()
+        pruneUpstreamRateSelections()
+        pruneProviderMiniProbeData()
+        reconcileProviderRowViewModels()
+    }
+
+    private func rebuildProviderIndexes() {
+        providerById = Dictionary(
+            providers.map { ($0.id, $0) },
+            uniquingKeysWith: { current, _ in current }
+        )
         providerMultiplierByName = Dictionary(
             providers.map { ($0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), $0.costMultiplier) },
             uniquingKeysWith: { current, _ in current }
@@ -2214,9 +2301,7 @@ final class MonitorState: ObservableObject {
             providers.map { ($0.id, $0.costMultiplier) },
             uniquingKeysWith: { current, _ in current }
         )
-        pruneUpstreamRateSelections()
-        pruneProviderMiniProbeData()
-        reconcileProviderRowViewModels()
+        upstreamProviderInputs = providers.map(upstreamProviderInput)
     }
 
     private func reconcileProviderRowViewModels() {
@@ -2246,33 +2331,36 @@ final class MonitorState: ObservableObject {
     }
 
     private func computedProviderGroups() -> [String] {
-        let groups = Set(providers.flatMap { displayGroupTitles(for: $0) })
-        return ["全部"] + groups.filter { $0 != "全部" }.sorted()
+        let input = CCHProviderFilterGroupsInput(
+            providers: providers.map { provider in
+                CCHProviderGroupPresentationInput(
+                    providerId: provider.id,
+                    groupTag: provider.groupTag,
+                    overrideNames: providerGroupAssignmentOverrides[provider.id]
+                )
+            }
+        )
+        if let cached = providerFilterGroupsCache, cached.input == input {
+            return cached.groups
+        }
+
+        let groups = CCHProviderGroupsBuilder.filterGroups(input)
+        providerFilterGroupsCache = (input, groups)
+        return groups
     }
 
     private func mergedAssignableProviderGroups(_ officialGroups: [CCHProviderGroup]) -> [CCHProviderGroup] {
-        var seen = Set<String>()
-        var merged: [CCHProviderGroup] = []
-
-        for group in officialGroups {
-            let name = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            let key = name.lowercased()
-            guard !name.isEmpty, !isDefaultProviderGroup(name), seen.insert(key).inserted else { continue }
-            merged.append(group)
+        let input = CCHAssignableProviderGroupsInput(
+            officialGroups: officialGroups,
+            providerGroupTags: providers.map(\.groupTag)
+        )
+        if let cached = assignableProviderGroupsCache, cached.input == input {
+            return cached.groups
         }
 
-        let existingGroups = providers
-            .flatMap { providerGroupTitles($0.groupTag) }
-            .filter { !isDefaultProviderGroup($0) }
-            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-
-        for name in existingGroups {
-            let key = name.lowercased()
-            guard seen.insert(key).inserted else { continue }
-            merged.append(CCHProviderGroup(id: name, name: name, providerCount: nil, costMultiplier: nil))
-        }
-
-        return merged.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let groups = CCHProviderGroupsBuilder.assignableGroups(input)
+        assignableProviderGroupsCache = (input, groups)
+        return groups
     }
 
     private func providerGroupTag(from groups: Set<String>) -> String? {
@@ -2284,7 +2372,7 @@ final class MonitorState: ObservableObject {
     }
 
     private func storedGroupNames(for provider: CCHProvider) -> Set<String> {
-        Set(providerGroupTitles(provider.groupTag).filter { !isDefaultProviderGroup($0) })
+        CCHProviderGroupPresentationBuilder.storedGroupNames(from: provider.groupTag)
     }
 
     private func reconcileProviderGroupAssignmentOverrides() {
@@ -2294,7 +2382,9 @@ final class MonitorState: ObservableObject {
         }
         let providerIds = Set(providers.map(\.id))
         nextOverrides = nextOverrides.filter { providerIds.contains($0.key) }
-        providerGroupAssignmentOverrides = nextOverrides
+        if providerGroupAssignmentOverrides != nextOverrides {
+            providerGroupAssignmentOverrides = nextOverrides
+        }
     }
 
     private func rebuildProviderFilterSnapshot(
@@ -2307,7 +2397,17 @@ final class MonitorState: ObservableObject {
             filtered = providers
         } else {
             filtered = providers.filter { provider in
-                !Set(displayGroupTitles(for: provider)).isDisjoint(with: selectedProviderGroups)
+                displayGroupTitles(for: provider).contains { selectedProviderGroups.contains($0) }
+            }
+        }
+        var enabledCount = 0
+        var unhealthyCount = 0
+        for provider in filtered {
+            if provider.isEnabled {
+                enabledCount += 1
+            }
+            if CCHProviderStatsBuilder.isUnhealthy(provider) {
+                unhealthyCount += 1
             }
         }
         let orderedProviders = providerSortState.order(filtered, mode: sortMode) { provider in
@@ -2317,35 +2417,22 @@ final class MonitorState: ObservableObject {
                 hasMiniProbe: providerMiniProbeSelectedProviderIds.contains(provider.id)
             )
         }
-        providerFilterSnapshot = CCHProviderFilterSnapshot(
+        let next = CCHProviderFilterSnapshot(
             groups: resolvedGroups,
             providers: orderedProviders,
-            enabledCount: filtered.filter(\.isEnabled).count,
-            unhealthyCount: filtered.filter { $0.health.circuitState.lowercased() != "closed" || $0.health.failureCount > 0 }.count
+            enabledCount: enabledCount,
+            unhealthyCount: unhealthyCount
         )
+        if providerFilterSnapshot != next {
+            providerFilterSnapshot = next
+        }
     }
 
     private func rebuildLeaderboardSummary() {
-        let requests = leaderboard.reduce(0) { $0 + $1.requests }
-        let cost = leaderboard.reduce(0) { $0 + $1.cost }
-        let tokens = leaderboard.reduce(0) { $0 + $1.tokens }
-        let rows = leaderboard.filter { $0.cacheHitRateOverride != nil && $0.inputTokens > 0 }
-        let totalInputTokens = rows.reduce(0) { $0 + $1.inputTokens }
-        let cacheHitRate: Double?
-        if rows.isEmpty || totalInputTokens <= 0 {
-            cacheHitRate = nil
-        } else {
-            let weighted = rows.reduce(0.0) { partial, entry in
-                partial + (entry.cacheHitRateOverride ?? 0) * Double(entry.inputTokens)
-            }
-            cacheHitRate = min(1, max(0, weighted / Double(totalInputTokens)))
+        let next = CCHLeaderboardSummaryBuilder.makeSummary(from: leaderboard)
+        if leaderboardSummary != next {
+            leaderboardSummary = next
         }
-        leaderboardSummary = CCHLeaderboardSummary(
-            requests: requests,
-            cost: cost,
-            tokens: tokens,
-            cacheHitRate: cacheHitRate
-        )
     }
 
     private func rebuildMenuBarRunningLogs() {
@@ -2377,30 +2464,22 @@ final class MonitorState: ObservableObject {
     }
 
     private func mergeRecentLogHistory(_ values: [CCHLogEntry]) {
-        let merged = uniqueLogs(values + recentLogHistory)
-            .sorted(by: isNewerLog)
-        recentLogHistory = Array(merged.prefix(CCHRetentionLimits.recentLogHistory))
+        recentLogHistory = CCHCacheStatusMapBuilder.mergeHistory(
+            incomingLogs: values,
+            history: recentLogHistory,
+            limit: CCHRetentionLimits.recentLogHistory
+        )
     }
 
-    private func uniqueLogs(_ values: [CCHLogEntry]) -> [CCHLogEntry] {
-        var seen = Set<Int>()
-        return values.filter { seen.insert($0.id).inserted }
-    }
-
-    private func announceLatestCacheAlert(from values: [CCHLogEntry], statusMap: [Int: CCHCacheStatusContext]) {
-        guard let latest = values
-            .filter({ statusMap[$0.id]?.state == .rebuilding })
-            .sorted(by: isNewerLog)
-            .first
-        else { return }
-
-        guard latest.id != lastAnnouncedCacheAlertLogId else { return }
-        lastAnnouncedCacheAlertLogId = latest.id
-        menuBarCacheAlertLogId = latest.id
+    private func announceLatestCacheAlert(logId: Int?) {
+        guard let logId else { return }
+        guard logId != lastAnnouncedCacheAlertLogId else { return }
+        lastAnnouncedCacheAlertLogId = logId
+        menuBarCacheAlertLogId = logId
         cacheAlertDismissTask?.cancel()
         cacheAlertDismissTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 4_500_000_000)
-            if self.menuBarCacheAlertLogId == latest.id {
+            if self.menuBarCacheAlertLogId == logId {
                 self.menuBarCacheAlertLogId = nil
                 self.updateStatusBarSnapshot()
             }
@@ -2778,8 +2857,13 @@ private extension MonitorState {
 
     func upsertLocalUpstreamRateSnapshot(host: String, sourceType: UpstreamRateSourceType, status: UpstreamRateSourceStatus) {
         let normalizedHost = normalizedUpstreamHost(host) ?? host.lowercased()
-        upstreamRateSnapshots.removeAll { $0.host == normalizedHost }
-        upstreamRateSnapshots.append(UpstreamRateSnapshot(host: normalizedHost, sourceType: sourceType, status: status))
+        let snapshot = UpstreamRateSnapshot(host: normalizedHost, sourceType: sourceType, status: status)
+        var next = upstreamRateSnapshots.filter { $0.host != normalizedHost }
+        next.append(snapshot)
+        next.sort { $0.host.localizedCaseInsensitiveCompare($1.host) == .orderedAscending }
+        if upstreamRateSnapshots != next {
+            upstreamRateSnapshots = next
+        }
     }
 
     func upstreamRateTargets(for providers: [UpstreamRateProviderInput]) async -> [UpstreamRateTarget] {
@@ -2808,7 +2892,7 @@ private extension MonitorState {
     }
 
     func buildLocalUpstreamRateSnapshots() -> [UpstreamRateSnapshot] {
-        let inputs = providers.map(upstreamProviderInput)
+        let inputs = upstreamProviderInputs
         let grouped = Dictionary(grouping: inputs) { input in
             UpstreamRateMatcher.providerHost(input) ?? "unknown-\(input.id)"
         }
@@ -2873,89 +2957,12 @@ private extension MonitorState {
     }
 }
 
-private func buildCacheStatusMap(for logs: [CCHLogEntry]) -> [Int: CCHCacheStatusContext] {
-    var result: [Int: CCHCacheStatusContext] = [:]
-    for group in Dictionary(grouping: logs, by: cacheSessionKey).values {
-        let ordered = group
-            .filter { $0.statusCode.map { (200..<300).contains($0) } ?? false }
-            .sorted(by: isOlderLog)
-        var previous: CCHLogEntry?
-        for log in ordered {
-            let state = isLargeCacheDrop(log, previous: previous) ? CCHCacheVisibilityState.rebuilding : .normal
-            result[log.id] = CCHCacheStatusContext(
-                state: state,
-                createdTokens: log.cacheCreationTokens,
-                readTokens: log.cacheReadTokens
-            )
-            if log.inputTokens > 0 || log.cacheReadTokens > 0 || log.totalTokens > 0 {
-                previous = log
-            }
-        }
-    }
-    for log in logs where result[log.id] == nil {
-        result[log.id] = CCHCacheStatusContext(
-            state: .normal,
-            createdTokens: log.cacheCreationTokens,
-            readTokens: log.cacheReadTokens
-        )
-    }
-    return result
-}
-
-private func isLargeCacheDrop(_ log: CCHLogEntry, previous: CCHLogEntry?) -> Bool {
-    guard
-        let previous,
-        log.inputTokens >= 20_000,
-        log.cacheReadTokens <= max(2_500, log.inputTokens / 18),
-        previous.cacheReadTokens >= 15_000,
-        !isCompactCacheRequest(log)
-    else { return false }
-
-    let previousCachedContext = previous.inputTokens + previous.cacheReadTokens
-    guard previousCachedContext >= 20_000 else { return false }
-    let ratio = Double(log.inputTokens) / Double(previousCachedContext)
-    return ratio >= 0.55 && ratio <= 1.55
-}
-
-private func isCompactCacheRequest(_ log: CCHLogEntry) -> Bool {
-    let modelText = "\(log.model) \(log.originalModel)".lowercased()
-    if modelText.contains("compact") { return true }
-    if log.messagesCount > 0, log.messagesCount < 12 { return true }
-    return false
-}
-
-private func cacheSessionKey(_ log: CCHLogEntry) -> String {
-    log.sessionId.isEmpty ? "log-\(log.id)" : log.sessionId
-}
-
-private func isOlderLog(_ lhs: CCHLogEntry, _ rhs: CCHLogEntry) -> Bool {
-    if lhs.sessionId == rhs.sessionId, lhs.requestSequence != rhs.requestSequence {
-        return lhs.requestSequence < rhs.requestSequence
-    }
-    guard
-        let lhsDate = parsedCCHDate(lhs.createdAt),
-        let rhsDate = parsedCCHDate(rhs.createdAt)
-    else { return lhs.id < rhs.id }
-    return lhsDate < rhsDate
-}
-
 private func isNewerLog(_ lhs: CCHLogEntry, _ rhs: CCHLogEntry) -> Bool {
     guard
         let lhsDate = parsedCCHDate(lhs.createdAt),
         let rhsDate = parsedCCHDate(rhs.createdAt)
     else { return lhs.id > rhs.id }
     return lhsDate > rhsDate
-}
-
-private func isRunningStatus(_ status: String) -> Bool {
-    let normalized = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    if normalized.isEmpty { return false }
-    return normalized.contains("active")
-        || normalized.contains("running")
-        || normalized.contains("progress")
-        || normalized.contains("request")
-        || normalized.contains("retry")
-        || normalized.contains("请求")
 }
 
 private func firstNonEmpty(_ values: String?...) -> String {
@@ -2966,13 +2973,6 @@ private func firstNonEmpty(_ values: String?...) -> String {
         }
     }
     return ""
-}
-
-private func menuBarActivityScore(_ session: CCHActiveSession) -> Int {
-    if session.concurrentCount > 0 { return 300 }
-    if session.status.lowercased().contains("retry") { return 200 }
-    if isRunningStatus(session.status) { return 100 }
-    return 0
 }
 
 func formatMoney(_ value: Double) -> String {

@@ -138,16 +138,16 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             tooltip = "Claude Code Hub idle"
         }
 
-        if force || semanticSnapshotChanged || lastPayload != payload {
+        if semanticSnapshotChanged || lastPayload != payload {
             statusView.payload = payload
             lastPayload = payload
         }
-        if force || semanticSnapshotChanged || lastTooltip != tooltip {
+        if semanticSnapshotChanged || lastTooltip != tooltip {
             statusItem.button?.toolTip = tooltip
             lastTooltip = tooltip
         }
         let width = statusView.preferredWidth
-        if force || abs(lastLength - width) > 0.5 {
+        if abs(lastLength - width) > 0.5 {
             statusItem.length = width
             lastLength = width
         }
@@ -176,22 +176,23 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
         let contentController = ensurePopoverContentController()
         contentController.view.alphaValue = 0
         popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
-        state.setPanelVisible(true)
 
         guard let window = contentController.view.window else {
             contentController.view.alphaValue = 1
+            state.setPanelVisible(true)
             startOutsideClickMonitor()
             return
         }
+        window.alphaValue = 0
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = true
-        window.alphaValue = 0
         window.makeKey()
         contentController.view.alphaValue = 1
 
         forceActiveMaterial(in: contentController.view)
+        state.setPanelVisible(true)
         startOutsideClickMonitor()
 
         NSAnimationContext.runAnimationGroup { context in

@@ -18,7 +18,7 @@ struct CCHOverview {
     var yesterdaySamePeriodCost: Double = 0
 }
 
-struct CCHActiveSession: Identifiable {
+struct CCHActiveSession: Identifiable, Equatable {
     var id: String { sessionId }
     let sessionId: String
     let providerId: Int
@@ -133,7 +133,7 @@ struct CCHLogSummary {
     var cacheReadTokens: Int = 0
 }
 
-struct CCHProviderChainItem: Identifiable {
+struct CCHProviderChainItem: Identifiable, Equatable {
     let id = UUID()
     let name: String
     let providerType: String
@@ -146,9 +146,23 @@ struct CCHProviderChainItem: Identifiable {
     let statusCode: Int?
     let attemptNumber: Int?
     let errorMessage: String
+
+    static func == (lhs: CCHProviderChainItem, rhs: CCHProviderChainItem) -> Bool {
+        lhs.name == rhs.name
+            && lhs.providerType == rhs.providerType
+            && lhs.reason == rhs.reason
+            && lhs.circuitState == rhs.circuitState
+            && lhs.priority == rhs.priority
+            && lhs.weight == rhs.weight
+            && lhs.groupTag == rhs.groupTag
+            && lhs.costMultiplier == rhs.costMultiplier
+            && lhs.statusCode == rhs.statusCode
+            && lhs.attemptNumber == rhs.attemptNumber
+            && lhs.errorMessage == rhs.errorMessage
+    }
 }
 
-struct CCHLogEntry: Identifiable {
+struct CCHLogEntry: Identifiable, Equatable {
     let id: Int
     let createdAt: String
     let sessionId: String
@@ -271,7 +285,7 @@ struct CCHLeaderboardSummary: Equatable {
     var cacheHitRate: Double?
 }
 
-struct CCHProviderFilterSnapshot {
+struct CCHProviderFilterSnapshot: Equatable {
     var groups: [String] = ["全部"]
     var providers: [CCHProvider] = []
     var enabledCount = 0
