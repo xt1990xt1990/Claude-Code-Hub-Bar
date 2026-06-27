@@ -138,16 +138,16 @@ final class CCHStatusItemController: NSObject, NSPopoverDelegate {
             tooltip = "Claude Code Hub idle"
         }
 
-        if semanticSnapshotChanged || lastPayload != payload {
+        if force || semanticSnapshotChanged || lastPayload != payload {
             statusView.payload = payload
             lastPayload = payload
         }
-        if semanticSnapshotChanged || lastTooltip != tooltip {
+        if force || semanticSnapshotChanged || lastTooltip != tooltip {
             statusItem.button?.toolTip = tooltip
             lastTooltip = tooltip
         }
         let width = statusView.preferredWidth
-        if abs(lastLength - width) > 0.5 {
+        if force || abs(lastLength - width) > 0.5 {
             statusItem.length = width
             lastLength = width
         }

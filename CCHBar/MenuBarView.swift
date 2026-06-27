@@ -1362,7 +1362,8 @@ private struct ProvidersTabView: View {
                         ProviderRow(
                             viewModel: state.providerRowViewModel(for: provider),
                             assignableGroups: state.assignableProviderGroups,
-                            isMiniProbeFeatureEnabled: state.providerMiniProbeEnabled
+                            isMiniProbeFeatureEnabled: state.providerMiniProbeEnabled,
+                            isHandlingRunningRequest: state.isProviderHandlingRunningRequest(provider)
                         )
                     }
                 }
@@ -3811,6 +3812,7 @@ private struct ProviderRow: View {
     @ObservedObject var viewModel: ProviderRowViewModel
     let assignableGroups: [CCHProviderGroup]
     let isMiniProbeFeatureEnabled: Bool
+    let isHandlingRunningRequest: Bool
     @State private var modelTestInput = ""
     @State private var multiplierInput = ""
     @State private var priorityInput = ""
@@ -4083,7 +4085,7 @@ private struct ProviderRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
-        .cchSurface(.row)
+        .background(providerRowBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onChange(of: viewModel.customTestModels) {
             guard renderedEditor == .modelTest else { return }
@@ -4141,6 +4143,12 @@ private struct ProviderRow: View {
                 viewModel.commitProviderSortIfNeeded()
             }
         }
+    }
+
+    private var providerRowBackground: Color {
+        isHandlingRunningRequest
+            ? theme.accentGreen.opacity(0.12)
+            : theme.row
     }
 
     private func editorHeight(_ editor: ProviderEditor) -> CGFloat {

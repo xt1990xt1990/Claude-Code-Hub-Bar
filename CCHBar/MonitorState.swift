@@ -628,6 +628,25 @@ final class MonitorState: ObservableObject {
         return providerMultiplierByName[normalized.lowercased()] ?? 1
     }
 
+    func isProviderHandlingRunningRequest(_ provider: CCHProvider) -> Bool {
+        if activeSessions.contains(where: { session in
+            session.providerId == provider.id
+                && (
+                    session.concurrentCount > 0
+                    || session.durationMs <= 0
+                    || Self.isRunningSessionStatus(session.status)
+                )
+        }) {
+            return true
+        }
+
+        let providerName = Self.providerLookupKey(provider.name)
+        guard !providerName.isEmpty else { return false }
+        return cachedMenuBarRunningLogs.contains { log in
+            Self.providerLookupKey(log.providerName) == providerName
+        }
+    }
+
     func isProviderGroupSelected(_ group: String) -> Bool {
         group == "全部" ? selectedProviderGroups.isEmpty : selectedProviderGroups.contains(group)
     }
@@ -2302,6 +2321,21 @@ final class MonitorState: ObservableObject {
             uniquingKeysWith: { current, _ in current }
         )
         upstreamProviderInputs = providers.map(upstreamProviderInput)
+    }
+
+    private static func providerLookupKey(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func isRunningSessionStatus(_ status: String) -> Bool {
+        let normalized = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.isEmpty { return false }
+        return normalized.contains("active")
+            || normalized.contains("running")
+            || normalized.contains("progress")
+            || normalized.contains("request")
+            || normalized.contains("retry")
+            || normalized.contains("请求")
     }
 
     private func reconcileProviderRowViewModels() {
