@@ -29,7 +29,9 @@ Private configuration should be entered locally and should not be committed to t
 - Cache hit-rate display for logs and leaderboards.
 - Compact recent-request rows on the dashboard, with adaptive truncation for long provider and model names.
 - Provider group filters, provider group assignment, enable/disable, probe, and circuit reset controls.
+- Provider rows use a subtle green background when they are handling running requests.
 - Provider model tests show first-byte timing and total latency when CCH returns timing data.
+- Optimized status bar and provider derived-state refreshes to reduce repeated work and no-op redraws.
 - Mini Probe monitoring for providers, with per-provider enablement, probe model overrides, compact interval controls, active-hour scheduling, and average first-byte statistics.
 - Status bar polling now has separate idle/active refresh intervals and an optional reduced-motion mode.
 - Upstream rate panel for Sub2API and new-api providers.
