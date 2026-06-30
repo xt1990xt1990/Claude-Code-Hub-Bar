@@ -63,6 +63,68 @@ private struct UpstreamRateStaleSnapshotTests {
             shouldRefreshUpstreamRateSnapshots(providers: providers, snapshots: [freshSnapshot]),
             "snapshot with all current provider ids should not trigger refresh"
         )
+
+        let upstreamDeltaSite = UpstreamRateMatcher.buildSites(
+            providers: providers,
+            snapshots: [freshSnapshot],
+            selectedProviderIds: [],
+            ignoredHosts: [],
+            previousUpstreamRatesByProviderId: [1: 0.03, 2: 0.05]
+        ).first { $0.host == "sub.example.com" }
+        let increasedUpstreamRow = upstreamDeltaSite?.rows.first { $0.providerId == 1 }
+        expectTrue(
+            increasedUpstreamRow?.previousUpstreamRate == 0.03,
+            "matched row should expose previous upstream rate for changed upstream snapshot entries"
+        )
+        let unchangedUpstreamRow = upstreamDeltaSite?.rows.first { $0.providerId == 2 }
+        expectTrue(
+            unchangedUpstreamRow?.previousUpstreamRate == nil,
+            "matched row should suppress previous upstream rate when upstream snapshot rate is unchanged"
+        )
+        expectTrue(
+            changedPreviousUpstreamRatesByProviderId(
+                previousSnapshots: [staleSnapshot],
+                currentSnapshots: [freshSnapshot]
+            ) == [:],
+            "previous upstream rate map should stay empty when overlapping snapshot entries are unchanged"
+        )
+        let changedSnapshot = UpstreamRateSnapshot(
+            host: "sub.example.com",
+            sourceType: .sub2API,
+            status: .available,
+            entries: [
+                UpstreamRateEntry(providerId: 1, keyName: "Example-Codex", groupName: "codex", rate: 0.08),
+                UpstreamRateEntry(providerId: 2, keyName: "Example-Codex-Plus", groupName: "plus", rate: 0.05)
+            ]
+        )
+        expectTrue(
+            changedPreviousUpstreamRatesByProviderId(
+                previousSnapshots: [staleSnapshot],
+                currentSnapshots: [changedSnapshot]
+            ) == [1: 0.05],
+            "previous upstream rate map should include only changed provider entries"
+        )
+        expectTrue(
+            formatMultiplierDelta(0.2) == "+0.20x",
+            "positive upstream rate deltas should use signed suffix notation"
+        )
+        expectTrue(
+            formatMultiplierDelta(-0.05) == "-0.05x",
+            "negative upstream rate deltas should use signed suffix notation"
+        )
+        expectTrue(
+            upstreamRateComparisonSymbol(currentRate: 1.3, upstreamRate: 1.0) == ">",
+            "current rate above upstream rate should render as a greater-than comparison"
+        )
+        expectTrue(
+            upstreamRateComparisonSymbol(currentRate: 0.8, upstreamRate: 1.0) == "<",
+            "current rate below upstream rate should render as a less-than comparison"
+        )
+        expectTrue(
+            upstreamRateComparisonSymbol(currentRate: 1.0, upstreamRate: 1.00001) == "=",
+            "nearly equal current and upstream rates should render as equality"
+        )
+
         expectTrue(
             upstreamRateProviderSnapshotSignature(providers: providers)
                 != upstreamRateProviderSnapshotSignature(providers: Array(providers.prefix(3))),

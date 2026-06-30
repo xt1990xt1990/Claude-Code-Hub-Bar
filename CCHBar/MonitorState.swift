@@ -245,6 +245,7 @@ final class MonitorState: ObservableObject {
     @Published private(set) var upstreamRateCredentials: [UpstreamRateCredential] = []
     @Published private(set) var upstreamRateFetchingHosts: Set<String> = []
     @Published private(set) var upstreamRateLastSyncAdjustedProviderIds: Set<Int> = []
+    @Published private(set) var upstreamRatePreviousRatesByProviderId: [Int: Double] = [:]
     @Published private(set) var isRefreshingUpstreamRates = false
     @Published private(set) var isRefreshingUpstreamBalances = false
     @Published private(set) var upstreamBalanceLastRefreshedAt: Date?
@@ -466,7 +467,8 @@ final class MonitorState: ObservableObject {
             selectedProviderIds: upstreamRateSelectedProviderIds,
             ignoredHosts: upstreamRateIgnoredHosts,
             displayNames: upstreamRateHostDisplayNames,
-            lastSyncAdjustedProviderIds: upstreamRateLastSyncAdjustedProviderIds
+            lastSyncAdjustedProviderIds: upstreamRateLastSyncAdjustedProviderIds,
+            previousUpstreamRatesByProviderId: upstreamRatePreviousRatesByProviderId
         )
         if upstreamRateSitesCacheInput == input, let cached = upstreamRateSitesCache {
             return cached
@@ -1450,12 +1452,17 @@ final class MonitorState: ObservableObject {
             flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
         }
         let activeHosts = Set(sortedGroups.map(\.key))
+        let previousSnapshots = upstreamRateSnapshots
         let mergedSnapshots = UpstreamRateSnapshot
             .mergeLatest(cached: upstreamRateSnapshots, refreshed: nextSnapshots)
             .filter { activeHosts.contains($0.host) }
         if upstreamRateSnapshots != mergedSnapshots {
             upstreamRateSnapshots = mergedSnapshots
         }
+        upstreamRatePreviousRatesByProviderId = changedPreviousUpstreamRatesByProviderId(
+            previousSnapshots: previousSnapshots,
+            currentSnapshots: mergedSnapshots
+        )
         saveUpstreamRateSnapshots()
         upstreamRateLastCheckedAt = Date()
 
@@ -2868,6 +2875,9 @@ private extension MonitorState {
             return credential
         }
         var next = credential
+        if next.userAgent.isEmpty {
+            next.userAgent = existing.userAgent
+        }
         if next.sub2AuthToken.isEmpty {
             next.sub2AuthToken = existing.sub2AuthToken
         }
@@ -2876,6 +2886,9 @@ private extension MonitorState {
         }
         if next.sub2TokenExpiresAt == nil {
             next.sub2TokenExpiresAt = existing.sub2TokenExpiresAt
+        }
+        if next.sub2CookieHeader.isEmpty {
+            next.sub2CookieHeader = existing.sub2CookieHeader
         }
         if next.newAPIUserId.isEmpty {
             next.newAPIUserId = existing.newAPIUserId

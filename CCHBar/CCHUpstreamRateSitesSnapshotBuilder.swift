@@ -7,6 +7,7 @@ struct CCHUpstreamRateSitesSnapshotInput: Equatable {
     let ignoredHosts: Set<String>
     let displayNames: [String: String]
     let lastSyncAdjustedProviderIds: Set<Int>
+    let previousUpstreamRatesByProviderId: [Int: Double]
 }
 
 struct CCHUpstreamRateSitesSnapshot {
@@ -26,7 +27,8 @@ enum CCHUpstreamRateSitesSnapshotBuilder {
             selectedProviderIds: input.selectedProviderIds,
             ignoredHosts: input.ignoredHosts,
             displayNames: input.displayNames,
-            lastSyncAdjustedProviderIds: input.lastSyncAdjustedProviderIds
+            lastSyncAdjustedProviderIds: input.lastSyncAdjustedProviderIds,
+            previousUpstreamRatesByProviderId: input.previousUpstreamRatesByProviderId
         )
 
         return CCHUpstreamRateSitesSnapshot(

@@ -320,7 +320,7 @@ final class UpstreamChromeAuthImporter: ObservableObject {
     }
 
     func requireFreshBrowserCredential(
-        _ state: (storage: [String: String], cookieHeader: String),
+        _ state: (storage: [String: String], cookieHeader: String, userAgent: String),
         sourceType: UpstreamRateSourceType
     ) throws {
         let fresh = try mergeBrowserState(
@@ -343,7 +343,7 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         }
     }
 
-    private func readBrowserState(for credential: UpstreamRateCredential) async throws -> (storage: [String: String], cookieHeader: String) {
+    private func readBrowserState(for credential: UpstreamRateCredential) async throws -> (storage: [String: String], cookieHeader: String, userAgent: String) {
         let page = try await findPage(for: credential)
         guard let webSocketDebuggerURL = page.webSocketDebuggerURL else {
             throw UpstreamChromeAuthError.invalidDevToolsResponse
@@ -354,12 +354,13 @@ final class UpstreamChromeAuthImporter: ObservableObject {
 
         let storage = try await evaluateBrowserStorage(using: task, id: 1)
         let cookieHeader = try await readCookieHeader(for: page.url, using: task, id: 2)
-        print("UpstreamChromeAuthImporter state host=\(credential.host) storageKeys=\(storage.count) cookieHeaderLen=\(cookieHeader.count)")
-        return (storage, cookieHeader)
+        let userAgent = try await readUserAgent(using: task, id: 3)
+        print("UpstreamChromeAuthImporter state host=\(credential.host) storageKeys=\(storage.count) cookieHeaderLen=\(cookieHeader.count) userAgentLen=\(userAgent.count)")
+        return (storage, cookieHeader, userAgent)
     }
 
     func mergeBrowserState(
-        _ state: (storage: [String: String], cookieHeader: String),
+        _ state: (storage: [String: String], cookieHeader: String, userAgent: String),
         into credential: UpstreamRateCredential
     ) throws -> UpstreamRateCredential {
         var next: UpstreamRateCredential
@@ -369,8 +370,14 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             where credential.sourceType == .newAPI && !state.cookieHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             next = credential
         }
+        if credential.sourceType == .sub2API, !state.cookieHeader.isEmpty {
+            next.sub2CookieHeader = state.cookieHeader
+        }
         if credential.sourceType == .newAPI, !state.cookieHeader.isEmpty {
             next.newAPICookieHeader = state.cookieHeader
+        }
+        if !state.userAgent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            next.userAgent = state.userAgent
         }
         if
             credential.sourceType == .newAPI,
@@ -434,6 +441,29 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             throw UpstreamChromeAuthError.invalidDevToolsResponse
         }
         return browserStorage(localStorage: localStorage, sessionStorage: sessionStorage)
+    }
+
+    private func readUserAgent(using task: URLSessionWebSocketTask, id: Int) async throws -> String {
+        let payload: [String: Any] = [
+            "id": id,
+            "method": "Runtime.evaluate",
+            "params": [
+                "expression": "navigator.userAgent",
+                "returnByValue": true
+            ]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        try await send(String(decoding: data, as: UTF8.self), using: task)
+        let responseData = try await receiveResponseData(id: id, using: task)
+        guard
+            let object = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+            let result = object["result"] as? [String: Any],
+            let resultObject = result["result"] as? [String: Any],
+            let value = resultObject["value"] as? String
+        else {
+            throw UpstreamChromeAuthError.invalidDevToolsResponse
+        }
+        return value
     }
 
     func browserStorage(localStorage: [String: Any], sessionStorage: [String: Any]) -> [String: String] {
@@ -541,6 +571,10 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             }
             if !cookieHeader.isEmpty {
                 request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+            }
+            let userAgent = credential.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !userAgent.isEmpty {
+                request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             }
             if let signedPath = probe.signedPath {
                 let signature = newAPIBrowserAuthSignature(path: signedPath)
@@ -686,6 +720,8 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         if before.sub2AuthToken != after.sub2AuthToken, !after.sub2AuthToken.isEmpty { count += 1 }
         if before.sub2RefreshToken != after.sub2RefreshToken, !after.sub2RefreshToken.isEmpty { count += 1 }
         if before.sub2TokenExpiresAt != after.sub2TokenExpiresAt, after.sub2TokenExpiresAt != nil { count += 1 }
+        if before.sub2CookieHeader != after.sub2CookieHeader, !after.sub2CookieHeader.isEmpty { count += 1 }
+        if before.userAgent != after.userAgent, !after.userAgent.isEmpty { count += 1 }
         if before.newAPIUserId != after.newAPIUserId, !after.newAPIUserId.isEmpty { count += 1 }
         if before.newAPIAccessToken != after.newAPIAccessToken, !after.newAPIAccessToken.isEmpty { count += 1 }
         if before.newAPICookieHeader != after.newAPICookieHeader, !after.newAPICookieHeader.isEmpty { count += 1 }

@@ -154,6 +154,7 @@ struct UpstreamRateProviderRow: Identifiable, Equatable {
     let currentRate: Double
     let upstreamGroupName: String?
     let upstreamRate: Double?
+    let previousUpstreamRate: Double?
     let sourceType: UpstreamRateSourceType
     let matchStatus: UpstreamRateMatchStatus
     let isSelectedForSync: Bool
@@ -220,7 +221,8 @@ enum UpstreamRateMatcher {
         selectedProviderIds: Set<Int>,
         ignoredHosts: Set<String>,
         displayNames: [String: String] = [:],
-        lastSyncAdjustedProviderIds: Set<Int> = []
+        lastSyncAdjustedProviderIds: Set<Int> = [],
+        previousUpstreamRatesByProviderId: [Int: Double] = [:]
     ) -> [UpstreamRateSite] {
         let snapshotsByHost = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.host, $0) })
         let grouped = Dictionary(grouping: providers) { provider in
@@ -244,7 +246,8 @@ enum UpstreamRateMatcher {
                         status: status,
                         snapshot: snapshot,
                         selectedProviderIds: selectedProviderIds,
-                        lastSyncAdjustedProviderIds: lastSyncAdjustedProviderIds
+                        lastSyncAdjustedProviderIds: lastSyncAdjustedProviderIds,
+                        previousUpstreamRatesByProviderId: previousUpstreamRatesByProviderId
                     )
                 }
 
@@ -277,9 +280,19 @@ enum UpstreamRateMatcher {
         status: UpstreamRateSourceStatus,
         snapshot: UpstreamRateSnapshot?,
         selectedProviderIds: Set<Int>,
-        lastSyncAdjustedProviderIds: Set<Int>
+        lastSyncAdjustedProviderIds: Set<Int>,
+        previousUpstreamRatesByProviderId: [Int: Double]
     ) -> UpstreamRateProviderRow {
         let entry = snapshot?.entries.first { $0.providerId == provider.id }
+        let previousRate = previousUpstreamRatesByProviderId[provider.id]
+        let visiblePreviousRate: Double?
+        if let currentRate = entry?.rate,
+           let previousRate,
+           abs(currentRate - previousRate) > 0.0001 {
+            visiblePreviousRate = previousRate
+        } else {
+            visiblePreviousRate = nil
+        }
         let unsupported = sourceType == .unknown || status == .unsupported
         let matchStatus: UpstreamRateMatchStatus
         if unsupported {
@@ -298,6 +311,7 @@ enum UpstreamRateMatcher {
             currentRate: provider.costMultiplier,
             upstreamGroupName: entry?.groupName,
             upstreamRate: entry?.rate,
+            previousUpstreamRate: visiblePreviousRate,
             sourceType: sourceType,
             matchStatus: matchStatus,
             isSelectedForSync: selectedProviderIds.contains(provider.id),
@@ -389,6 +403,42 @@ func shouldRefreshUpstreamRateSnapshots(
     }
 
     return false
+}
+
+func changedPreviousUpstreamRatesByProviderId(
+    previousSnapshots: [UpstreamRateSnapshot],
+    currentSnapshots: [UpstreamRateSnapshot]
+) -> [Int: Double] {
+    let previousEntries = Dictionary(
+        uniqueKeysWithValues: previousSnapshots.flatMap(\.entries).compactMap { entry -> (Int, Double)? in
+            guard let providerId = entry.providerId else { return nil }
+            return (providerId, entry.rate)
+        }
+    )
+    let currentEntries = Dictionary(
+        uniqueKeysWithValues: currentSnapshots.flatMap(\.entries).compactMap { entry -> (Int, Double)? in
+            guard let providerId = entry.providerId else { return nil }
+            return (providerId, entry.rate)
+        }
+    )
+
+    return currentEntries.reduce(into: [Int: Double]()) { result, entry in
+        guard let previousRate = previousEntries[entry.key] else { return }
+        guard abs(entry.value - previousRate) > 0.0001 else { return }
+        result[entry.key] = previousRate
+    }
+}
+
+func formatMultiplierDelta(_ value: Double) -> String {
+    let sign = value >= 0 ? "+" : "-"
+    return String(format: "\(sign)%.2fx", abs(value))
+}
+
+func upstreamRateComparisonSymbol(currentRate: Double, upstreamRate: Double) -> String {
+    if abs(currentRate - upstreamRate) < 0.0001 {
+        return "="
+    }
+    return currentRate > upstreamRate ? ">" : "<"
 }
 
 func upstreamRateProviderSnapshotSignature(providers: [UpstreamRateProviderInput]) -> String {

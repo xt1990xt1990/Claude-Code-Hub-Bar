@@ -6,9 +6,11 @@ struct UpstreamRateCredential: Identifiable, Codable, Equatable {
     var host: String
     var sourceType: UpstreamRateSourceType
     var baseURL: String
+    var userAgent: String
     var sub2AuthToken: String
     var sub2RefreshToken: String
     var sub2TokenExpiresAt: Date?
+    var sub2CookieHeader: String
     var newAPIUserId: String
     var newAPIAccessToken: String
     var newAPICookieHeader: String
@@ -17,9 +19,11 @@ struct UpstreamRateCredential: Identifiable, Codable, Equatable {
         case host
         case sourceType
         case baseURL
+        case userAgent
         case sub2AuthToken
         case sub2RefreshToken
         case sub2TokenExpiresAt
+        case sub2CookieHeader
         case newAPIUserId
         case newAPIAccessToken
         case newAPICookieHeader
@@ -30,9 +34,11 @@ struct UpstreamRateCredential: Identifiable, Codable, Equatable {
             host: host,
             sourceType: sourceType == .unknown ? .newAPI : sourceType,
             baseURL: "https://\(host)",
+            userAgent: "",
             sub2AuthToken: "",
             sub2RefreshToken: "",
             sub2TokenExpiresAt: nil,
+            sub2CookieHeader: "",
             newAPIUserId: "",
             newAPIAccessToken: "",
             newAPICookieHeader: ""
@@ -43,9 +49,11 @@ struct UpstreamRateCredential: Identifiable, Codable, Equatable {
         host: String,
         sourceType: UpstreamRateSourceType,
         baseURL: String,
+        userAgent: String = "",
         sub2AuthToken: String,
         sub2RefreshToken: String,
         sub2TokenExpiresAt: Date?,
+        sub2CookieHeader: String = "",
         newAPIUserId: String,
         newAPIAccessToken: String,
         newAPICookieHeader: String = ""
@@ -53,9 +61,11 @@ struct UpstreamRateCredential: Identifiable, Codable, Equatable {
         self.host = host
         self.sourceType = sourceType
         self.baseURL = baseURL
+        self.userAgent = userAgent
         self.sub2AuthToken = sub2AuthToken
         self.sub2RefreshToken = sub2RefreshToken
         self.sub2TokenExpiresAt = sub2TokenExpiresAt
+        self.sub2CookieHeader = sub2CookieHeader
         self.newAPIUserId = newAPIUserId
         self.newAPIAccessToken = newAPIAccessToken
         self.newAPICookieHeader = newAPICookieHeader
@@ -66,9 +76,11 @@ struct UpstreamRateCredential: Identifiable, Codable, Equatable {
         host = try container.decode(String.self, forKey: .host)
         sourceType = try container.decode(UpstreamRateSourceType.self, forKey: .sourceType)
         baseURL = try container.decode(String.self, forKey: .baseURL)
+        userAgent = try container.decodeIfPresent(String.self, forKey: .userAgent) ?? ""
         sub2AuthToken = try container.decode(String.self, forKey: .sub2AuthToken)
         sub2RefreshToken = try container.decode(String.self, forKey: .sub2RefreshToken)
         sub2TokenExpiresAt = try container.decodeIfPresent(Date.self, forKey: .sub2TokenExpiresAt)
+        sub2CookieHeader = try container.decodeIfPresent(String.self, forKey: .sub2CookieHeader) ?? ""
         newAPIUserId = try container.decode(String.self, forKey: .newAPIUserId)
         newAPIAccessToken = try container.decode(String.self, forKey: .newAPIAccessToken)
         newAPICookieHeader = try container.decodeIfPresent(String.self, forKey: .newAPICookieHeader) ?? ""

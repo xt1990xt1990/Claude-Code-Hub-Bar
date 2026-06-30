@@ -255,7 +255,7 @@ actor UpstreamRateService {
             baseURL: credential.baseURL,
             path: "/api/v1/auth/refresh",
             method: "POST",
-            headers: ["Content-Type": "application/json"],
+            headers: upstreamRateSub2RefreshHeaders(credential),
             body: ["refresh_token": refreshToken],
             unwrap: .sub2
         )
@@ -288,7 +288,7 @@ actor UpstreamRateService {
         let status = (try? await requestJSON(
             baseURL: credential.baseURL,
             path: "/api/status",
-            headers: ["Accept": "application/json"],
+            headers: upstreamRateNewAPIStatusHeaders(credential),
             unwrap: .newAPI
         )) as? [String: Any] ?? [:]
 
@@ -497,26 +497,11 @@ actor UpstreamRateService {
     }
 
     private func sub2Headers(_ credential: UpstreamRateCredential) -> [String: String] {
-        ["Authorization": "Bearer \(credential.sub2AuthToken)", "Accept": "application/json"]
+        upstreamRateSub2Headers(credential)
     }
 
     private func newAPIHeaders(_ credential: UpstreamRateCredential, signedPath: String? = nil) -> [String: String] {
-        var headers = [
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        ]
-        let token = credential.newAPIAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !token.isEmpty {
-            headers["Authorization"] = "Bearer \(token)"
-        }
-        let userId = credential.newAPIUserId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !userId.isEmpty {
-            headers["New-Api-User"] = userId
-        }
-        let cookieHeader = credential.newAPICookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !cookieHeader.isEmpty {
-            headers["Cookie"] = cookieHeader
-        }
+        var headers = upstreamRateNewAPIHeaders(credential)
         if let signedPath {
             let signature = newAPISignature(path: signedPath, date: dateProvider(), nonce: nonceProvider())
             headers["X-Timestamp"] = signature.timestamp
@@ -560,10 +545,10 @@ actor UpstreamRateService {
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw UpstreamRateServiceError.invalidResponse("上游响应无效") }
-        let value = data.isEmpty ? NSNull() : try JSONSerialization.jsonObject(with: data)
         guard (200...299).contains(http.statusCode) else {
-            throw UpstreamRateServiceError.http(http.statusCode)
+            throw UpstreamRateServiceError.http(http.statusCode, headers: upstreamRateHTTPHeaders(http))
         }
+        let value = data.isEmpty ? NSNull() : try JSONSerialization.jsonObject(with: data)
         return try unwrapEnvelope(value, unwrap: unwrap)
     }
 
@@ -592,15 +577,104 @@ actor UpstreamRateService {
     }
 }
 
+func upstreamRateSub2Headers(_ credential: UpstreamRateCredential) -> [String: String] {
+    var headers = [
+        "Authorization": "Bearer \(credential.sub2AuthToken)",
+        "Accept": "application/json"
+    ]
+    let cookieHeader = credential.sub2CookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !cookieHeader.isEmpty {
+        headers["Cookie"] = cookieHeader
+    }
+    let userAgent = credential.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !userAgent.isEmpty {
+        headers["User-Agent"] = userAgent
+    }
+    return headers
+}
+
+func upstreamRateSub2RefreshHeaders(_ credential: UpstreamRateCredential) -> [String: String] {
+    var headers = [
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    ]
+    let cookieHeader = credential.sub2CookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !cookieHeader.isEmpty {
+        headers["Cookie"] = cookieHeader
+    }
+    let userAgent = credential.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !userAgent.isEmpty {
+        headers["User-Agent"] = userAgent
+    }
+    return headers
+}
+
+func upstreamRateNewAPIHeaders(_ credential: UpstreamRateCredential) -> [String: String] {
+    var headers = upstreamRateNewAPIStatusHeaders(credential)
+    headers["Content-Type"] = "application/json"
+    let token = credential.newAPIAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !token.isEmpty {
+        headers["Authorization"] = "Bearer \(token)"
+    }
+    let userId = credential.newAPIUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !userId.isEmpty {
+        headers["New-Api-User"] = userId
+    }
+    return headers
+}
+
+func upstreamRateNewAPIStatusHeaders(_ credential: UpstreamRateCredential) -> [String: String] {
+    var headers = ["Accept": "application/json"]
+    let cookieHeader = credential.newAPICookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !cookieHeader.isEmpty {
+        headers["Cookie"] = cookieHeader
+    }
+    let userAgent = credential.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !userAgent.isEmpty {
+        headers["User-Agent"] = userAgent
+    }
+    return headers
+}
+
+func upstreamRateHTTPHeaders(_ response: HTTPURLResponse) -> [String: String] {
+    response.allHeaderFields.reduce(into: [String: String]()) { result, entry in
+        if let key = entry.key as? String {
+            result[key] = "\(entry.value)"
+        }
+    }
+}
+
 enum UpstreamRateServiceError: LocalizedError {
     case invalidURL
-    case http(Int)
+    case http(Int, headers: [String: String] = [:])
     case invalidResponse(String)
     case missingCredential(String)
 
+    var isCloudflareChallenge: Bool {
+        switch self {
+        case .http(let code, let headers):
+            if headers.contains(where: { key, value in
+                key.caseInsensitiveCompare("cf-mitigated") == .orderedSame
+                    && value.caseInsensitiveCompare("challenge") == .orderedSame
+            }) {
+                return true
+            }
+            guard code == 403 || code == 429 || code == 503 else { return false }
+            return headers.contains { key, value in
+                key.lowercased().hasPrefix("cf-")
+                    || (key.caseInsensitiveCompare("server") == .orderedSame && value.lowercased().contains("cloudflare"))
+            }
+        case .invalidURL, .invalidResponse, .missingCredential:
+            return false
+        }
+    }
+
     var isAuthenticationExpired: Bool {
         switch self {
-        case .http(let code):
+        case .http(let code, _):
+            if isCloudflareChallenge {
+                return false
+            }
             return code == 401 || code == 403
         case .invalidResponse(let message):
             let normalized = message.lowercased()
@@ -619,7 +693,11 @@ enum UpstreamRateServiceError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "上游地址无效"
-        case .http(let code): return "上游 HTTP 错误 \(code)"
+        case .http(let code, _):
+            if isCloudflareChallenge {
+                return "上游被 Cloudflare 验证拦截"
+            }
+            return "上游 HTTP 错误 \(code)"
         case .invalidResponse(let message): return message
         case .missingCredential(let message): return message
         }

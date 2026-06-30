@@ -320,7 +320,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				MARKETING_VERSION = 1.2.4;
+				MARKETING_VERSION = 1.2.5;
 				PRODUCT_BUNDLE_IDENTIFIER = app.cchbar.CCHBar;
 				PRODUCT_NAME = "Claude Code Hub Bar";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -339,7 +339,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				MARKETING_VERSION = 1.2.4;
+				MARKETING_VERSION = 1.2.5;
 				PRODUCT_BUNDLE_IDENTIFIER = app.cchbar.CCHBar;
 				PRODUCT_NAME = "Claude Code Hub Bar";
 				SWIFT_EMIT_LOC_STRINGS = YES;

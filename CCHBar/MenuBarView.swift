@@ -1599,7 +1599,7 @@ private struct UpstreamRatesTabView: View {
                                     }
                                 }
                             } : nil,
-                            configureCredential: showConfigure ? {
+                            configureCredential: (showConfigure || site.status == .available) ? {
                                 editingCredential = state.draftUpstreamCredential(for: site)
                             } : nil,
                             reauthorizeCredential: site.status == .authExpired ? {
@@ -1873,6 +1873,20 @@ private struct UpstreamRateSiteCard: View {
                     }
                     if site.status == .authExpired {
                         StatusCapsule(text: "登录失效", color: theme.accentOrange)
+                    } else if site.pendingSyncCount > 0 {
+                        StatusCapsule(text: "\(site.pendingSyncCount) 待应用", color: theme.accentOrange)
+                    } else if site.status == .available {
+                        if let configureCredential {
+                            Button {
+                                configureCredential()
+                            } label: {
+                                StatusCapsule(text: "已检测", color: theme.accentGreen)
+                            }
+                            .buttonStyle(.plain)
+                            .help("重新配置登录态")
+                        } else {
+                            StatusCapsule(text: "已检测", color: theme.accentGreen)
+                        }
                     } else if let configureCredential {
                         Button {
                             configureCredential()
@@ -1882,10 +1896,6 @@ private struct UpstreamRateSiteCard: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                    } else if site.pendingSyncCount > 0 {
-                        StatusCapsule(text: "\(site.pendingSyncCount) 待应用", color: theme.accentOrange)
-                    } else if site.status == .available {
-                        StatusCapsule(text: "已检测", color: theme.accentGreen)
                     } else {
                         StatusCapsule(text: "需登录", color: theme.accentOrange)
                     }
@@ -2024,12 +2034,6 @@ private struct UpstreamRateProviderSyncRow: View {
         provider.map { state.displayGroupTitles(for: $0) } ?? []
     }
 
-    private var rateDirection: RateChangeDirection {
-        guard let upstreamRate = row.upstreamRate else { return .none }
-        if abs(row.currentRate - upstreamRate) < 0.0001 { return .equal }
-        return row.currentRate > upstreamRate ? .up : .down
-    }
-
     var body: some View {
         VStack(spacing: 7) {
             HStack(spacing: 8) {
@@ -2075,11 +2079,14 @@ private struct UpstreamRateProviderSyncRow: View {
                                 .help(row.isSelectedForSync ? "正在跟随上游，取消勾选后可手动编辑" : "")
                         }
                         if let upstreamRate = row.upstreamRate {
-                            RateChangeArrow(direction: rateDirection)
+                            UpstreamRateComparisonIndicator(currentRate: row.currentRate, upstreamRate: upstreamRate)
                             Text("上游")
                                 .font(.caption2)
                                 .foregroundStyle(theme.textSecondary)
                             MultiplierBadge(value: upstreamRate, compact: true)
+                            if let previousUpstreamRate = row.previousUpstreamRate {
+                                UpstreamRateDeltaBadge(previousRate: previousUpstreamRate, currentRate: upstreamRate)
+                            }
                         } else {
                             Text(row.matchStatus == .matched ? "未跟随，可手动编辑 CCH 倍率" : "暂未匹配上游 key")
                                 .font(.caption2)
@@ -2718,6 +2725,11 @@ private struct UpstreamCredentialEditor: View {
                             .foregroundStyle(theme.textSecondary)
                         SecureField("refresh_token", text: $credential.sub2RefreshToken)
                             .textFieldStyle(.roundedBorder)
+                        if !credential.sub2CookieHeader.isEmpty {
+                            Label("已捕获浏览器 Cookie", systemImage: "checkmark.seal.fill")
+                                .font(.caption2)
+                                .foregroundStyle(theme.accentBlue)
+                        }
                     }
                     .padding(.top, 8)
                 }
@@ -3034,6 +3046,53 @@ private struct MultiplierBadge: View {
             .clipShape(Capsule())
             .contentTransition(.numericText(value: value))
             .animation(.easeOut(duration: 0.28), value: value)
+    }
+}
+
+private struct UpstreamRateDeltaBadge: View {
+    let previousRate: Double
+    let currentRate: Double
+    @Environment(\.cchTheme) private var theme
+
+    private var delta: Double {
+        currentRate - previousRate
+    }
+
+    private var isIncrease: Bool {
+        delta > 0
+    }
+
+    private var color: Color {
+        isIncrease ? theme.accentOrange : theme.accentGreen
+    }
+
+    private var symbolName: String {
+        isIncrease ? "arrow.up" : "arrow.down"
+    }
+
+    private var deltaText: String {
+        formatMultiplierDelta(delta)
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text("较上次")
+            Image(systemName: symbolName)
+                .font(.system(size: 7.5, weight: .black))
+            Text(deltaText)
+                .monospacedDigit()
+        }
+        .font(.system(size: 8.5, weight: .bold, design: .rounded))
+        .foregroundStyle(color)
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1)
+        .background(color.opacity(0.12))
+        .clipShape(Capsule())
+        .contentTransition(.numericText(value: delta))
+        .animation(.easeOut(duration: 0.22), value: delta)
+        .help("上游倍率从 \(formatMultiplier(previousRate)) 变为 \(formatMultiplier(currentRate))")
     }
 }
 
@@ -5065,38 +5124,30 @@ private struct RefreshHairline: View {
     }
 }
 
-private enum RateChangeDirection {
-    case up, down, equal, none
-}
-
-private struct RateChangeArrow: View {
-    let direction: RateChangeDirection
+private struct UpstreamRateComparisonIndicator: View {
+    let currentRate: Double
+    let upstreamRate: Double
     @Environment(\.cchTheme) private var theme
 
-    private var symbolName: String {
-        switch direction {
-        case .up: return "arrow.up"
-        case .down: return "arrow.down"
-        case .equal: return "equal"
-        case .none: return "arrow.right"
-        }
+    private var symbol: String {
+        upstreamRateComparisonSymbol(currentRate: currentRate, upstreamRate: upstreamRate)
     }
 
     private var color: Color {
-        switch direction {
-        case .up: return theme.accentGreen
-        case .down: return theme.accentOrange
-        case .equal, .none: return theme.textSecondary
+        switch symbol {
+        case ">": return theme.accentGreen
+        case "<": return theme.accentRed
+        default: return theme.textSecondary
         }
     }
 
     var body: some View {
-        Image(systemName: symbolName)
-            .font(.system(size: 9, weight: .black))
+        Text(symbol)
+            .font(.system(size: 10.5, weight: .black, design: .rounded))
             .foregroundStyle(color)
             .frame(width: 14, height: 12)
-            .contentTransition(.symbolEffect(.replace))
-            .animation(.easeOut(duration: 0.18), value: direction)
+            .contentTransition(.numericText())
+            .animation(.easeOut(duration: 0.18), value: symbol)
     }
 }
 
