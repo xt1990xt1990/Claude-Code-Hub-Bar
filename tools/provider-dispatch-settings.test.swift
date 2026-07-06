@@ -148,5 +148,75 @@ private struct ProviderDispatchSettingsTests {
             "committing a pending sort should move rows to the latest operational priority order"
         )
         expectEqual(sortState.hasPendingSort, false, "recommitted sort should clear pending state")
+
+        let pinnedSortedIds = sortProvidersByOperationalPriority(
+            [
+                CCHProviderSortDescriptor(id: 1, isEnabled: false, hasMiniProbe: false, isPinned: false),
+                CCHProviderSortDescriptor(id: 2, isEnabled: true, hasMiniProbe: false, isPinned: false),
+                CCHProviderSortDescriptor(id: 3, isEnabled: false, hasMiniProbe: true, isPinned: false),
+                CCHProviderSortDescriptor(id: 4, isEnabled: true, hasMiniProbe: true, isPinned: false),
+                CCHProviderSortDescriptor(id: 5, isEnabled: false, hasMiniProbe: false, isPinned: false),
+                CCHProviderSortDescriptor(id: 6, isEnabled: false, hasMiniProbe: false, isPinned: true)
+            ],
+            descriptor: { $0 }
+        ).map(\.id)
+        expectEqual(
+            pinnedSortedIds,
+            [6, 4, 2, 3, 1, 5],
+            "pinned providers should be the first sort priority before enabled and mini-probe providers"
+        )
+
+        var pinnedSortState = CCHProviderSortState()
+        _ = pinnedSortState.order(
+            [
+                CCHProviderSortDescriptor(id: 1, isEnabled: false, hasMiniProbe: false, isPinned: false),
+                CCHProviderSortDescriptor(id: 2, isEnabled: true, hasMiniProbe: false, isPinned: false),
+                CCHProviderSortDescriptor(id: 3, isEnabled: false, hasMiniProbe: true, isPinned: false),
+                CCHProviderSortDescriptor(id: 4, isEnabled: true, hasMiniProbe: true, isPinned: false),
+                CCHProviderSortDescriptor(id: 5, isEnabled: false, hasMiniProbe: false, isPinned: false),
+                CCHProviderSortDescriptor(id: 6, isEnabled: false, hasMiniProbe: false, isPinned: true)
+            ],
+            mode: .commitSorted,
+            descriptor: { $0 }
+        )
+
+        let preservedAfterMiniProbeToggleIds = pinnedSortState.order(
+            [
+                CCHProviderSortDescriptor(id: 1, isEnabled: false, hasMiniProbe: true, isPinned: false),
+                CCHProviderSortDescriptor(id: 2, isEnabled: true, hasMiniProbe: false, isPinned: false),
+                CCHProviderSortDescriptor(id: 3, isEnabled: false, hasMiniProbe: true, isPinned: false),
+                CCHProviderSortDescriptor(id: 4, isEnabled: true, hasMiniProbe: true, isPinned: false),
+                CCHProviderSortDescriptor(id: 5, isEnabled: false, hasMiniProbe: false, isPinned: false),
+                CCHProviderSortDescriptor(id: 6, isEnabled: false, hasMiniProbe: false, isPinned: true)
+            ],
+            mode: .preserveCurrentOrder,
+            descriptor: { $0 }
+        ).map(\.id)
+        expectEqual(
+            preservedAfterMiniProbeToggleIds,
+            [6, 4, 2, 3, 1, 5],
+            "enabling mini-probe inline should preserve the visible provider row order"
+        )
+        expectEqual(pinnedSortState.hasPendingSort, true, "preserved mini-probe sort should mark pending state")
+
+        let committedAfterMiniProbeToggleIds = expectNotNil(
+            pinnedSortState.commitIfPending(
+                [
+                    CCHProviderSortDescriptor(id: 1, isEnabled: false, hasMiniProbe: true, isPinned: false),
+                    CCHProviderSortDescriptor(id: 2, isEnabled: true, hasMiniProbe: false, isPinned: false),
+                    CCHProviderSortDescriptor(id: 3, isEnabled: false, hasMiniProbe: true, isPinned: false),
+                    CCHProviderSortDescriptor(id: 4, isEnabled: true, hasMiniProbe: true, isPinned: false),
+                    CCHProviderSortDescriptor(id: 5, isEnabled: false, hasMiniProbe: false, isPinned: false),
+                    CCHProviderSortDescriptor(id: 6, isEnabled: false, hasMiniProbe: false, isPinned: true)
+                ],
+                descriptor: { $0 }
+            ),
+            "closing the provider card should commit the pending mini-probe sort with pin priority"
+        ).map(\.id)
+        expectEqual(
+            committedAfterMiniProbeToggleIds,
+            [6, 4, 2, 1, 3, 5],
+            "committing pending mini-probe sort should reorder after pinned and enabled providers"
+        )
     }
 }

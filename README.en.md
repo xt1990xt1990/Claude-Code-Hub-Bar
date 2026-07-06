@@ -30,6 +30,7 @@ Private configuration should be entered locally and should not be committed to t
 - Compact recent-request rows on the dashboard, with adaptive truncation for long provider and model names.
 - Provider group filters, provider group assignment, enable/disable, probe, and circuit reset controls.
 - Provider rows use a subtle green background when they are handling running requests.
+- Provider rows can be pinned so frequently used providers stay at the top across launches.
 - Provider model tests show first-byte timing and total latency when CCH returns timing data.
 - Optimized status bar and provider derived-state refreshes to reduce repeated work and no-op redraws.
 - Mini Probe monitoring for providers, with per-provider enablement, probe model overrides, compact interval controls, active-hour scheduling, and average first-byte statistics.
@@ -37,9 +38,9 @@ Private configuration should be entered locally and should not be committed to t
 - Upstream rate panel for Sub2API and new-api providers.
 - Groups upstream providers by official website and matches local providers by key suffix.
 - Upstream rate rows show provider groups and reuse the provider Mini Probe controls, status, and history.
-- Chrome-based upstream login capture, with credentials stored locally for rate and balance refreshes.
+- Chrome-based upstream login capture, with credentials stored locally for rate and balance refreshes. The shared login window preserves session state across upstream sites.
 - Manual and scheduled upstream rate refreshes, with automatic multiplier sync for selected providers.
-- Upstream balance tracking with an independent background refresh cadence.
+- Upstream balance tracking with an independent background refresh cadence. Cookie-only new-api sessions use a browser User-Agent fallback and support profile-based balance endpoints.
 - Provider drawers reuse the existing endpoint and model test controls for upstream checks.
 - Model branding now includes GLM and avoids broad OpenAI model-name false positives.
 - Launch at login support.

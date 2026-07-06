@@ -572,7 +572,7 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             if !cookieHeader.isEmpty {
                 request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
             }
-            let userAgent = credential.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+            let userAgent = upstreamRateUserAgentHeader(credential.userAgent, cookieHeader: cookieHeader)
             if !userAgent.isEmpty {
                 request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             }
@@ -684,14 +684,12 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
-    func chromeProfilePath(for credential: UpstreamRateCredential) -> URL {
+    func chromeProfilePath(for _: UpstreamRateCredential) -> URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let host = normalizedUpstreamHost(credential.baseURL) ?? credential.host
-        let profileName = sanitizedProfileName(host)
         return appSupport
             .appendingPathComponent("CCHBar/UpstreamChromeProfiles", isDirectory: true)
-            .appendingPathComponent(profileName, isDirectory: true)
+            .appendingPathComponent("shared", isDirectory: true)
     }
 
     func sanitizedProfileName(_ value: String) -> String {

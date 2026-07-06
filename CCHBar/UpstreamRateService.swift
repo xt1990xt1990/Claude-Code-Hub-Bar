@@ -25,7 +25,7 @@ enum UpstreamRateSiteDetector {
         }
 
         let combined = "\(host) \(body) \(loweredHeaders.values.joined(separator: " "))".lowercased()
-        if combined.contains("new-api") || combined.contains("one-api") || combined.contains("/api/token/search") {
+        if combined.contains("new-api") || combined.contains("one-api") || combined.contains("/api/token/search") || combined.contains("nekocode.ai") {
             return .newAPI
         }
         if combined.contains("sub2api") || combined.contains("/api/v1/auth/refresh") || combined.contains("balance_charge_rate") {
@@ -292,13 +292,26 @@ actor UpstreamRateService {
             unwrap: .newAPI
         )) as? [String: Any] ?? [:]
 
-        let value = try await requestJSON(
-            baseURL: credential.baseURL,
-            path: "/api/user/self",
-            headers: newAPIHeaders(credential, signedPath: "/user/self"),
-            unwrap: .newAPI
-        )
+        let value = try await fetchNewAPIUserProfile(credential)
         return parseNewAPIUserBalance(user: value as? [String: Any] ?? [:], status: status)
+    }
+
+    private func fetchNewAPIUserProfile(_ credential: UpstreamRateCredential) async throws -> Any {
+        do {
+            return try await requestJSON(
+                baseURL: credential.baseURL,
+                path: "/api/user/self",
+                headers: newAPIHeaders(credential, signedPath: "/user/self"),
+                unwrap: .newAPI
+            )
+        } catch {
+            return try await requestJSON(
+                baseURL: credential.baseURL,
+                path: "/api/user/profile",
+                headers: newAPIHeaders(credential, signedPath: "/user/profile"),
+                unwrap: .newAPI
+            )
+        }
     }
 
     private func listSub2UserGroupRates(_ credential: UpstreamRateCredential) async throws -> [Int: Double] {
@@ -370,12 +383,7 @@ actor UpstreamRateService {
             return credential
         }
         var next = credential
-        guard let value = try? await requestJSON(
-            baseURL: credential.baseURL,
-            path: "/api/user/self",
-            headers: newAPIHeaders(credential, signedPath: "/user/self"),
-            unwrap: .newAPI
-        ) else {
+        guard let value = try? await fetchNewAPIUserProfile(credential) else {
             return next
         }
         let dict = value as? [String: Any] ?? [:]
@@ -586,7 +594,7 @@ func upstreamRateSub2Headers(_ credential: UpstreamRateCredential) -> [String: S
     if !cookieHeader.isEmpty {
         headers["Cookie"] = cookieHeader
     }
-    let userAgent = credential.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+    let userAgent = upstreamRateUserAgentHeader(credential.userAgent, cookieHeader: cookieHeader)
     if !userAgent.isEmpty {
         headers["User-Agent"] = userAgent
     }
@@ -602,7 +610,7 @@ func upstreamRateSub2RefreshHeaders(_ credential: UpstreamRateCredential) -> [St
     if !cookieHeader.isEmpty {
         headers["Cookie"] = cookieHeader
     }
-    let userAgent = credential.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+    let userAgent = upstreamRateUserAgentHeader(credential.userAgent, cookieHeader: cookieHeader)
     if !userAgent.isEmpty {
         headers["User-Agent"] = userAgent
     }
@@ -629,11 +637,22 @@ func upstreamRateNewAPIStatusHeaders(_ credential: UpstreamRateCredential) -> [S
     if !cookieHeader.isEmpty {
         headers["Cookie"] = cookieHeader
     }
-    let userAgent = credential.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+    let userAgent = upstreamRateUserAgentHeader(credential.userAgent, cookieHeader: cookieHeader)
     if !userAgent.isEmpty {
         headers["User-Agent"] = userAgent
     }
     return headers
+}
+
+func upstreamRateUserAgentHeader(_ userAgent: String, cookieHeader: String) -> String {
+    let trimmed = userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmed.isEmpty {
+        return trimmed
+    }
+    guard !cookieHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return ""
+    }
+    return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 }
 
 func upstreamRateHTTPHeaders(_ response: HTTPURLResponse) -> [String: String] {

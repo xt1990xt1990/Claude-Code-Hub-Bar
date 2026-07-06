@@ -39,6 +39,14 @@ struct CCHProviderSortDescriptor: Equatable {
     let id: Int
     let isEnabled: Bool
     let hasMiniProbe: Bool
+    let isPinned: Bool
+
+    init(id: Int, isEnabled: Bool, hasMiniProbe: Bool, isPinned: Bool = false) {
+        self.id = id
+        self.isEnabled = isEnabled
+        self.hasMiniProbe = hasMiniProbe
+        self.isPinned = isPinned
+    }
 }
 
 enum CCHProviderSortMode {
@@ -98,6 +106,9 @@ func sortProvidersByOperationalPriority<T>(
         .sorted { lhs, rhs in
             let lhsDescriptor = descriptor(lhs.element)
             let rhsDescriptor = descriptor(rhs.element)
+            if lhsDescriptor.isPinned != rhsDescriptor.isPinned {
+                return lhsDescriptor.isPinned && !rhsDescriptor.isPinned
+            }
             if lhsDescriptor.isEnabled != rhsDescriptor.isEnabled {
                 return lhsDescriptor.isEnabled && !rhsDescriptor.isEnabled
             }

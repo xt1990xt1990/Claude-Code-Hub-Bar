@@ -1363,7 +1363,11 @@ private struct ProvidersTabView: View {
                             viewModel: state.providerRowViewModel(for: provider),
                             assignableGroups: state.assignableProviderGroups,
                             isMiniProbeFeatureEnabled: state.providerMiniProbeEnabled,
-                            isHandlingRunningRequest: state.isProviderHandlingRunningRequest(provider)
+                            isHandlingRunningRequest: state.isProviderHandlingRunningRequest(provider),
+                            isPinned: state.isProviderPinned(provider),
+                            togglePinned: {
+                                state.toggleProviderPinned(provider)
+                            }
                         )
                     }
                 }
@@ -3872,6 +3876,8 @@ private struct ProviderRow: View {
     let assignableGroups: [CCHProviderGroup]
     let isMiniProbeFeatureEnabled: Bool
     let isHandlingRunningRequest: Bool
+    let isPinned: Bool
+    let togglePinned: () -> Void
     @State private var modelTestInput = ""
     @State private var multiplierInput = ""
     @State private var priorityInput = ""
@@ -3973,6 +3979,16 @@ private struct ProviderRow: View {
                         MoneyValue(value: provider.todayCost, majorSize: 10.5, minorSize: 6.2, weight: .semibold, color: theme.textSecondary)
                     }
                     .frame(width: 64, alignment: .trailing)
+                    Button {
+                        togglePinned()
+                    } label: {
+                        Image(systemName: isPinned ? "pin.fill" : "pin")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(isPinned ? Color.yellow : theme.textTertiary)
+                    .help(isPinned ? "取消置顶" : "置顶渠道")
                     Toggle("", isOn: Binding(
                         get: { provider.isEnabled },
                         set: { value in

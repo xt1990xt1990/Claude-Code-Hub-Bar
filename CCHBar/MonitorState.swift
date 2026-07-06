@@ -146,6 +146,10 @@ private enum CCHProviderMiniProbeStorage {
     static let historiesKey = "provider_mini_probe_histories_v1"
 }
 
+private enum CCHProviderPinningStorage {
+    static let pinnedProviderIdsKey = "provider_pinned_provider_ids_v1"
+}
+
 private enum CCHUpstreamRateStorage {
     static let selectedProviderIdsKey = "upstream_rate_selected_provider_ids_v1"
     static let ignoredHostsKey = "upstream_rate_ignored_hosts_v1"
@@ -226,6 +230,7 @@ final class MonitorState: ObservableObject {
     @Published private(set) var providerModelTestResultsByModel: [Int: [String: CCHProviderModelTestResult]] = [:]
     @Published private(set) var providerModelTestProgress: [Int: CCHProviderModelTestProgress] = [:]
     @Published private(set) var providerCustomTestModels: [Int: [String]] = [:]
+    @Published private(set) var pinnedProviderIds: Set<Int> = []
     @Published private(set) var providerMiniProbeSelectedProviderIds: Set<Int> = []
     @Published private(set) var providerMiniProbeModelOverrides: [Int: String] = [:]
     @Published private(set) var providerMiniProbeHistories: [Int: [CCHProviderMiniProbeSample]] = [:] {
@@ -528,6 +533,7 @@ final class MonitorState: ObservableObject {
 
     init() {
         providerCustomTestModels = Self.loadProviderCustomTestModels()
+        pinnedProviderIds = Self.loadIntSet(key: CCHProviderPinningStorage.pinnedProviderIdsKey)
         providerMiniProbeSelectedProviderIds = Self.loadIntSet(key: CCHProviderMiniProbeStorage.selectedProviderIdsKey)
         providerMiniProbeModelOverrides = Self.loadProviderMiniProbeModelOverrides()
         providerMiniProbeHistories = Self.loadProviderMiniProbeHistories()
@@ -1032,6 +1038,20 @@ final class MonitorState: ObservableObject {
 
     func isProviderMiniProbeEnabled(_ provider: CCHProvider) -> Bool {
         providerMiniProbeSelectedProviderIds.contains(provider.id)
+    }
+
+    func isProviderPinned(_ provider: CCHProvider) -> Bool {
+        pinnedProviderIds.contains(provider.id)
+    }
+
+    func toggleProviderPinned(_ provider: CCHProvider) {
+        if pinnedProviderIds.contains(provider.id) {
+            pinnedProviderIds.remove(provider.id)
+        } else {
+            pinnedProviderIds.insert(provider.id)
+        }
+        savePinnedProviderIds()
+        rebuildProviderFilterSnapshot(sortMode: .commitSorted)
     }
 
     func isProviderMiniProbeRunning(_ provider: CCHProvider) -> Bool {
@@ -2455,7 +2475,8 @@ final class MonitorState: ObservableObject {
             CCHProviderSortDescriptor(
                 id: provider.id,
                 isEnabled: provider.isEnabled,
-                hasMiniProbe: providerMiniProbeSelectedProviderIds.contains(provider.id)
+                hasMiniProbe: providerMiniProbeSelectedProviderIds.contains(provider.id),
+                isPinned: pinnedProviderIds.contains(provider.id)
             )
         }
         let next = CCHProviderFilterSnapshot(
@@ -2657,6 +2678,13 @@ private extension MonitorState {
         )
     }
 
+    private func savePinnedProviderIds() {
+        UserDefaults.standard.set(
+            pinnedProviderIds.sorted(),
+            forKey: CCHProviderPinningStorage.pinnedProviderIdsKey
+        )
+    }
+
     static func loadProviderMiniProbeModelOverrides() -> [Int: String] {
         guard
             let data = UserDefaults.standard.data(forKey: CCHProviderMiniProbeStorage.modelOverridesKey),
@@ -2730,6 +2758,12 @@ private extension MonitorState {
 
     func pruneProviderMiniProbeData() {
         let providerIds = Set(providers.map(\.id))
+        let nextPinned = pinnedProviderIds.intersection(providerIds)
+        if nextPinned != pinnedProviderIds {
+            pinnedProviderIds = nextPinned
+            savePinnedProviderIds()
+        }
+
         let nextSelected = providerMiniProbeSelectedProviderIds.intersection(providerIds)
         if nextSelected != providerMiniProbeSelectedProviderIds {
             providerMiniProbeSelectedProviderIds = nextSelected

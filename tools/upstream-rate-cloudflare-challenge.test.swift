@@ -19,6 +19,8 @@ private struct UpstreamRateCloudflareChallengeTests {
     static func main() async {
         await testCloudflareChallengeClassification()
         await testHTTPStatusIsCheckedBeforeJSONParsing()
+        await testNewAPIBalanceFallsBackToUserProfile()
+        testNekocodeHostIsDetectedAsNewAPI()
     }
 
     private static func testCloudflareChallengeClassification() async {
@@ -93,6 +95,38 @@ private struct UpstreamRateCloudflareChallengeTests {
             fail("expected UpstreamRateServiceError.http, got \(error)")
         }
     }
+
+    private static func testNewAPIBalanceFallsBackToUserProfile() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [NewAPIProfileFallbackProtocol.self]
+        let session = URLSession(configuration: config)
+        let service = UpstreamRateService(session: session)
+        var credential = UpstreamRateCredential.empty(host: "nekocode.ai", sourceType: .newAPI)
+        credential.newAPICookieHeader = "session=browser"
+
+        do {
+            let outcome = try await service.fetchBalance(credential: credential)
+            expectTrue(
+                outcome.snapshot.balance?.displayAmount == 14.409,
+                "new-api balance should fall back to /api/user/profile when /api/user/self is not the frontend profile endpoint"
+            )
+        } catch {
+            fail("expected new-api profile fallback balance, got \(error)")
+        }
+    }
+
+    private static func testNekocodeHostIsDetectedAsNewAPI() {
+        let detected = UpstreamRateSiteDetector.detect(
+            host: "nekocode.ai",
+            statusCode: 200,
+            headers: [:],
+            body: "{\"message\":\"未登录\",\"success\":false}"
+        )
+        expectTrue(
+            detected == .newAPI,
+            "nekocode.ai should be treated as a new-api upstream even when unauthenticated body is generic"
+        )
+    }
 }
 
 private final class CloudflareHTMLChallengeProtocol: URLProtocol {
@@ -116,6 +150,47 @@ private final class CloudflareHTMLChallengeProtocol: URLProtocol {
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data("<html>challenge</html>".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class NewAPIProfileFallbackProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        let status: Int
+        let body: String
+        switch path {
+        case "/api/status":
+            status = 200
+            body = #"{"success":true,"data":{"quota_per_unit":500000}}"#
+        case "/api/user/self":
+            status = 401
+            body = #"{"success":false,"error":{"message":"Missing API key"}}"#
+        case "/api/user/profile":
+            status = 200
+            body = #"{"success":true,"data":{"id":3911,"balance":"14.409"}}"#
+        default:
+            status = 404
+            body = #"{"success":false,"message":"not found"}"#
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
 

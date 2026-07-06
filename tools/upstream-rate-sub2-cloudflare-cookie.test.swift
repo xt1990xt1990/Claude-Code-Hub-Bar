@@ -7,6 +7,8 @@ private struct UpstreamRateSub2CloudflareCookieTests {
         try testSub2BrowserImportStoresCookieHeader()
         try testSub2HeadersIncludeBrowserCookie()
         try testNewAPIHeadersIncludeBrowserCookieAndUserAgent()
+        try testNewAPICookieOnlyHeadersUseBrowserUserAgentFallback()
+        try testChromeAuthUsesSharedProfile()
     }
 
     @MainActor
@@ -58,6 +60,33 @@ private struct UpstreamRateSub2CloudflareCookieTests {
         try expect(headers["User-Agent"] == "Mozilla/5.0 Chrome/126.0", "new-api browser User-Agent should be sent")
         try expect(headers["Accept"] == "application/json", "new-api accept header should be preserved")
         try expect(headers["Content-Type"] == "application/json", "new-api content type should be preserved")
+    }
+
+    private static func testNewAPICookieOnlyHeadersUseBrowserUserAgentFallback() throws {
+        var credential = UpstreamRateCredential.empty(host: "nekocode.ai", sourceType: .newAPI)
+        credential.newAPICookieHeader = "session=browser"
+
+        let headers = upstreamRateNewAPIHeaders(credential)
+        try expect(headers["Cookie"] == "session=browser", "new-api cookie header should be sent")
+        try expect(
+            headers["User-Agent"]?.contains("Chrome/") == true,
+            "cookie-session new-api requests should use a browser User-Agent fallback when none was captured"
+        )
+    }
+
+    @MainActor
+    private static func testChromeAuthUsesSharedProfile() throws {
+        let importer = UpstreamChromeAuthImporter(
+            validateNewAPILogin: { _ in true }
+        )
+        let kedaya = UpstreamRateCredential.empty(host: "sub.kedaya.xyz", sourceType: .sub2API)
+        let love = UpstreamRateCredential.empty(host: "gy.fwhzfyy.asia", sourceType: .sub2API)
+
+        let kedayaPath = importer.chromeProfilePath(for: kedaya)
+        let lovePath = importer.chromeProfilePath(for: love)
+
+        try expect(kedayaPath == lovePath, "Chrome auth should reuse one shared app profile across upstream hosts")
+        try expect(kedayaPath.lastPathComponent == "shared", "shared Chrome auth profile should be named shared")
     }
 
     private static func expect(_ condition: Bool, _ message: String) throws {
