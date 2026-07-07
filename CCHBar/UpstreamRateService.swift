@@ -249,27 +249,32 @@ actor UpstreamRateService {
 
     private func refreshSub2Token(_ credential: UpstreamRateCredential) async throws -> UpstreamRateCredential {
         let refreshToken = credential.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !refreshToken.isEmpty else { throw UpstreamRateServiceError.missingCredential("缺少 Sub2API refresh token") }
+        let hasCookieRefreshToken = upstreamRateSub2CookieContainsRefreshToken(credential.sub2CookieHeader)
+        guard !refreshToken.isEmpty || hasCookieRefreshToken else {
+            throw UpstreamRateServiceError.missingCredential("缺少 Sub2API refresh token")
+        }
 
         let body = try await requestJSON(
             baseURL: credential.baseURL,
             path: "/api/v1/auth/refresh",
             method: "POST",
             headers: upstreamRateSub2RefreshHeaders(credential),
-            body: ["refresh_token": refreshToken],
+            body: refreshToken.isEmpty ? [:] : ["refresh_token": refreshToken],
             unwrap: .sub2
         )
         let dict = body as? [String: Any] ?? [:]
         let accessToken = serviceString(dict["access_token"])
         let nextRefreshToken = serviceString(dict["refresh_token"])
-        guard !accessToken.isEmpty, !nextRefreshToken.isEmpty else {
+        guard !accessToken.isEmpty, !nextRefreshToken.isEmpty || hasCookieRefreshToken else {
             throw UpstreamRateServiceError.invalidResponse("Sub2API refresh 响应缺少 token")
         }
 
         let expiresIn = serviceDouble(dict["expires_in"], fallback: 0)
         var next = credential
         next.sub2AuthToken = accessToken
-        next.sub2RefreshToken = nextRefreshToken
+        if !nextRefreshToken.isEmpty {
+            next.sub2RefreshToken = nextRefreshToken
+        }
         next.sub2TokenExpiresAt = Date().addingTimeInterval(expiresIn)
         return next
     }
@@ -653,6 +658,19 @@ func upstreamRateUserAgentHeader(_ userAgent: String, cookieHeader: String) -> S
         return ""
     }
     return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+}
+
+func upstreamRateSub2CookieContainsRefreshToken(_ cookieHeader: String) -> Bool {
+    cookieHeader
+        .split(separator: ";")
+        .contains { part in
+            let name = part
+                .split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                .first?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? ""
+            return name == "sub2api_refresh_token"
+        }
 }
 
 func upstreamRateHTTPHeaders(_ response: HTTPURLResponse) -> [String: String] {

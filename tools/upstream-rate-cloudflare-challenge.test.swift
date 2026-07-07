@@ -19,6 +19,7 @@ private struct UpstreamRateCloudflareChallengeTests {
     static func main() async {
         await testCloudflareChallengeClassification()
         await testHTTPStatusIsCheckedBeforeJSONParsing()
+        await testSub2CookieOnlyRefreshUsesBrowserCookie()
         await testNewAPIBalanceFallsBackToUserProfile()
         testNekocodeHostIsDetectedAsNewAPI()
     }
@@ -96,6 +97,35 @@ private struct UpstreamRateCloudflareChallengeTests {
         }
     }
 
+    private static func testSub2CookieOnlyRefreshUsesBrowserCookie() async {
+        Sub2CookieOnlyRefreshProtocol.requests = []
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Sub2CookieOnlyRefreshProtocol.self]
+        let session = URLSession(configuration: config)
+        let service = UpstreamRateService(session: session)
+        var credential = UpstreamRateCredential.empty(host: "ageteam.online", sourceType: .sub2API)
+        credential.sub2CookieHeader = "sub2api_refresh_token=browser"
+        credential.userAgent = "Mozilla/5.0 Chrome/149.0"
+
+        do {
+            let outcome = try await service.fetchBalance(credential: credential)
+            expectTrue(
+                outcome.credential.sub2AuthToken == "access-from-cookie",
+                "Sub2API cookie-only refresh should hydrate access token"
+            )
+            expectTrue(
+                outcome.snapshot.balance?.displayAmount == 12.5,
+                "Sub2API balance should be read after cookie-only refresh"
+            )
+            let refresh = Sub2CookieOnlyRefreshProtocol.requests.first { $0.path == "/api/v1/auth/refresh" }
+            expectTrue(refresh?.cookie == "sub2api_refresh_token=browser", "refresh request should send browser cookie")
+            expectTrue(refresh?.userAgent == "Mozilla/5.0 Chrome/149.0", "refresh request should send browser User-Agent")
+            expectTrue(refresh?.body == #"{}"#, "cookie-only refresh should send an empty JSON body")
+        } catch {
+            fail("expected Sub2API cookie-only refresh to succeed, got \(error)")
+        }
+    }
+
     private static func testNewAPIBalanceFallsBackToUserProfile() async {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [NewAPIProfileFallbackProtocol.self]
@@ -154,6 +184,93 @@ private final class CloudflareHTMLChallengeProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private final class Sub2CookieOnlyRefreshProtocol: URLProtocol {
+    struct RequestRecord {
+        let path: String
+        let cookie: String?
+        let userAgent: String?
+        let authorization: String?
+        let body: String
+    }
+
+    static var requests: [RequestRecord] = []
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        let bodyData = requestBodyData(request)
+        Self.requests.append(
+            RequestRecord(
+                path: path,
+                cookie: request.value(forHTTPHeaderField: "Cookie"),
+                userAgent: request.value(forHTTPHeaderField: "User-Agent"),
+                authorization: request.value(forHTTPHeaderField: "Authorization"),
+                body: String(decoding: bodyData, as: UTF8.self)
+            )
+        )
+
+        let status: Int
+        let body: String
+        switch path {
+        case "/api/v1/auth/refresh":
+            status = 200
+            body = #"{"code":0,"data":{"access_token":"access-from-cookie","refresh_token":"refresh-from-cookie","expires_in":3600}}"#
+        case "/api/v1/auth/me":
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer access-from-cookie" {
+                status = 200
+                body = #"{"code":0,"data":{"balance":12.5}}"#
+            } else {
+                status = 401
+                body = #"{"code":401,"message":"unauthorized"}"#
+            }
+        default:
+            status = 404
+            body = #"{"code":404,"message":"not found"}"#
+        }
+
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private func requestBodyData(_ request: URLRequest) -> Data {
+        if let httpBody = request.httpBody {
+            return httpBody
+        }
+        guard let stream = request.httpBodyStream else {
+            return Data()
+        }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count > 0 {
+                data.append(buffer, count: count)
+            } else {
+                break
+            }
+        }
+        return data
+    }
 }
 
 private final class NewAPIProfileFallbackProtocol: URLProtocol {

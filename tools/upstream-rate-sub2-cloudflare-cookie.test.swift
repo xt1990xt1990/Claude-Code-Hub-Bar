@@ -3,8 +3,10 @@ import Foundation
 @main
 private struct UpstreamRateSub2CloudflareCookieTests {
     @MainActor
-    static func main() throws {
+    static func main() async throws {
         try testSub2BrowserImportStoresCookieHeader()
+        try testSub2BrowserImportAcceptsCookieOnlyRefreshToken()
+        try await testSub2CookieOnlyLoginUsesValidator()
         try testSub2HeadersIncludeBrowserCookie()
         try testNewAPIHeadersIncludeBrowserCookieAndUserAgent()
         try testNewAPICookieOnlyHeadersUseBrowserUserAgentFallback()
@@ -31,6 +33,46 @@ private struct UpstreamRateSub2CloudflareCookieTests {
 
         try expect(next.sub2CookieHeader == "cf_clearance=ok; session=browser", "Sub2API browser cookie should be stored")
         try expect(next.userAgent == "Mozilla/5.0 Chrome/126.0", "browser User-Agent should be stored")
+    }
+
+    @MainActor
+    private static func testSub2BrowserImportAcceptsCookieOnlyRefreshToken() throws {
+        let importer = UpstreamChromeAuthImporter(
+            validateNewAPILogin: { _ in true }
+        )
+        let credential = UpstreamRateCredential.empty(host: "ageteam.online", sourceType: .sub2API)
+        let next = try importer.mergeBrowserState(
+            (
+                storage: [:],
+                cookieHeader: "sub2api_refresh_token=browser",
+                userAgent: "Mozilla/5.0 Chrome/149.0"
+            ),
+            into: credential
+        )
+
+        try expect(next.sub2CookieHeader == "sub2api_refresh_token=browser", "Sub2API cookie-only refresh token should be stored")
+        try expect(next.userAgent == "Mozilla/5.0 Chrome/149.0", "browser User-Agent should be stored for cookie-only Sub2API login")
+        try importer.requireFreshBrowserCredential(
+            (
+                storage: [:],
+                cookieHeader: "sub2api_refresh_token=browser",
+                userAgent: "Mozilla/5.0 Chrome/149.0"
+            ),
+            sourceType: .sub2API
+        )
+    }
+
+    @MainActor
+    private static func testSub2CookieOnlyLoginUsesValidator() async throws {
+        let importer = UpstreamChromeAuthImporter(
+            validateNewAPILogin: { _ in true },
+            validateSub2APILogin: { _ in nil }
+        )
+        var credential = UpstreamRateCredential.empty(host: "ageteam.online", sourceType: .sub2API)
+        credential.sub2CookieHeader = "sub2api_refresh_token=browser"
+
+        let validated = await importer.isValidatedLogin(credential)
+        try expect(!validated, "Sub2API cookie-only login should be checked by the upstream validator")
     }
 
     private static func testSub2HeadersIncludeBrowserCookie() throws {

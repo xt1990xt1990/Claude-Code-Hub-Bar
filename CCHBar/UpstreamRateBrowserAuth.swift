@@ -221,14 +221,19 @@ final class UpstreamChromeAuthImporter: ObservableObject {
     private let port = 49_521
     private let session: URLSession
     private let validateNewAPILogin: (UpstreamRateCredential) async -> Bool
+    private let validateSub2APILogin: (UpstreamRateCredential) async -> UpstreamRateCredential?
     private var chromeProcess: Process?
 
-    init(validateNewAPILogin: @escaping (UpstreamRateCredential) async -> Bool = UpstreamChromeAuthImporter.defaultValidateNewAPILogin) {
+    init(
+        validateNewAPILogin: @escaping (UpstreamRateCredential) async -> Bool = UpstreamChromeAuthImporter.defaultValidateNewAPILogin,
+        validateSub2APILogin: @escaping (UpstreamRateCredential) async -> UpstreamRateCredential? = UpstreamChromeAuthImporter.defaultValidateSub2APILogin
+    ) {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 3
         config.timeoutIntervalForResource = 10
         self.session = URLSession(configuration: config)
         self.validateNewAPILogin = validateNewAPILogin
+        self.validateSub2APILogin = validateSub2APILogin
     }
 
     func openChrome(for credential: UpstreamRateCredential) throws {
@@ -274,14 +279,14 @@ final class UpstreamChromeAuthImporter: ObservableObject {
                 let state = try await readBrowserState(for: credential)
                 try requireFreshBrowserCredential(state, sourceType: credential.sourceType)
                 let next = try mergeBrowserState(state, into: credential)
-                if !(await isValidatedLogin(next)) {
+                guard let validated = await validatedLoginCredential(next) else {
                     throw UpstreamChromeAuthError.loginValidationFailed(credential.sourceType)
                 }
-                let importedCount = importedFieldCount(before: credential, after: next)
+                let importedCount = importedFieldCount(before: credential, after: validated)
                 closeChrome()
                 step = .imported
                 message = importedCount > 0 ? "获取成功" : "登录态已存在"
-                return UpstreamChromeAuthResult(credential: next, importedFieldCount: importedCount)
+                return UpstreamChromeAuthResult(credential: validated, importedFieldCount: importedCount)
             } catch {
                 lastError = error
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -300,12 +305,12 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         let state = try await readBrowserState(for: credential)
         try requireFreshBrowserCredential(state, sourceType: credential.sourceType)
         let next = try mergeBrowserState(state, into: credential)
-        guard await isValidatedLogin(next) else {
+        guard let validated = await validatedLoginCredential(next) else {
             throw UpstreamChromeAuthError.loginValidationFailed(credential.sourceType)
         }
-        let importedCount = importedFieldCount(before: credential, after: next)
+        let importedCount = importedFieldCount(before: credential, after: validated)
         message = importedCount > 0 ? "已读取 \(importedCount) 个字段" : "没有新字段"
-        return UpstreamChromeAuthResult(credential: next, importedFieldCount: importedCount)
+        return UpstreamChromeAuthResult(credential: validated, importedFieldCount: importedCount)
     }
 
     func closeChrome() {
@@ -335,7 +340,8 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             }
         case .sub2API:
             if fresh.sub2AuthToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               fresh.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+               fresh.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !upstreamRateSub2CookieContainsRefreshToken(fresh.sub2CookieHeader) {
                 throw UpstreamChromeAuthError.missingLocalStorageCredential(.sub2API)
             }
         case .unknown:
@@ -344,7 +350,12 @@ final class UpstreamChromeAuthImporter: ObservableObject {
     }
 
     private func readBrowserState(for credential: UpstreamRateCredential) async throws -> (storage: [String: String], cookieHeader: String, userAgent: String) {
-        let page = try await findPage(for: credential)
+        let page: ChromePage
+        do {
+            page = try await findPage(for: credential)
+        } catch UpstreamChromeAuthError.noInspectablePage {
+            return try await readBrowserCookieState(for: credential)
+        }
         guard let webSocketDebuggerURL = page.webSocketDebuggerURL else {
             throw UpstreamChromeAuthError.invalidDevToolsResponse
         }
@@ -359,6 +370,28 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         return (storage, cookieHeader, userAgent)
     }
 
+    private func readBrowserCookieState(for credential: UpstreamRateCredential) async throws -> (storage: [String: String], cookieHeader: String, userAgent: String) {
+        let host = normalizedUpstreamHost(credential.baseURL) ?? credential.host
+        guard let versionURL = URL(string: "http://127.0.0.1:\(port)/json/version") else {
+            throw UpstreamChromeAuthError.invalidDevToolsResponse
+        }
+        let browser = try await fetchBrowserVersion(from: versionURL)
+        guard let webSocketDebuggerURL = browser.webSocketDebuggerURL else {
+            throw UpstreamChromeAuthError.invalidDevToolsResponse
+        }
+
+        let task = session.webSocketTask(with: webSocketDebuggerURL)
+        task.resume()
+        defer { task.cancel(with: .normalClosure, reason: nil) }
+
+        let cookieHeader = try await readBrowserCookieHeader(host: host, using: task, id: 10_001)
+        let userAgent = browser.userAgent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? (try? await readBrowserVersionUserAgent(using: task, id: 10_002)) ?? ""
+            : browser.userAgent
+        print("UpstreamChromeAuthImporter browser-state host=\(credential.host) storageKeys=0 cookieHeaderLen=\(cookieHeader.count) userAgentLen=\(userAgent.count)")
+        return ([:], cookieHeader, userAgent)
+    }
+
     func mergeBrowserState(
         _ state: (storage: [String: String], cookieHeader: String, userAgent: String),
         into credential: UpstreamRateCredential
@@ -368,6 +401,9 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             next = try UpstreamChromeLocalStorageParser.merge(storage: state.storage, into: credential)
         } catch UpstreamChromeAuthError.missingLocalStorageCredential(.newAPI)
             where credential.sourceType == .newAPI && !state.cookieHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            next = credential
+        } catch UpstreamChromeAuthError.missingLocalStorageCredential(.sub2API)
+            where credential.sourceType == .sub2API && upstreamRateSub2CookieContainsRefreshToken(state.cookieHeader) {
             next = credential
         }
         if credential.sourceType == .sub2API, !state.cookieHeader.isEmpty {
@@ -389,14 +425,17 @@ final class UpstreamChromeAuthImporter: ObservableObject {
     }
 
     func isValidatedLogin(_ credential: UpstreamRateCredential) async -> Bool {
+        await validatedLoginCredential(credential) != nil
+    }
+
+    private func validatedLoginCredential(_ credential: UpstreamRateCredential) async -> UpstreamRateCredential? {
         switch credential.sourceType {
         case .newAPI:
-            return await validateNewAPILogin(credential)
+            return await validateNewAPILogin(credential) ? credential : nil
         case .sub2API:
-            return !credential.sub2AuthToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || !credential.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return await validateSub2APILogin(credential)
         case .unknown:
-            return false
+            return nil
         }
     }
 
@@ -513,6 +552,37 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         return cookieHeader(from: parseCookieRows(from: fallbackResponseData), host: host)
     }
 
+    private func readBrowserCookieHeader(host: String, using task: URLSessionWebSocketTask, id: Int) async throws -> String {
+        let payload: [String: Any] = [
+            "id": id,
+            "method": "Storage.getCookies",
+            "params": [:]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        try await send(String(decoding: data, as: UTF8.self), using: task)
+        let responseData = try await receiveResponseData(id: id, using: task)
+        return cookieHeader(from: parseCookieRows(from: responseData), host: host)
+    }
+
+    private func readBrowserVersionUserAgent(using task: URLSessionWebSocketTask, id: Int) async throws -> String {
+        let payload: [String: Any] = [
+            "id": id,
+            "method": "Browser.getVersion",
+            "params": [:]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        try await send(String(decoding: data, as: UTF8.self), using: task)
+        let responseData = try await receiveResponseData(id: id, using: task)
+        guard
+            let object = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+            let result = object["result"] as? [String: Any],
+            let userAgent = result["userAgent"] as? String
+        else {
+            throw UpstreamChromeAuthError.invalidDevToolsResponse
+        }
+        return userAgent
+    }
+
     private func parseCookieRows(from responseData: Data) -> [[String: Any]] {
         guard
             let object = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
@@ -609,6 +679,72 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         return false
     }
 
+    static func defaultValidateSub2APILogin(_ credential: UpstreamRateCredential) async -> UpstreamRateCredential? {
+        var next = credential
+        if next.sub2AuthToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let refreshToken = next.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasCookieRefreshToken = upstreamRateSub2CookieContainsRefreshToken(next.sub2CookieHeader)
+            guard !refreshToken.isEmpty || hasCookieRefreshToken else {
+                print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) result=missing-auth")
+                return nil
+            }
+            guard let url = URL(string: upstreamRateBrowserAuthBaseURL(credential.baseURL) + "/api/v1/auth/refresh") else {
+                print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) result=invalid-url")
+                return nil
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(
+                upstreamRateUserAgentHeader(credential.userAgent, cookieHeader: credential.sub2CookieHeader),
+                forHTTPHeaderField: "User-Agent"
+            )
+            if !credential.sub2CookieHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                request.setValue(credential.sub2CookieHeader, forHTTPHeaderField: "Cookie")
+            }
+            let body = refreshToken.isEmpty ? [:] : ["refresh_token": refreshToken]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh status=\(status) success=false refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
+                    return nil
+                }
+                guard
+                    let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let code = upstreamRateBrowserAuthDouble(object["code"])
+                else {
+                    print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh status=2xx success=unknown refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
+                    return credential
+                }
+                let nested = object["data"] as? [String: Any] ?? [:]
+                let token = upstreamRateBrowserAuthString(nested["access_token"])
+                let success = code == 0 && !token.isEmpty
+                let message = upstreamRateBrowserAuthString(object["message"]).prefix(80)
+                print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh status=2xx success=\(success) message=\(message) refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
+                if success {
+                    next.sub2AuthToken = token
+                    let nextRefreshToken = upstreamRateBrowserAuthString(nested["refresh_token"])
+                    if !nextRefreshToken.isEmpty {
+                        next.sub2RefreshToken = nextRefreshToken
+                    }
+                    if let expiresIn = upstreamRateBrowserAuthDouble(nested["expires_in"]), expiresIn > 0 {
+                        next.sub2TokenExpiresAt = Date().addingTimeInterval(expiresIn)
+                    }
+                    return next
+                }
+                return nil
+            } catch {
+                print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh error=\(error.localizedDescription) refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
+                return nil
+            }
+        }
+        return credential
+    }
+
     private func send(_ text: String, using task: URLSessionWebSocketTask) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             task.send(.string(text)) { error in
@@ -664,6 +800,11 @@ final class UpstreamChromeAuthImporter: ObservableObject {
     private func fetchPages(from url: URL) async throws -> [ChromePage] {
         let (data, _) = try await session.data(from: url)
         return try JSONDecoder().decode([ChromePage].self, from: data)
+    }
+
+    private func fetchBrowserVersion(from url: URL) async throws -> ChromeBrowserVersion {
+        let (data, _) = try await session.data(from: url)
+        return try JSONDecoder().decode(ChromeBrowserVersion.self, from: data)
     }
 
     private func normalizedBaseURL(_ value: String) -> String {
@@ -739,6 +880,16 @@ private struct ChromePage: Decodable {
     }
 }
 
+private struct ChromeBrowserVersion: Decodable {
+    let userAgent: String
+    let webSocketDebuggerURL: URL?
+
+    private enum CodingKeys: String, CodingKey {
+        case userAgent = "User-Agent"
+        case webSocketDebuggerURL = "webSocketDebuggerUrl"
+    }
+}
+
 private struct NewAPILoginValidationProbe {
     let apiPath: String
     let signedPath: String?
@@ -766,4 +917,38 @@ private func newAPIBrowserAuthSignature(path: String, date: Date = Date(), nonce
 private func newAPIBrowserAuthRandomNonce() -> String {
     let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
     return String((0..<8).map { _ in alphabet[Int.random(in: 0..<alphabet.count)] })
+}
+
+private func upstreamRateBrowserAuthBaseURL(_ value: String) -> String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    if trimmed.contains("://") {
+        return trimmed
+    }
+    return "https://\(trimmed)"
+}
+
+private func upstreamRateBrowserAuthString(_ value: Any?) -> String {
+    switch value {
+    case let string as String:
+        return string.trimmingCharacters(in: .whitespacesAndNewlines)
+    case let number as NSNumber:
+        return number.stringValue
+    default:
+        return ""
+    }
+}
+
+private func upstreamRateBrowserAuthDouble(_ value: Any?) -> Double? {
+    switch value {
+    case let double as Double:
+        return double
+    case let int as Int:
+        return Double(int)
+    case let number as NSNumber:
+        return number.doubleValue
+    case let string as String:
+        return Double(string)
+    default:
+        return nil
+    }
 }
