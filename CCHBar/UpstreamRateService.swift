@@ -254,25 +254,34 @@ actor UpstreamRateService {
             throw UpstreamRateServiceError.missingCredential("缺少 Sub2API refresh token")
         }
 
-        let body = try await requestJSON(
+        let result = try await requestJSONResponse(
             baseURL: credential.baseURL,
             path: "/api/v1/auth/refresh",
             method: "POST",
             headers: upstreamRateSub2RefreshHeaders(credential),
-            body: refreshToken.isEmpty ? [:] : ["refresh_token": refreshToken],
+            body: hasCookieRefreshToken ? [:] : ["refresh_token": refreshToken],
             unwrap: .sub2
         )
-        let dict = body as? [String: Any] ?? [:]
+        let dict = result.value as? [String: Any] ?? [:]
         let accessToken = serviceString(dict["access_token"])
         let nextRefreshToken = serviceString(dict["refresh_token"])
-        guard !accessToken.isEmpty, !nextRefreshToken.isEmpty || hasCookieRefreshToken else {
+        let mergedCookieHeader = upstreamRateMergingResponseCookies(
+            credential.sub2CookieHeader,
+            response: result.response,
+            expectedHost: normalizedUpstreamHost(credential.baseURL) ?? credential.host
+        )
+        let responseCookieRefreshToken = upstreamRateSub2RefreshTokenCookieValue(mergedCookieHeader)
+        guard !accessToken.isEmpty, !nextRefreshToken.isEmpty || !responseCookieRefreshToken.isEmpty else {
             throw UpstreamRateServiceError.invalidResponse("Sub2API refresh 响应缺少 token")
         }
 
         let expiresIn = serviceDouble(dict["expires_in"], fallback: 0)
         var next = credential
         next.sub2AuthToken = accessToken
-        if !nextRefreshToken.isEmpty {
+        next.sub2CookieHeader = mergedCookieHeader
+        if !responseCookieRefreshToken.isEmpty {
+            next.sub2RefreshToken = responseCookieRefreshToken
+        } else if !nextRefreshToken.isEmpty {
             next.sub2RefreshToken = nextRefreshToken
         }
         next.sub2TokenExpiresAt = Date().addingTimeInterval(expiresIn)
@@ -530,6 +539,11 @@ actor UpstreamRateService {
         case newAPI
     }
 
+    private struct JSONResponse {
+        let value: Any
+        let response: HTTPURLResponse
+    }
+
     private func requestJSON(
         baseURL: String,
         path: String,
@@ -539,6 +553,27 @@ actor UpstreamRateService {
         body: [String: Any]? = nil,
         unwrap: ResponseEnvelope
     ) async throws -> Any {
+        let result = try await requestJSONResponse(
+            baseURL: baseURL,
+            path: path,
+            queryItems: queryItems,
+            method: method,
+            headers: headers,
+            body: body,
+            unwrap: unwrap
+        )
+        return result.value
+    }
+
+    private func requestJSONResponse(
+        baseURL: String,
+        path: String,
+        queryItems: [URLQueryItem] = [],
+        method: String = "GET",
+        headers: [String: String] = [:],
+        body: [String: Any]? = nil,
+        unwrap: ResponseEnvelope
+    ) async throws -> JSONResponse {
         let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard var components = URLComponents(string: base + path) else { throw UpstreamRateServiceError.invalidURL }
         if !queryItems.isEmpty {
@@ -562,7 +597,10 @@ actor UpstreamRateService {
             throw UpstreamRateServiceError.http(http.statusCode, headers: upstreamRateHTTPHeaders(http))
         }
         let value = data.isEmpty ? NSNull() : try JSONSerialization.jsonObject(with: data)
-        return try unwrapEnvelope(value, unwrap: unwrap)
+        return JSONResponse(
+            value: try unwrapEnvelope(value, unwrap: unwrap),
+            response: http
+        )
     }
 
     private func unwrapEnvelope(_ value: Any, unwrap: ResponseEnvelope) throws -> Any {
@@ -661,16 +699,75 @@ func upstreamRateUserAgentHeader(_ userAgent: String, cookieHeader: String) -> S
 }
 
 func upstreamRateSub2CookieContainsRefreshToken(_ cookieHeader: String) -> Bool {
+    !upstreamRateSub2RefreshTokenCookieValue(cookieHeader).isEmpty
+}
+
+func upstreamRateSub2RefreshTokenCookieValue(_ cookieHeader: String) -> String {
     cookieHeader
         .split(separator: ";")
-        .contains { part in
-            let name = part
-                .split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                .first?
+        .compactMap { part -> String? in
+            let pieces = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let name = pieces.first?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased() ?? ""
-            return name == "sub2api_refresh_token"
+            guard name == "sub2api_refresh_token", pieces.count == 2 else { return nil }
+            return pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        .first ?? ""
+}
+
+func upstreamRateMergingResponseCookies(
+    _ cookieHeader: String,
+    response: HTTPURLResponse,
+    expectedHost: String
+) -> String {
+    guard let url = response.url, let host = url.host?.lowercased() else {
+        return cookieHeader
+    }
+    let normalizedExpectedHost = expectedHost
+        .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        .lowercased()
+    guard host == normalizedExpectedHost else { return cookieHeader }
+    let headerFields = response.allHeaderFields.reduce(into: [String: String]()) { result, entry in
+        guard let key = entry.key as? String else { return }
+        result[key] = "\(entry.value)"
+    }
+    let responseCookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: url)
+        .filter { cookie in
+            let domain = cookie.domain
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                .lowercased()
+            return domain.isEmpty || domain == host || host.hasSuffix(".\(domain)")
+        }
+    guard !responseCookies.isEmpty else { return cookieHeader }
+
+    var names: [String] = []
+    var values: [String: String] = [:]
+    for part in cookieHeader.split(separator: ";") {
+        let pieces = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let rawName = pieces.first, pieces.count == 2 else { continue }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { continue }
+        if values[name] == nil {
+            names.append(name)
+        }
+        values[name] = pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    for cookie in responseCookies {
+        if cookie.expiresDate.map({ $0 <= Date() }) == true {
+            values.removeValue(forKey: cookie.name)
+            names.removeAll { $0 == cookie.name }
+        } else {
+            if values[cookie.name] == nil {
+                names.append(cookie.name)
+            }
+            values[cookie.name] = cookie.value
+        }
+    }
+    return names.compactMap { name in
+        values[name].map { "\(name)=\($0)" }
+    }.joined(separator: "; ")
 }
 
 func upstreamRateHTTPHeaders(_ response: HTTPURLResponse) -> [String: String] {

@@ -271,6 +271,7 @@ final class UpstreamChromeAuthImporter: ObservableObject {
 
         try openChrome(for: credential)
         step = .waiting
+        await clearStaleBrowserCredential(for: credential)
 
         let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
         var lastError: Error?
@@ -408,6 +409,10 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         }
         if credential.sourceType == .sub2API, !state.cookieHeader.isEmpty {
             next.sub2CookieHeader = state.cookieHeader
+            let cookieRefreshToken = upstreamRateSub2RefreshTokenCookieValue(state.cookieHeader)
+            if !cookieRefreshToken.isEmpty {
+                next.sub2RefreshToken = cookieRefreshToken
+            }
         }
         if credential.sourceType == .newAPI, !state.cookieHeader.isEmpty {
             next.newAPICookieHeader = state.cookieHeader
@@ -680,8 +685,17 @@ final class UpstreamChromeAuthImporter: ObservableObject {
     }
 
     static func defaultValidateSub2APILogin(_ credential: UpstreamRateCredential) async -> UpstreamRateCredential? {
+        await validateSub2APILogin(credential, session: .shared)
+    }
+
+    static func validateSub2APILogin(
+        _ credential: UpstreamRateCredential,
+        session: URLSession
+    ) async -> UpstreamRateCredential? {
         var next = credential
-        if next.sub2AuthToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let shouldRefresh = next.sub2AuthToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || (next.sub2TokenExpiresAt?.timeIntervalSinceNow ?? 0) <= 5 * 60
+        if shouldRefresh {
             let refreshToken = next.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
             let hasCookieRefreshToken = upstreamRateSub2CookieContainsRefreshToken(next.sub2CookieHeader)
             guard !refreshToken.isEmpty || hasCookieRefreshToken else {
@@ -703,11 +717,11 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             if !credential.sub2CookieHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 request.setValue(credential.sub2CookieHeader, forHTTPHeaderField: "Cookie")
             }
-            let body = refreshToken.isEmpty ? [:] : ["refresh_token": refreshToken]
+            let body = hasCookieRefreshToken ? [:] : ["refresh_token": refreshToken]
             request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
+                let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                     let status = (response as? HTTPURLResponse)?.statusCode ?? -1
                     print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh status=\(status) success=false refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
@@ -718,7 +732,7 @@ final class UpstreamChromeAuthImporter: ObservableObject {
                     let code = upstreamRateBrowserAuthDouble(object["code"])
                 else {
                     print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh status=2xx success=unknown refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
-                    return credential
+                    return nil
                 }
                 let nested = object["data"] as? [String: Any] ?? [:]
                 let token = upstreamRateBrowserAuthString(nested["access_token"])
@@ -727,8 +741,17 @@ final class UpstreamChromeAuthImporter: ObservableObject {
                 print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh status=2xx success=\(success) message=\(message) refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
                 if success {
                     next.sub2AuthToken = token
+                    let mergedCookieHeader = upstreamRateMergingResponseCookies(
+                        credential.sub2CookieHeader,
+                        response: http,
+                        expectedHost: normalizedUpstreamHost(credential.baseURL) ?? credential.host
+                    )
+                    next.sub2CookieHeader = mergedCookieHeader
                     let nextRefreshToken = upstreamRateBrowserAuthString(nested["refresh_token"])
-                    if !nextRefreshToken.isEmpty {
+                    let responseCookieRefreshToken = upstreamRateSub2RefreshTokenCookieValue(mergedCookieHeader)
+                    if !responseCookieRefreshToken.isEmpty {
+                        next.sub2RefreshToken = responseCookieRefreshToken
+                    } else if !nextRefreshToken.isEmpty {
                         next.sub2RefreshToken = nextRefreshToken
                     }
                     if let expiresIn = upstreamRateBrowserAuthDouble(nested["expires_in"]), expiresIn > 0 {
@@ -779,13 +802,62 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         throw UpstreamChromeAuthError.invalidDevToolsResponse
     }
 
-    private func findPage(for credential: UpstreamRateCredential) async throws -> ChromePage {
+    private func clearStaleBrowserCredential(for credential: UpstreamRateCredential) async {
+        guard credential.sourceType == .sub2API else { return }
+        do {
+            let page = try await findPage(for: credential, attempts: 10)
+            guard let webSocketDebuggerURL = page.webSocketDebuggerURL else { return }
+            let task = session.webSocketTask(with: webSocketDebuggerURL)
+            task.resume()
+            defer { task.cancel(with: .normalClosure, reason: nil) }
+
+            try await deleteBrowserCookie(
+                name: "sub2api_refresh_token",
+                pageURL: page.url,
+                using: task,
+                id: 20_001
+            )
+            try? await reloadPage(using: task, id: 20_002)
+            print("UpstreamChromeAuthImporter cleared stale Sub2API browser cookie host=\(credential.host)")
+        } catch {
+            print("UpstreamChromeAuthImporter clear stale Sub2API cookie skipped host=\(credential.host) error=\(error.localizedDescription)")
+        }
+    }
+
+    private func deleteBrowserCookie(name: String, pageURL: String, using task: URLSessionWebSocketTask, id: Int) async throws {
+        let payload: [String: Any] = [
+            "id": id,
+            "method": "Network.deleteCookies",
+            "params": [
+                "name": name,
+                "url": pageURL
+            ]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        try await send(String(decoding: data, as: UTF8.self), using: task)
+        _ = try await receiveResponseData(id: id, using: task)
+    }
+
+    private func reloadPage(using task: URLSessionWebSocketTask, id: Int) async throws {
+        let payload: [String: Any] = [
+            "id": id,
+            "method": "Page.reload",
+            "params": [
+                "ignoreCache": true
+            ]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        try await send(String(decoding: data, as: UTF8.self), using: task)
+        _ = try await receiveResponseData(id: id, using: task)
+    }
+
+    private func findPage(for credential: UpstreamRateCredential, attempts: Int = 20) async throws -> ChromePage {
         let host = normalizedUpstreamHost(credential.baseURL) ?? credential.host
         guard let listURL = URL(string: "http://127.0.0.1:\(port)/json") else {
             throw UpstreamChromeAuthError.invalidDevToolsResponse
         }
 
-        for _ in 0..<20 {
+        for _ in 0..<attempts {
             if let pages = try? await fetchPages(from: listURL),
                let page = pages.first(where: { page in
                    page.type == "page" && (normalizedUpstreamHost(page.url) == host || page.url.contains(host))

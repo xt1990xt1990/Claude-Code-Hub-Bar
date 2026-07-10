@@ -20,6 +20,8 @@ private struct UpstreamRateCloudflareChallengeTests {
         await testCloudflareChallengeClassification()
         await testHTTPStatusIsCheckedBeforeJSONParsing()
         await testSub2CookieOnlyRefreshUsesBrowserCookie()
+        await testSub2BodyTokenRefreshKeepsRequestBody()
+        await testCrossOriginRefreshCookieIsRejected()
         await testNewAPIBalanceFallsBackToUserProfile()
         testNekocodeHostIsDetectedAsNewAPI()
     }
@@ -104,7 +106,8 @@ private struct UpstreamRateCloudflareChallengeTests {
         let session = URLSession(configuration: config)
         let service = UpstreamRateService(session: session)
         var credential = UpstreamRateCredential.empty(host: "ageteam.online", sourceType: .sub2API)
-        credential.sub2CookieHeader = "sub2api_refresh_token=browser"
+        credential.sub2CookieHeader = "cf_clearance=ok; sub2api_refresh_token=browser"
+        credential.sub2RefreshToken = "stale-keychain-token"
         credential.userAgent = "Mozilla/5.0 Chrome/149.0"
 
         do {
@@ -118,11 +121,73 @@ private struct UpstreamRateCloudflareChallengeTests {
                 "Sub2API balance should be read after cookie-only refresh"
             )
             let refresh = Sub2CookieOnlyRefreshProtocol.requests.first { $0.path == "/api/v1/auth/refresh" }
-            expectTrue(refresh?.cookie == "sub2api_refresh_token=browser", "refresh request should send browser cookie")
+            expectTrue(refresh?.cookie?.contains("sub2api_refresh_token=browser") == true, "refresh request should send browser cookie")
             expectTrue(refresh?.userAgent == "Mozilla/5.0 Chrome/149.0", "refresh request should send browser User-Agent")
             expectTrue(refresh?.body == #"{}"#, "cookie-only refresh should send an empty JSON body")
+            expectTrue(
+                outcome.credential.sub2CookieHeader.contains("sub2api_refresh_token=rotated"),
+                "rotated refresh Cookie should be stored"
+            )
+            expectFalse(
+                outcome.credential.sub2CookieHeader.contains("sub2api_refresh_token=browser"),
+                "stale refresh Cookie should be replaced"
+            )
+            expectTrue(
+                outcome.credential.sub2CookieHeader.contains("cf_clearance=ok"),
+                "unrelated browser Cookies should be preserved"
+            )
+            expectTrue(
+                outcome.credential.sub2RefreshToken == "rotated",
+                "rotated refresh Cookie should update the credential field"
+            )
         } catch {
             fail("expected Sub2API cookie-only refresh to succeed, got \(error)")
+        }
+    }
+
+    private static func testSub2BodyTokenRefreshKeepsRequestBody() async {
+        Sub2CookieOnlyRefreshProtocol.requests = []
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Sub2CookieOnlyRefreshProtocol.self]
+        let session = URLSession(configuration: config)
+        let service = UpstreamRateService(session: session)
+        var credential = UpstreamRateCredential.empty(host: "body.example.test", sourceType: .sub2API)
+        credential.sub2RefreshToken = "body-refresh"
+
+        do {
+            _ = try await service.fetchBalance(credential: credential)
+            let refresh = Sub2CookieOnlyRefreshProtocol.requests.first { $0.path == "/api/v1/auth/refresh" }
+            expectTrue(refresh?.cookie == nil, "body-token refresh should not require a Cookie")
+            expectTrue(
+                refresh?.body.contains(#""refresh_token":"body-refresh""#) == true,
+                "body-token refresh should preserve the existing request contract"
+            )
+        } catch {
+            fail("expected body-token Sub2API refresh to succeed, got \(error)")
+        }
+    }
+
+    private static func testCrossOriginRefreshCookieIsRejected() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CrossOriginRefreshProtocol.self]
+        let session = URLSession(configuration: config)
+        let service = UpstreamRateService(session: session)
+        var credential = UpstreamRateCredential.empty(host: "origin.example.test", sourceType: .sub2API)
+        credential.sub2CookieHeader = "sub2api_refresh_token=origin"
+        credential.sub2RefreshToken = "origin"
+
+        do {
+            let outcome = try await service.fetchBalance(credential: credential)
+            expectTrue(
+                outcome.credential.sub2CookieHeader == "sub2api_refresh_token=origin",
+                "cross-origin refresh response must not replace the upstream Cookie"
+            )
+            expectTrue(
+                outcome.credential.sub2RefreshToken == "origin",
+                "cross-origin refresh response must not replace the credential field"
+            )
+        } catch {
+            fail("expected cross-origin refresh response to preserve the original Cookie, got \(error)")
         }
     }
 
@@ -223,7 +288,11 @@ private final class Sub2CookieOnlyRefreshProtocol: URLProtocol {
         switch path {
         case "/api/v1/auth/refresh":
             status = 200
-            body = #"{"code":0,"data":{"access_token":"access-from-cookie","refresh_token":"refresh-from-cookie","expires_in":3600}}"#
+            if request.value(forHTTPHeaderField: "Cookie")?.contains("sub2api_refresh_token=") == true {
+                body = #"{"code":0,"data":{"access_token":"access-from-cookie","expires_in":3600}}"#
+            } else {
+                body = #"{"code":0,"data":{"access_token":"access-from-cookie","refresh_token":"body-refresh-next","expires_in":3600}}"#
+            }
         case "/api/v1/auth/me":
             if request.value(forHTTPHeaderField: "Authorization") == "Bearer access-from-cookie" {
                 status = 200
@@ -237,11 +306,16 @@ private final class Sub2CookieOnlyRefreshProtocol: URLProtocol {
             body = #"{"code":404,"message":"not found"}"#
         }
 
+        var responseHeaders = ["Content-Type": "application/json"]
+        if path == "/api/v1/auth/refresh",
+           request.value(forHTTPHeaderField: "Cookie")?.contains("sub2api_refresh_token=") == true {
+            responseHeaders["Set-Cookie"] = "sub2api_refresh_token=rotated; Path=/; HttpOnly; Secure; SameSite=Lax"
+        }
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: status,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
+            headerFields: responseHeaders
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(body.utf8))
@@ -271,6 +345,59 @@ private final class Sub2CookieOnlyRefreshProtocol: URLProtocol {
         }
         return data
     }
+}
+
+private final class CrossOriginRefreshProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let host = request.url?.host ?? ""
+        let path = request.url?.path ?? ""
+        if host == "origin.example.test", path == "/api/v1/auth/refresh" {
+            let redirectURL = URL(string: "https://redirect.example.test/api/v1/auth/refresh")!
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 302,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Location": redirectURL.absoluteString]
+            )!
+            client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: redirectURL), redirectResponse: response)
+            return
+        }
+
+        let status: Int
+        let body: String
+        var headers = ["Content-Type": "application/json"]
+        if host == "redirect.example.test", path == "/api/v1/auth/refresh" {
+            status = 200
+            body = #"{"code":0,"data":{"access_token":"redirect-access","expires_in":3600}}"#
+            headers["Set-Cookie"] = "sub2api_refresh_token=redirect; Path=/; HttpOnly; Secure"
+        } else if host == "origin.example.test", path == "/api/v1/auth/me" {
+            status = 200
+            body = #"{"code":0,"data":{"balance":1}}"#
+        } else {
+            status = 404
+            body = #"{"code":404,"message":"not found"}"#
+        }
+
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: headers
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class NewAPIProfileFallbackProtocol: URLProtocol {

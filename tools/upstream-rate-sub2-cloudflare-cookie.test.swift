@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 @main
@@ -7,6 +8,7 @@ private struct UpstreamRateSub2CloudflareCookieTests {
         try testSub2BrowserImportStoresCookieHeader()
         try testSub2BrowserImportAcceptsCookieOnlyRefreshToken()
         try await testSub2CookieOnlyLoginUsesValidator()
+        try await testSub2MalformedRefreshResponseIsRejected()
         try testSub2HeadersIncludeBrowserCookie()
         try testNewAPIHeadersIncludeBrowserCookieAndUserAgent()
         try testNewAPICookieOnlyHeadersUseBrowserUserAgentFallback()
@@ -40,7 +42,8 @@ private struct UpstreamRateSub2CloudflareCookieTests {
         let importer = UpstreamChromeAuthImporter(
             validateNewAPILogin: { _ in true }
         )
-        let credential = UpstreamRateCredential.empty(host: "ageteam.online", sourceType: .sub2API)
+        var credential = UpstreamRateCredential.empty(host: "ageteam.online", sourceType: .sub2API)
+        credential.sub2RefreshToken = "stale-keychain-token"
         let next = try importer.mergeBrowserState(
             (
                 storage: [:],
@@ -51,6 +54,7 @@ private struct UpstreamRateSub2CloudflareCookieTests {
         )
 
         try expect(next.sub2CookieHeader == "sub2api_refresh_token=browser", "Sub2API cookie-only refresh token should be stored")
+        try expect(next.sub2RefreshToken == "browser", "Sub2API refresh token field should be hydrated from refresh cookie")
         try expect(next.userAgent == "Mozilla/5.0 Chrome/149.0", "browser User-Agent should be stored for cookie-only Sub2API login")
         try importer.requireFreshBrowserCredential(
             (
@@ -73,6 +77,25 @@ private struct UpstreamRateSub2CloudflareCookieTests {
 
         let validated = await importer.isValidatedLogin(credential)
         try expect(!validated, "Sub2API cookie-only login should be checked by the upstream validator")
+    }
+
+    private static func testSub2MalformedRefreshResponseIsRejected() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MalformedSub2RefreshProtocol.self]
+        let session = URLSession(configuration: config)
+        var credential = UpstreamRateCredential.empty(host: "malformed.example.test", sourceType: .sub2API)
+        credential.baseURL = "https://malformed.example.test"
+        credential.sub2CookieHeader = "sub2api_refresh_token=browser"
+        credential.sub2RefreshToken = "browser"
+
+        let validated = await UpstreamChromeAuthImporter.validateSub2APILogin(
+            credential,
+            session: session
+        )
+        if validated != nil {
+            fputs("FAIL: malformed 2xx refresh response must not validate browser login\n", stderr)
+            exit(1)
+        }
     }
 
     private static func testSub2HeadersIncludeBrowserCookie() throws {
@@ -136,4 +159,28 @@ private struct UpstreamRateSub2CloudflareCookieTests {
             throw NSError(domain: "UpstreamRateSub2CloudflareCookieTests", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
+}
+
+private final class MalformedSub2RefreshProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "text/html"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("<html>challenge</html>".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
