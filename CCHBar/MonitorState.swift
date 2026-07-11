@@ -299,6 +299,8 @@ final class MonitorState: ObservableObject {
     private var distributedWakeObservers: [NSObjectProtocol] = []
     private var refreshTask: Task<Void, Never>?
     private var providerMiniProbeResumeTask: Task<Void, Never>?
+    private var upstreamWakeRefreshCoordinator = CCHUpstreamWakeRefreshCoordinator()
+    private var upstreamWakeRefreshTask: Task<Void, Never>?
     private var providerMiniProbeIntervalRestartTask: Task<Void, Never>?
     private var providerMiniProbeTasks: [Int: Task<Void, Never>] = [:]
     private var providerMiniProbeTaskTokens: [Int: UUID] = [:]
@@ -567,6 +569,7 @@ final class MonitorState: ObservableObject {
         updateCheckTimer?.cancel()
         providerMiniProbeTimer?.cancel()
         providerMiniProbeResumeTask?.cancel()
+        upstreamWakeRefreshTask?.cancel()
         providerMiniProbeIntervalRestartTask?.cancel()
         providerMiniProbeTasks.values.forEach { $0.cancel() }
         providerMiniProbeNetworkMonitor.cancel()
@@ -1346,8 +1349,12 @@ final class MonitorState: ObservableObject {
                 guard let self else { return }
                 let oldStatus = self.providerMiniProbeNetworkStatus
                 self.providerMiniProbeNetworkStatus = path.status
-                guard oldStatus != .satisfied, path.status == .satisfied else { return }
-                self.runProviderMiniProbesAfterSystemResumeIfNeeded()
+                if oldStatus != .satisfied, path.status == .satisfied {
+                    self.runProviderMiniProbesAfterSystemResumeIfNeeded()
+                    self.runUpstreamBalanceRefreshAfterNetworkRestoredIfNeeded()
+                } else if oldStatus == .satisfied, path.status != .satisfied {
+                    self.upstreamWakeRefreshCoordinator.networkDidBecomeUnsatisfied()
+                }
             }
         }
         providerMiniProbeNetworkMonitor.start(queue: providerMiniProbeNetworkQueue)
@@ -1408,7 +1415,7 @@ final class MonitorState: ObservableObject {
 
     @discardableResult
     func refreshUpstreamRates(silent: Bool = false) async -> Bool {
-        if isRefreshingUpstreamRates { return false }
+        if isRefreshingUpstreamRates || isRefreshingUpstreamBalances { return false }
         isRefreshingUpstreamRates = true
         defer { isRefreshingUpstreamRates = false }
 
@@ -1502,7 +1509,7 @@ final class MonitorState: ObservableObject {
     }
 
     func refreshUpstreamBalances(silent: Bool = false, onlyIfStale: Bool = false) async {
-        if isRefreshingUpstreamBalances { return }
+        if isRefreshingUpstreamBalances || isRefreshingUpstreamRates { return }
         if onlyIfStale,
            let upstreamBalanceLastRefreshedAt,
            Date().timeIntervalSince(upstreamBalanceLastRefreshedAt) < CCHUpstreamRateStorage.balanceStaleInterval {
@@ -2294,6 +2301,7 @@ final class MonitorState: ObservableObject {
                     await self.refresh()
                     self.runProviderMiniProbesAfterSystemResumeIfNeeded()
                     self.runDueUpstreamRateAutoSyncIfNeeded()
+                    self.runUpstreamBalanceRefreshAfterSystemResumeIfNeeded()
                 }
             }
             workspaceWakeObservers.append(observer)
@@ -2311,6 +2319,56 @@ final class MonitorState: ObservableObject {
             }
         }
         distributedWakeObservers.append(unlockObserver)
+    }
+
+    private func runUpstreamBalanceRefreshAfterSystemResumeIfNeeded() {
+        let shouldSchedule = upstreamWakeRefreshCoordinator.systemDidWake(
+            networkIsSatisfied: providerMiniProbeNetworkStatus == .satisfied
+        )
+        guard shouldSchedule else { return }
+        scheduleUpstreamBalanceRefreshAfterSystemResume()
+    }
+
+    private func runUpstreamBalanceRefreshAfterNetworkRestoredIfNeeded() {
+        guard upstreamWakeRefreshCoordinator.networkDidBecomeSatisfied() else { return }
+        scheduleUpstreamBalanceRefreshAfterSystemResume()
+    }
+
+    private func scheduleUpstreamBalanceRefreshAfterSystemResume() {
+        guard upstreamWakeRefreshTask == nil else { return }
+        upstreamWakeRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(
+                    nanoseconds: CCHUpstreamWakeRefreshCoordinator.networkSettleDelayNanoseconds
+                )
+                guard !Task.isCancelled else { return }
+
+                while self.upstreamWakeRefreshCoordinator.shouldWaitForUpstreamOperation(
+                    rateRefreshIsRunning: self.isRefreshingUpstreamRates,
+                    balanceRefreshIsRunning: self.isRefreshingUpstreamBalances
+                ) {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    guard !Task.isCancelled else { return }
+                }
+
+                guard self.upstreamWakeRefreshCoordinator.scheduledRefreshCanStart(
+                    networkIsSatisfied: self.providerMiniProbeNetworkStatus == .satisfied
+                ) else {
+                    self.upstreamWakeRefreshTask = nil
+                    return
+                }
+
+                await self.refreshUpstreamBalances(silent: true)
+                let shouldRepeat = self.upstreamWakeRefreshCoordinator.refreshDidFinish(
+                    networkIsSatisfied: self.providerMiniProbeNetworkStatus == .satisfied
+                )
+                guard shouldRepeat else {
+                    self.upstreamWakeRefreshTask = nil
+                    return
+                }
+            }
+        }
     }
 
     private func rebuildCacheStatus() {
