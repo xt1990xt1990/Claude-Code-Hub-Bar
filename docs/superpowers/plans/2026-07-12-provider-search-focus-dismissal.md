@@ -4,11 +4,13 @@
 
 **Goal:** Dismiss the Providers tab's search-field focus after any click outside the complete search control while retaining the query and preserving the clicked control's normal behavior.
 
-**Architecture:** A pure geometry policy decides whether a tap should dismiss focus. `ProvidersTabView` owns transient SwiftUI focus state, measures the search control in a named coordinate space, and observes a simultaneous spatial tap without intercepting group chips, provider rows, or other controls.
+**Architecture:** A pure geometry policy decides whether a tap should dismiss focus. `ProvidersTabView` owns transient SwiftUI focus state, while an AppKit local mouse-event monitor observes the panel window, excludes the complete search-control bounds, resigns first responder, and returns the original event to group chips, provider rows, and other controls.
 
-**Tech Stack:** Swift 5, SwiftUI on macOS 14, Foundation geometry types, standalone `swiftc` tests, Xcode Debug build.
+**Tech Stack:** Swift 5, SwiftUI and AppKit on macOS 14, CoreGraphics geometry types, standalone `swiftc` tests, Xcode Debug build.
 
 ---
+
+> **Corrective implementation note:** The `SpatialTapGesture` approach documented in Task 2 compiled but did not receive clicks reliably through the Providers tab's nested vertical and horizontal `ScrollView` controls. Do not repeat that task. The final implementation uses `CCHProviderSearchOutsideClickMonitor.swift` and its event-routing regression test as described in the design specification.
 
 ### Task 1: Add the pure focus-dismissal policy
 
@@ -139,7 +141,7 @@ git commit -m "Add provider search focus policy"
 
 Expected: the diff check exits 0 and the commit contains only the policy, its test, and Xcode target registration.
 
-### Task 2: Connect outside taps to SwiftUI focus
+### Task 2: Connect outside taps to SwiftUI focus (superseded)
 
 **Files:**
 - Modify: `CCHBar/MenuBarView.swift:1340-1425`
@@ -263,7 +265,7 @@ Expected: the diff check exits 0 and the commit contains only the focus wiring i
 - Verify all source and test files
 - Replace: `/Applications/Claude Code Hub Bar.app`
 
-- [ ] **Step 1: Run all 18 standalone Swift tests**
+- [ ] **Step 1: Run all 19 standalone Swift tests**
 
 Run:
 
@@ -285,6 +287,7 @@ run_swift_test provider-model-test-parser CCHBar/CCHProviderModelTestParser.swif
 run_swift_test provider-multiplier-presets CCHBar/CCHProviderMultiplierPresets.swift tools/provider-multiplier-presets.test.swift
 run_swift_test provider-name-search CCHBar/CCHProviderNameSearch.swift tools/provider-name-search.test.swift
 run_swift_test provider-search-focus-policy CCHBar/CCHProviderSearchFocusPolicy.swift tools/provider-search-focus-policy.test.swift
+run_swift_test provider-search-outside-click-monitor CCHBar/CCHProviderSearchFocusPolicy.swift CCHBar/CCHProviderSearchOutsideClickMonitor.swift tools/provider-search-outside-click-monitor.test.swift
 run_swift_test refresh-freshness-policy CCHBar/CCHStatusBarPollingPolicy.swift tools/refresh-freshness-policy.test.swift
 run_swift_test status-bar-polling-policy CCHBar/CCHStatusBarPollingPolicy.swift tools/status-bar-polling-policy.test.swift
 run_swift_test status-bar-snapshot CCHBar/CCHDisplaySanitizer.swift CCHBar/CCHProviderDispatchSettings.swift CCHBar/CCHProviderModelTestParser.swift CCHBar/APIService.swift tools/status-bar-snapshot.test.swift
@@ -294,10 +297,10 @@ run_swift_test upstream-rate-inventory CCHBar/UpstreamRateModels.swift CCHBar/Up
 run_swift_test upstream-rate-stale-snapshot CCHBar/UpstreamRateModels.swift tools/upstream-rate-stale-snapshot.test.swift
 run_swift_test upstream-rate-sub2-cloudflare-cookie CCHBar/UpstreamRateModels.swift CCHBar/UpstreamRateCredentials.swift CCHBar/UpstreamRateService.swift CCHBar/UpstreamRateBrowserAuth.swift tools/upstream-rate-sub2-cloudflare-cookie.test.swift
 run_swift_test upstream-wake-refresh-coordinator CCHBar/CCHUpstreamWakeRefreshCoordinator.swift tools/upstream-wake-refresh-coordinator.test.swift
-printf 'Swift standalone tests: 18/18\n'
+printf 'Swift standalone tests: 19/19\n'
 ```
 
-Expected: all 18 executables exit 0 and the final count is `18/18`.
+Expected: all 19 executables exit 0 and the final count is `19/19`.
 
 - [ ] **Step 2: Run both Node test suites**
 

@@ -1337,22 +1337,9 @@ private struct LogsTabView: View {
     }
 }
 
-private enum ProviderSearchFocusLayout {
-    static let coordinateSpaceName = "provider-search-focus"
-}
-
-private struct ProviderSearchFramePreferenceKey: PreferenceKey {
-    static var defaultValue: CGRect { .zero }
-
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        value = nextValue()
-    }
-}
-
 private struct ProvidersTabView: View {
     @ObservedObject var state: MonitorState
     @FocusState private var isProviderSearchFocused: Bool
-    @State private var providerSearchFrame: CGRect = .zero
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1366,12 +1353,12 @@ private struct ProvidersTabView: View {
                     isFocused: $isProviderSearchFocused
                 )
                 .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: ProviderSearchFramePreferenceKey.self,
-                            value: proxy.frame(in: .named(ProviderSearchFocusLayout.coordinateSpaceName))
-                        )
+                    CCHProviderSearchOutsideClickMonitor(
+                        isFocused: isProviderSearchFocused
+                    ) {
+                        isProviderSearchFocused = false
                     }
+                    .allowsHitTesting(false)
                 }
                 PanelLinkButton(title: "打开") {
                     state.openCCH("/zh-CN/dashboard/providers")
@@ -1400,22 +1387,6 @@ private struct ProvidersTabView: View {
                 .animation(.spring(response: 0.26, dampingFraction: 0.86), value: state.filteredProviders.map(\.id))
             }
         }
-        .coordinateSpace(name: ProviderSearchFocusLayout.coordinateSpaceName)
-        .onPreferenceChange(ProviderSearchFramePreferenceKey.self) { frame in
-            providerSearchFrame = frame
-        }
-        .contentShape(Rectangle())
-        .simultaneousGesture(
-            SpatialTapGesture(coordinateSpace: .named(ProviderSearchFocusLayout.coordinateSpaceName))
-                .onEnded { tap in
-                    guard CCHProviderSearchFocusPolicy.shouldDismiss(
-                        isFocused: isProviderSearchFocused,
-                        searchFrame: providerSearchFrame,
-                        tapLocation: tap.location
-                    ) else { return }
-                    isProviderSearchFocused = false
-                }
-        )
     }
 }
 
