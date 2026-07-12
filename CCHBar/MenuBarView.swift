@@ -1347,6 +1347,7 @@ private struct ProvidersTabView: View {
                 MiniStat(title: "启用", value: Text("\(state.filteredEnabledProviderCount)").font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
                 MiniStat(title: "异常", value: Text("\(state.filteredUnhealthyProviderCount)").font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit())
                 Spacer()
+                ProviderNameSearchField(text: $state.providerSearchText)
                 PanelLinkButton(title: "打开") {
                     state.openCCH("/zh-CN/dashboard/providers")
                 }
@@ -1355,7 +1356,7 @@ private struct ProvidersTabView: View {
             ProviderGroupChips(state: state)
 
             if state.filteredProviders.isEmpty {
-                EmptyStateView(text: "暂无渠道")
+                EmptyStateView(text: state.providerEmptyStateText)
             } else {
                 LazyVStack(spacing: 8) {
                     ForEach(state.filteredProviders) { provider in
@@ -1377,11 +1378,45 @@ private struct ProvidersTabView: View {
     }
 }
 
+private struct ProviderNameSearchField: View {
+    @Binding var text: String
+    @Environment(\.cchTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(theme.textTertiary)
+            TextField("搜索渠道", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("清空搜索")
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(width: 150, height: 28)
+        .background(theme.control)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(theme.border.opacity(0.5), lineWidth: 0.8)
+        }
+    }
+}
+
 private struct UpstreamRatesTabView: View {
     @ObservedObject var state: MonitorState
     @Environment(\.cchTheme) private var theme
     @State private var editingCredential: UpstreamRateCredential?
-    @State private var didInitialRefresh = false
     @State private var expandedUpstreamRateHosts: Set<String> = []
     @State private var isAutoSyncPopoverPresented = false
     @State private var isRateRefreshHovered = false
@@ -1421,15 +1456,11 @@ private struct UpstreamRatesTabView: View {
                 }
             }
         }
-        .task {
-            guard !didInitialRefresh else { return }
-            didInitialRefresh = true
-            if state.upstreamRateSnapshots.isEmpty {
-                await state.refreshUpstreamRates(silent: true)
-            } else {
-                await state.refreshUpstreamRatesIfSnapshotIsStale()
-            }
-            await state.refreshUpstreamBalances(silent: true)
+        .task(id: "\(state.selectedTab.rawValue)-\(state.panelVisible)") {
+            guard state.selectedTab == .upstreamRates else { return }
+            guard state.panelVisible else { return }
+            await state.refreshUpstreamRatesIfSnapshotIsStale()
+            await state.refreshUpstreamBalances(silent: true, onlyIfStale: true)
         }
         .sheet(item: $editingCredential) { credential in
             UpstreamCredentialEditor(

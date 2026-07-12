@@ -56,6 +56,22 @@ private struct UpstreamRateStaleSnapshotTests {
         )
 
         expectTrue(
+            shouldRefreshUpstreamRateSnapshotsOnActivation(providers: providers, snapshots: []),
+            "opening the upstream tab with no cached snapshot should trigger an initial refresh"
+        )
+        expectTrue(
+            shouldRecordUpstreamBalanceRefreshSuccess(totalHostCount: 2, completedHostCount: 2),
+            "a completed balance batch should advance its freshness timestamp"
+        )
+        expectFalse(
+            shouldRecordUpstreamBalanceRefreshSuccess(totalHostCount: 2, completedHostCount: 1),
+            "a partially failed balance batch should remain retryable"
+        )
+        expectFalse(
+            shouldRecordUpstreamBalanceRefreshSuccess(totalHostCount: 1, completedHostCount: 0),
+            "a failed balance batch should remain retryable"
+        )
+        expectTrue(
             shouldRefreshUpstreamRateSnapshots(providers: providers, snapshots: [staleSnapshot]),
             "missing provider id in an available snapshot should trigger refresh"
         )

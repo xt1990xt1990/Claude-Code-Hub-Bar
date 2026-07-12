@@ -78,6 +78,17 @@ struct StatusBarPollingPolicyTest {
             true,
             "recently active status bar should keep the active interval briefly after work ends"
         )
+        assertEqual(
+            policy.dataRefreshInterval(
+                hasRunningItems: false,
+                lastRunningSeenAt: nil,
+                idleInterval: 1,
+                activeInterval: 3,
+                now: now
+            ),
+            1,
+            "recent-log freshness should honor a one-second idle polling interval"
+        )
     }
 
     private static func assertEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String) {

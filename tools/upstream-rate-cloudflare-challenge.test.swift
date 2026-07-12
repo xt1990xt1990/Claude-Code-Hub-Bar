@@ -24,6 +24,7 @@ private struct UpstreamRateCloudflareChallengeTests {
         await testCrossOriginRefreshCookieIsRejected()
         await testNewAPIBalanceFallsBackToUserProfile()
         testNekocodeHostIsDetectedAsNewAPI()
+        testSub2KeySuffixCollisionIsNotSelected()
     }
 
     private static func testCloudflareChallengeClassification() async {
@@ -220,6 +221,21 @@ private struct UpstreamRateCloudflareChallengeTests {
         expectTrue(
             detected == .newAPI,
             "nekocode.ai should be treated as a new-api upstream even when unauthenticated body is generic"
+        )
+    }
+
+    private static func testSub2KeySuffixCollisionIsNotSelected() {
+        let rows: [[String: Any]] = [
+            ["key": "sk-first-1234", "name": "First"],
+            ["key": "sk-second-1234", "name": "Second"]
+        ]
+        expectTrue(
+            findSub2KeyByKey(rows: rows, targetAPIKey: "sk-first-1234")?.name == "First",
+            "a complete Sub2API key should win before suffix matching"
+        )
+        expectTrue(
+            findSub2KeyByKey(rows: rows, targetAPIKey: "sk-unseen-1234") == nil,
+            "ambiguous Sub2API key suffixes must not select an arbitrary key"
         )
     }
 }

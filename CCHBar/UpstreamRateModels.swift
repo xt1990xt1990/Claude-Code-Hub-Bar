@@ -405,6 +405,20 @@ func shouldRefreshUpstreamRateSnapshots(
     return false
 }
 
+func shouldRefreshUpstreamRateSnapshotsOnActivation(
+    providers: [UpstreamRateProviderInput],
+    snapshots: [UpstreamRateSnapshot]
+) -> Bool {
+    snapshots.isEmpty || shouldRefreshUpstreamRateSnapshots(providers: providers, snapshots: snapshots)
+}
+
+func shouldRecordUpstreamBalanceRefreshSuccess(
+    totalHostCount: Int,
+    completedHostCount: Int
+) -> Bool {
+    totalHostCount > 0 && completedHostCount == totalHostCount
+}
+
 func changedPreviousUpstreamRatesByProviderId(
     previousSnapshots: [UpstreamRateSnapshot],
     currentSnapshots: [UpstreamRateSnapshot]

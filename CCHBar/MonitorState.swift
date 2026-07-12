@@ -197,6 +197,12 @@ final class MonitorState: ObservableObject {
     @Published var logStatusFilter = ""
     @Published var logSessionFilter = ""
     @Published var selectedProviderGroups: Set<String> = []
+    @Published var providerSearchText = "" {
+        didSet {
+            guard providerSearchText != oldValue else { return }
+            rebuildProviderFilterSnapshot()
+        }
+    }
     @Published var selectedLog: CCHLogEntry?
 
     @Published var overview = CCHOverview()
@@ -341,6 +347,7 @@ final class MonitorState: ObservableObject {
     private var assignableProviderGroupsCache: (input: CCHAssignableProviderGroupsInput, groups: [CCHProviderGroup])?
     private var providerMiniProbeRecordedSampleTotal = 0
     private var refreshTasks: [CCHRefreshKey: CCHRefreshTaskSlot] = [:]
+    private var lastSuccessfulRefresh: [CCHRefreshKey: Date] = [:]
     private var lastProviderUsageRefresh: Date?
     private var lastProviderGroupsRefresh: Date?
     private var lastLogSummaryRefresh: Date?
@@ -443,6 +450,14 @@ final class MonitorState: ObservableObject {
         providerFilterSnapshot.unhealthyCount
     }
 
+    var providerEmptyStateText: String {
+        if providerFilterSnapshot.groupProviderCount > 0,
+           CCHProviderNameSearch.isActive(providerSearchText) {
+            return "没有匹配的渠道"
+        }
+        return "暂无渠道"
+    }
+
     var upstreamRateSites: [UpstreamRateSite] {
         upstreamRateSitesSnapshot.sites
     }
@@ -495,14 +510,19 @@ final class MonitorState: ObservableObject {
     }
 
     func refreshUpstreamRatesIfSnapshotIsStale() async {
+        guard panelVisible, selectedTab == .upstreamRates else { return }
         guard !isRefreshingUpstreamRates else { return }
         let inputs = upstreamProviderInputs
         let signature = upstreamRateProviderSnapshotSignature(providers: inputs)
         guard signature != upstreamRateSnapshotRefreshSignature else { return }
-        guard shouldRefreshUpstreamRateSnapshots(providers: inputs, snapshots: upstreamRateSnapshots) else { return }
+        guard shouldRefreshUpstreamRateSnapshotsOnActivation(
+            providers: inputs,
+            snapshots: upstreamRateSnapshots
+        ) else { return }
 
-        upstreamRateSnapshotRefreshSignature = signature
-        await refreshUpstreamRates(silent: true)
+        if await refreshUpstreamRates(silent: true) {
+            upstreamRateSnapshotRefreshSignature = signature
+        }
     }
 
     var providerMiniProbeSelectedCount: Int {
@@ -800,16 +820,16 @@ final class MonitorState: ObservableObject {
             }
     }
 
-    func refresh(commitProviderSort: Bool = false) async {
+    func refresh(commitProviderSort: Bool = false, force: Bool = true) async {
         if isLoading { return }
         isLoading = true
         errorMessage = nil
 
-        async let overviewResult = runRefresh(.overview) { await self.loadOverview() }
-        async let sessionsResult = runRefresh(.activeSessions) { await self.loadActiveSessions() }
-        async let leaderboardResult = runRefresh(.leaderboard) { await self.loadLeaderboard() }
-        async let logsResult = runRefresh(.logs(includeStats: true)) { await self.loadLogs(includeStats: true) }
-        async let providersResult = runRefresh(.providers(usage: true)) {
+        async let overviewResult = runRefresh(.overview, force: force) { await self.loadOverview() }
+        async let sessionsResult = runRefresh(.activeSessions, force: force) { await self.loadActiveSessions() }
+        async let leaderboardResult = runRefresh(.leaderboard, force: force) { await self.loadLeaderboard() }
+        async let logsResult = runRefresh(.logs(includeStats: true), force: force) { await self.loadLogs(includeStats: true) }
+        async let providersResult = runRefresh(.providers(usage: true), force: force) {
             await self.loadProviders(includeUsage: true, sortMode: commitProviderSort ? .commitSorted : .preserveCurrentOrder)
         }
 
@@ -842,7 +862,7 @@ final class MonitorState: ObservableObject {
 
     func refreshLogsOnly() async {
         isLoading = true
-        errorMessage = await runRefresh(.logs(includeStats: true)) {
+        errorMessage = await runRefresh(.logs(includeStats: true), force: true) {
             await self.loadLogs(reset: true, includeStats: true)
         }
         lastRefresh = Date()
@@ -852,7 +872,7 @@ final class MonitorState: ObservableObject {
     func loadMoreLogs() async {
         guard !isLoadingMoreLogs, logs.count < logTotal || logTotal == 0 else { return }
         isLoadingMoreLogs = true
-        errorMessage = await runRefresh(.logs(includeStats: false)) {
+        errorMessage = await runRefresh(.logs(includeStats: false), force: true) {
             await self.loadLogs(reset: false, includeStats: false)
         }
         lastRefresh = Date()
@@ -861,7 +881,7 @@ final class MonitorState: ObservableObject {
 
     func refreshLeaderboardOnly() async {
         isLoading = true
-        errorMessage = await runRefresh(.leaderboard) { await self.loadLeaderboard() }
+        errorMessage = await runRefresh(.leaderboard, force: true) { await self.loadLeaderboard() }
         lastRefresh = Date()
         isLoading = false
     }
@@ -904,9 +924,9 @@ final class MonitorState: ObservableObject {
         isLoadingActiveSessions = true
         defer { isLoadingActiveSessions = false }
 
-        async let sessionsError = runRefresh(.activeSessions) { await self.loadActiveSessions() }
-        async let overviewError = runRefresh(.overview) { await self.loadOverview() }
-        async let recentLogsError = runRefresh(.recentLogs) { await self.loadRecentLogsForStatusBar() }
+        async let sessionsError = runRefresh(.activeSessions, force: true) { await self.loadActiveSessions() }
+        async let overviewError = runRefresh(.overview, force: true) { await self.loadOverview() }
+        async let recentLogsError = runRefresh(.recentLogs, force: true) { await self.loadRecentLogsForStatusBar() }
 
         let errors = await [sessionsError, overviewError, recentLogsError].compactMap { $0 }
 
@@ -925,7 +945,11 @@ final class MonitorState: ObservableObject {
         var errors: [String] = []
         let shouldRefreshOverview = shouldRefreshStatusBarOverview(now: now)
 
-        if let recentLogsError = await runRefresh(.recentLogs, operation: { await self.loadRecentLogsForStatusBar() }) {
+        if let recentLogsError = await runRefresh(
+            .recentLogs,
+            force: true,
+            operation: { await self.loadRecentLogsForStatusBar() }
+        ) {
             errors.append(recentLogsError)
         }
         lastStatusBarDataRefresh = now
@@ -1471,12 +1495,14 @@ final class MonitorState: ObservableObject {
                 flashActionMessage("\(result.host): \(errorMessage)", duration: 5, isWarning: true)
             }
         }
-        upstreamRateCredentials = nextCredentials.sorted { $0.host < $1.host }
-
-        do {
-            try upstreamCredentialStore.save(upstreamRateCredentials)
-        } catch {
-            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+        let sortedNextCredentials = nextCredentials.sorted { $0.host < $1.host }
+        if sortedNextCredentials != upstreamRateCredentials {
+            upstreamRateCredentials = sortedNextCredentials
+            do {
+                try upstreamCredentialStore.save(upstreamRateCredentials)
+            } catch {
+                flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+            }
         }
         let activeHosts = Set(sortedGroups.map(\.key))
         let previousSnapshots = upstreamRateSnapshots
@@ -1486,21 +1512,29 @@ final class MonitorState: ObservableObject {
         if upstreamRateSnapshots != mergedSnapshots {
             upstreamRateSnapshots = mergedSnapshots
         }
-        upstreamRatePreviousRatesByProviderId = changedPreviousUpstreamRatesByProviderId(
+        let nextPreviousRates = changedPreviousUpstreamRatesByProviderId(
             previousSnapshots: previousSnapshots,
             currentSnapshots: mergedSnapshots
         )
-        saveUpstreamRateSnapshots()
+        if upstreamRatePreviousRatesByProviderId != nextPreviousRates {
+            upstreamRatePreviousRatesByProviderId = nextPreviousRates
+        }
+        if upstreamRateSnapshots != previousSnapshots {
+            saveUpstreamRateSnapshots()
+        }
         upstreamRateLastCheckedAt = Date()
 
         let preSyncMultipliers = providerMultiplierByProviderId
         await syncSelectedUpstreamRates(showEmptyMessage: false)
-        upstreamRateLastSyncAdjustedProviderIds = Set(
+        let nextAdjustedProviderIds = Set<Int>(
             providers.compactMap { provider in
                 guard let previous = preSyncMultipliers[provider.id] else { return nil }
                 return abs(provider.costMultiplier - previous) > 0.0001 ? provider.id : nil
             }
         )
+        if upstreamRateLastSyncAdjustedProviderIds != nextAdjustedProviderIds {
+            upstreamRateLastSyncAdjustedProviderIds = nextAdjustedProviderIds
+        }
 
         if !silent {
             flashActionMessage("上游倍率已检测")
@@ -1576,11 +1610,14 @@ final class MonitorState: ObservableObject {
             }
         }
 
-        upstreamRateCredentials = nextCredentials.sorted { $0.host < $1.host }
-        do {
-            try upstreamCredentialStore.save(upstreamRateCredentials)
-        } catch {
-            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+        let sortedNextCredentials = nextCredentials.sorted { $0.host < $1.host }
+        if sortedNextCredentials != upstreamRateCredentials {
+            upstreamRateCredentials = sortedNextCredentials
+            do {
+                try upstreamCredentialStore.save(upstreamRateCredentials)
+            } catch {
+                flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+            }
         }
         if !balanceSnapshots.isEmpty {
             let authExpiredSnapshots = balanceSnapshots.filter { $0.status == .authExpired }
@@ -1592,12 +1629,19 @@ final class MonitorState: ObservableObject {
                 cached: authMergedSnapshots,
                 balances: balanceSnapshots.filter { $0.balance != nil }
             )
-            if upstreamRateSnapshots != mergedSnapshots {
+            let didChangeSnapshots = upstreamRateSnapshots != mergedSnapshots
+            if didChangeSnapshots {
                 upstreamRateSnapshots = mergedSnapshots
+                saveUpstreamRateSnapshots()
             }
-            saveUpstreamRateSnapshots()
         }
-        upstreamBalanceLastRefreshedAt = Date()
+        let completedHostCount = results.lazy.filter { $0.snapshot != nil }.count
+        if shouldRecordUpstreamBalanceRefreshSuccess(
+            totalHostCount: results.count,
+            completedHostCount: completedHostCount
+        ) {
+            upstreamBalanceLastRefreshedAt = Date()
+        }
         if !silent {
             flashActionMessage(balanceSnapshots.isEmpty ? "未读取到上游余额" : "上游余额已刷新", isWarning: balanceSnapshots.isEmpty)
         }
@@ -2049,10 +2093,17 @@ final class MonitorState: ObservableObject {
 
     private func runRefresh(
         _ key: CCHRefreshKey,
+        force: Bool = false,
         operation: @escaping @MainActor () async -> String?
     ) async -> String? {
         if let slot = refreshTasks[key] {
             return await slot.task.value
+        }
+
+        let now = Date()
+        let freshness = CCHRefreshFreshnessPolicy(ttl: refreshTTL(for: key, now: now))
+        if !freshness.shouldRefresh(lastSuccessful: lastSuccessfulRefresh[key], now: now, force: force) {
+            return nil
         }
 
         let id = UUID()
@@ -2061,10 +2112,40 @@ final class MonitorState: ObservableObject {
         }
         refreshTasks[key] = CCHRefreshTaskSlot(id: id, task: task)
         let result = await task.value
+        if result == nil {
+            lastSuccessfulRefresh[key] = Date()
+        }
         if refreshTasks[key]?.id == id {
             refreshTasks[key] = nil
         }
         return result
+    }
+
+    private func refreshTTL(for key: CCHRefreshKey, now: Date) -> TimeInterval {
+        switch key {
+        case .overview:
+            return panelVisible || !cachedMenuBarRunningLogs.isEmpty ? 3 : 15
+        case .activeSessions:
+            return panelVisible ? 5 : 15
+        case .recentLogs:
+            return statusBarPollingPolicy.dataRefreshInterval(
+                hasRunningItems: !cachedMenuBarRunningLogs.isEmpty,
+                lastRunningSeenAt: lastStatusBarRunningSeenAt,
+                idleInterval: CCHActiveSessionRefreshInterval.idleTimeInterval(
+                    seconds: activeSessionIdleRefreshIntervalSeconds
+                ),
+                activeInterval: CCHActiveSessionRefreshInterval.activeTimeInterval(
+                    seconds: activeSessionActiveRefreshIntervalSeconds
+                ),
+                now: now
+            )
+        case .logs(let includeStats):
+            return includeStats ? 15 : 3
+        case .leaderboard:
+            return panelVisible ? 15 : 30
+        case .providers(let usage):
+            return usage ? (panelVisible ? 5 : 30) : 30
+        }
     }
 
     private func shouldRefreshProviderUsage(now: Date = Date()) -> Bool {
@@ -2233,7 +2314,7 @@ final class MonitorState: ObservableObject {
             selectedProviderGroups = selectedProviderGroups.intersection(Set(allGroups))
             rebuildProviderFilterSnapshot(groups: allGroups, sortMode: sortMode)
             updateStatusBarSnapshot()
-            if selectedTab == .upstreamRates {
+            if panelVisible, selectedTab == .upstreamRates {
                 Task { await refreshUpstreamRatesIfSnapshotIsStale() }
             }
             return nil
@@ -2298,7 +2379,7 @@ final class MonitorState: ObservableObject {
             ) { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in
-                    await self.refresh()
+                    await self.refresh(force: false)
                     self.runProviderMiniProbesAfterSystemResumeIfNeeded()
                     self.runDueUpstreamRateAutoSyncIfNeeded()
                     self.runUpstreamBalanceRefreshAfterSystemResumeIfNeeded()
@@ -2511,14 +2592,28 @@ final class MonitorState: ObservableObject {
         sortMode: CCHProviderSortMode = .preserveCurrentOrder
     ) {
         let resolvedGroups = groups ?? computedProviderGroups()
-        let filtered: [CCHProvider]
+        let groupFiltered: [CCHProvider]
         if selectedProviderGroups.isEmpty {
-            filtered = providers
+            groupFiltered = providers
         } else {
-            filtered = providers.filter { provider in
+            groupFiltered = providers.filter { provider in
                 displayGroupTitles(for: provider).contains { selectedProviderGroups.contains($0) }
             }
         }
+
+        let orderedGroupProviders = providerSortState.order(groupFiltered, mode: sortMode) { provider in
+            CCHProviderSortDescriptor(
+                id: provider.id,
+                isEnabled: provider.isEnabled,
+                hasMiniProbe: providerMiniProbeSelectedProviderIds.contains(provider.id),
+                isPinned: pinnedProviderIds.contains(provider.id)
+            )
+        }
+        let filtered = CCHProviderNameSearch.filter(
+            orderedGroupProviders,
+            query: providerSearchText,
+            name: \.name
+        )
         var enabledCount = 0
         var unhealthyCount = 0
         for provider in filtered {
@@ -2529,17 +2624,10 @@ final class MonitorState: ObservableObject {
                 unhealthyCount += 1
             }
         }
-        let orderedProviders = providerSortState.order(filtered, mode: sortMode) { provider in
-            CCHProviderSortDescriptor(
-                id: provider.id,
-                isEnabled: provider.isEnabled,
-                hasMiniProbe: providerMiniProbeSelectedProviderIds.contains(provider.id),
-                isPinned: pinnedProviderIds.contains(provider.id)
-            )
-        }
         let next = CCHProviderFilterSnapshot(
             groups: resolvedGroups,
-            providers: orderedProviders,
+            providers: filtered,
+            groupProviderCount: groupFiltered.count,
             enabledCount: enabledCount,
             unhealthyCount: unhealthyCount
         )
@@ -2950,13 +3038,16 @@ private extension MonitorState {
         let credential = mergedUpstreamCredential(credential)
         var next = upstreamRateCredentials.filter { $0.host != credential.host }
         next.append(credential)
-        upstreamRateCredentials = next.sorted { $0.host < $1.host }
-        if persist {
-            do {
-                try upstreamCredentialStore.save(upstreamRateCredentials)
-            } catch {
-                flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
-                return false
+        let sortedNext = next.sorted { $0.host < $1.host }
+        if sortedNext != upstreamRateCredentials {
+            upstreamRateCredentials = sortedNext
+            if persist {
+                do {
+                    try upstreamCredentialStore.save(upstreamRateCredentials)
+                } catch {
+                    flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+                    return false
+                }
             }
         }
         return true

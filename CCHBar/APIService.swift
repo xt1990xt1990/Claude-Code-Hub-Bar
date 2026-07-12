@@ -288,6 +288,7 @@ struct CCHLeaderboardSummary: Equatable {
 struct CCHProviderFilterSnapshot: Equatable {
     var groups: [String] = ["全部"]
     var providers: [CCHProvider] = []
+    var groupProviderCount = 0
     var enabledCount = 0
     var unhealthyCount = 0
 }

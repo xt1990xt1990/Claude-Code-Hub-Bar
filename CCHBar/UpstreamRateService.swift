@@ -7,6 +7,58 @@ struct UpstreamRateTarget {
     let apiKey: String
 }
 
+struct UpstreamRateKeyInventory<Value> {
+    private let exactValues: [String: Value]
+    private let suffixValues: [String: [Value]]
+    private let normalize: (String) -> String
+    private let suffix: (String) -> String
+
+    init(
+        values: [Value],
+        key: (Value) -> String,
+        normalize: @escaping (String) -> String,
+        suffix: @escaping (String) -> String
+    ) {
+        self.normalize = normalize
+        self.suffix = suffix
+
+        var exactValues: [String: Value] = [:]
+        var suffixValues: [String: [Value]] = [:]
+        for value in values {
+            let normalized = normalize(key(value))
+            guard !normalized.isEmpty else { continue }
+            if exactValues[normalized] == nil {
+                exactValues[normalized] = value
+            }
+            let valueSuffix = suffix(key(value))
+            if !valueSuffix.isEmpty {
+                suffixValues[valueSuffix, default: []].append(value)
+            }
+        }
+        self.exactValues = exactValues
+        self.suffixValues = suffixValues
+    }
+
+    func exactMatch(for target: String) -> Value? {
+        exactValues[normalize(target)]
+    }
+
+    func suffixCandidates(for target: String) -> [Value] {
+        let targetSuffix = suffix(target)
+        guard !targetSuffix.isEmpty else { return [] }
+        return suffixValues[targetSuffix] ?? []
+    }
+
+    func uniqueSuffixMatch(for target: String) -> Value? {
+        let candidates = suffixCandidates(for: target)
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
+    func match(for target: String) -> Value? {
+        exactMatch(for: target) ?? uniqueSuffixMatch(for: target)
+    }
+}
+
 struct UpstreamRateFetchOutcome {
     let snapshot: UpstreamRateSnapshot
     let credential: UpstreamRateCredential
@@ -156,12 +208,44 @@ actor UpstreamRateService {
         }
 
         let balance = try? await fetchSub2UserBalance(nextCredential)
+        guard !targets.isEmpty else {
+            return UpstreamRateFetchOutcome(
+                snapshot: UpstreamRateSnapshot(
+                    host: credential.host,
+                    sourceType: .sub2API,
+                    status: .available,
+                    balance: balance
+                ),
+                credential: nextCredential
+            )
+        }
+
         let userGroupRates = (try? await listSub2UserGroupRates(nextCredential)) ?? [:]
+        let keys = try await listSub2Keys(nextCredential)
+        let keyInventory = UpstreamRateKeyInventory(
+            values: keys,
+            key: \.key,
+            normalize: normalizeSub2Key,
+            suffix: sub2KeySuffix
+        )
+        var availableGroups: [Int: Sub2Group]?
         var entries: [UpstreamRateEntry] = []
         for target in targets {
-            if let key = try await findSub2Key(credential: nextCredential, target: target),
-               let group = try await resolveSub2Group(credential: nextCredential, key: key),
-               let rate = group.effectiveRate(userGroupRates: userGroupRates) {
+            guard let key = keyInventory.match(for: target.apiKey) else { continue }
+
+            let group: Sub2Group?
+            if let embeddedGroup = key.group {
+                group = embeddedGroup
+            } else if let groupId = key.groupId {
+                if availableGroups == nil {
+                    availableGroups = try await listSub2AvailableGroups(nextCredential)
+                }
+                group = availableGroups?[groupId]
+            } else {
+                group = nil
+            }
+
+            if let group, let rate = group.effectiveRate(userGroupRates: userGroupRates) {
                 entries.append(
                     UpstreamRateEntry(
                         providerId: target.providerId,
@@ -197,10 +281,50 @@ actor UpstreamRateService {
         let balance = try? await fetchNewAPIUserBalance(nextCredential)
         let groups = (try? await listNewAPIGroups(nextCredential)) ?? [:]
         let variantGroups = groups.isEmpty ? (try? await listVariantNewAPIGroups(nextCredential)) ?? [:] : [:]
+        guard !targets.isEmpty else {
+            return UpstreamRateFetchOutcome(
+                snapshot: UpstreamRateSnapshot(
+                    host: credential.host,
+                    sourceType: .newAPI,
+                    status: .available,
+                    balance: balance
+                ),
+                credential: nextCredential
+            )
+        }
+
+        let regularTokens = try? await listNewAPITokens(credential: nextCredential)
+        let regularInventory = regularTokens.map {
+            UpstreamRateKeyInventory(
+                values: $0,
+                key: \.key,
+                normalize: normalizeNewAPIKey,
+                suffix: newAPIKeySuffix
+            )
+        }
+        var variantInventory: UpstreamRateKeyInventory<VariantNewAPIToken>?
         var entries: [UpstreamRateEntry] = []
 
         for target in targets {
-            if let token = try? await findNewAPIToken(credential: nextCredential, target: target) {
+            let regularToken: NewAPIToken?
+            if let regularInventory {
+                let indexedToken = try? await matchNewAPIToken(
+                    inventory: regularInventory,
+                    credential: nextCredential,
+                    target: target
+                )
+                if let indexedToken {
+                    regularToken = indexedToken
+                } else if regularTokens?.isEmpty == true {
+                    regularToken = try? await findNewAPIToken(credential: nextCredential, target: target)
+                } else {
+                    regularToken = nil
+                }
+            } else {
+                regularToken = try? await findNewAPIToken(credential: nextCredential, target: target)
+            }
+
+            if let token = regularToken {
                 let group = token.group
                 if let rate = groups[group]?.ratio {
                     entries.append(
@@ -212,7 +336,20 @@ actor UpstreamRateService {
                         )
                     )
                 }
-            } else if let token = try await findVariantNewAPIToken(credential: nextCredential, target: target) {
+            } else {
+                if variantInventory == nil {
+                    let variantTokens = try await listVariantNewAPITokens(nextCredential)
+                    variantInventory = UpstreamRateKeyInventory(
+                        values: variantTokens,
+                        key: \.key,
+                        normalize: normalizeNewAPIKey,
+                        suffix: newAPIKeySuffix
+                    )
+                }
+                guard let token = matchVariantNewAPIToken(
+                    inventory: variantInventory!,
+                    target: target
+                ) else { continue }
                 let group = token.preferredGroup
                 if let rate = token.preferredRatio ?? variantGroups[group]?.ratio {
                     entries.append(
@@ -338,7 +475,8 @@ actor UpstreamRateService {
         return parseSub2UserGroupRates(value)
     }
 
-    private func findSub2Key(credential: UpstreamRateCredential, target: UpstreamRateTarget) async throws -> Sub2Key? {
+    private func listSub2Keys(_ credential: UpstreamRateCredential) async throws -> [Sub2Key] {
+        var keys: [Sub2Key] = []
         for page in 1...20 {
             let query = [
                 URLQueryItem(name: "page", value: "\(page)"),
@@ -352,29 +490,27 @@ actor UpstreamRateService {
                 unwrap: .sub2
             )
             let pageData = sub2Page(value)
-            if let key = findSub2KeyByKey(rows: pageData.items, targetAPIKey: target.apiKey) {
-                return key
-            }
+            keys.append(contentsOf: pageData.items.map(Sub2Key.init))
             if pageData.items.count < pageData.pageSize || page * pageData.pageSize >= pageData.total {
-                return nil
+                break
             }
         }
-        return nil
+        return keys
     }
 
-    private func resolveSub2Group(credential: UpstreamRateCredential, key: Sub2Key) async throws -> Sub2Group? {
-        if let group = key.group {
-            return group
-        }
-        guard let groupId = key.groupId else { return nil }
+    private func listSub2AvailableGroups(_ credential: UpstreamRateCredential) async throws -> [Int: Sub2Group] {
         let value = try await requestJSON(
             baseURL: credential.baseURL,
             path: "/api/v1/groups/available",
             headers: sub2Headers(credential),
             unwrap: .sub2
         )
-        let rows = value as? [[String: Any]] ?? []
-        return rows.map(Sub2Group.init).first { $0.id == groupId }
+        return (value as? [[String: Any]] ?? []).reduce(into: [Int: Sub2Group]()) { result, row in
+            let group = Sub2Group(row)
+            if let id = group.id {
+                result[id] = group
+            }
+        }
     }
 
     private func listNewAPIGroups(_ credential: UpstreamRateCredential) async throws -> [String: NewAPIGroup] {
@@ -426,6 +562,116 @@ actor UpstreamRateService {
             }
         }
         return result
+    }
+
+    private func listNewAPITokens(
+        credential: UpstreamRateCredential,
+        tokenQuery: String? = nil
+    ) async throws -> [NewAPIToken] {
+        var tokens: [NewAPIToken] = []
+        for page in 1...20 {
+            var query = [
+                URLQueryItem(name: "p", value: "\(page - 1)"),
+                URLQueryItem(name: "size", value: "100")
+            ]
+            if let tokenQuery, !tokenQuery.isEmpty {
+                query.append(URLQueryItem(name: "token", value: tokenQuery))
+            }
+            let value = try await requestJSON(
+                baseURL: credential.baseURL,
+                path: "/api/token/search",
+                queryItems: query,
+                headers: newAPIHeaders(credential),
+                unwrap: .newAPI
+            )
+            let pageData = newAPIPage(value)
+            tokens.append(contentsOf: pageData.items.map(NewAPIToken.init))
+            if pageData.items.count < pageData.pageSize || page * pageData.pageSize >= pageData.total {
+                break
+            }
+        }
+        return tokens
+    }
+
+    private func listVariantNewAPITokens(_ credential: UpstreamRateCredential) async throws -> [VariantNewAPIToken] {
+        var tokens: [VariantNewAPIToken] = []
+        for page in 1...20 {
+            let query = [
+                URLQueryItem(name: "p", value: "\(page - 1)"),
+                URLQueryItem(name: "size", value: "100")
+            ]
+            let value = try await requestJSON(
+                baseURL: credential.baseURL,
+                path: "/api/token",
+                queryItems: query,
+                headers: newAPIHeaders(credential, signedPath: "/token"),
+                unwrap: .newAPI
+            )
+            let pageData = variantNewAPIPage(value)
+            tokens.append(contentsOf: pageData.items.map(VariantNewAPIToken.init))
+            if pageData.items.count < pageData.pageSize || page * pageData.pageSize >= pageData.total {
+                break
+            }
+        }
+        return tokens
+    }
+
+    private func matchNewAPIToken(
+        inventory: UpstreamRateKeyInventory<NewAPIToken>,
+        credential: UpstreamRateCredential,
+        target: UpstreamRateTarget
+    ) async throws -> NewAPIToken? {
+        if let exact = inventory.exactMatch(for: target.apiKey), tokenKeyMatches(exact.key, target.apiKey) {
+            return exact
+        }
+
+        let candidates = inventory.suffixCandidates(for: target.apiKey)
+        guard !candidates.isEmpty else {
+            return inventory.exactMatch(for: target.apiKey)
+        }
+
+        var exactMatches: [NewAPIToken] = []
+        var suffixMatches: [NewAPIToken] = []
+        for token in candidates {
+            if tokenKeyMatches(token.key, target.apiKey) {
+                exactMatches.append(token)
+                continue
+            }
+
+            if token.id != nil, tokenMayMatchAfterReveal(token.key, target.apiKey) {
+                let revealed = try await revealNewAPIKey(credential: credential, token: token)
+                var hydrated = token
+                hydrated.key = revealed
+                if tokenKeyMatches(revealed, target.apiKey) {
+                    exactMatches.append(hydrated)
+                } else if tokenKeySuffixMatches(revealed, target.apiKey) {
+                    suffixMatches.append(hydrated)
+                }
+            }
+        }
+
+        if let exact = exactMatches.first {
+            return exact
+        }
+        return suffixMatches.count == 1 ? suffixMatches[0] : nil
+    }
+
+    private func matchVariantNewAPIToken(
+        inventory: UpstreamRateKeyInventory<VariantNewAPIToken>,
+        target: UpstreamRateTarget
+    ) -> VariantNewAPIToken? {
+        if let exact = inventory.exactMatch(for: target.apiKey), tokenKeyMatches(exact.key, target.apiKey) {
+            return exact
+        }
+
+        let candidates = inventory.suffixCandidates(for: target.apiKey)
+        if candidates.count == 1 {
+            let candidate = candidates[0]
+            if tokenKeyMatches(candidate.key, target.apiKey) || tokenKeySuffixMatches(candidate.key, target.apiKey) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     private func findNewAPIToken(credential: UpstreamRateCredential, target: UpstreamRateTarget) async throws -> NewAPIToken? {
@@ -1036,10 +1282,15 @@ func sub2KeyMatches(_ lhs: String, _ rhs: String) -> Bool {
 
 func findSub2KeyByKey(rows: [[String: Any]], targetAPIKey: String) -> Sub2Key? {
     let keys = rows.map(Sub2Key.init)
-    if let exact = keys.first(where: { normalizeSub2Key($0.key) == normalizeSub2Key(targetAPIKey) }) {
+    let normalizedTarget = normalizeSub2Key(targetAPIKey)
+    guard !normalizedTarget.isEmpty else { return nil }
+    if let exact = keys.first(where: { normalizeSub2Key($0.key) == normalizedTarget }) {
         return exact
     }
-    return keys.first { sub2KeyMatches($0.key, targetAPIKey) }
+    let targetSuffix = sub2KeySuffix(targetAPIKey)
+    guard !targetSuffix.isEmpty else { return nil }
+    let suffixMatches = keys.filter { sub2KeySuffix($0.key) == targetSuffix }
+    return suffixMatches.count == 1 ? suffixMatches[0] : nil
 }
 
 func parseSub2UserBalance(_ user: [String: Any]) -> UpstreamBalanceSnapshot? {
