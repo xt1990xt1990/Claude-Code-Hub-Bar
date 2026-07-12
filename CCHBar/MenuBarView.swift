@@ -1394,8 +1394,14 @@ private struct ProviderNameSearchField: View {
     @Binding var text: String
     let isFocused: FocusState<Bool>.Binding
     @Environment(\.cchTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
 
     var body: some View {
+        let glowStyle = CCHProviderSearchFocusGlowStyle.resolve(
+            isFocused: isFocused.wrappedValue,
+            reduceMotion: accessibilityReduceMotion
+        )
+
         HStack(spacing: 5) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 10.5, weight: .semibold))
@@ -1423,6 +1429,21 @@ private struct ProviderNameSearchField: View {
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(theme.border.opacity(0.5), lineWidth: 0.8)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(theme.accentBlue.opacity(glowStyle.strokeOpacity), lineWidth: 1.2)
+                .shadow(color: theme.accentBlue.opacity(glowStyle.glowOpacity), radius: 7)
+                .scaleEffect(glowStyle.scale)
+                .animation(
+                    accessibilityReduceMotion
+                        ? .easeInOut(duration: glowStyle.duration)
+                        : (isFocused.wrappedValue
+                            ? .easeOut(duration: glowStyle.duration)
+                            : .easeInOut(duration: glowStyle.duration)),
+                    value: isFocused.wrappedValue
+                )
+                .allowsHitTesting(false)
         }
     }
 }
