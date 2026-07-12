@@ -29,6 +29,7 @@ Private configuration should be entered locally and should not be committed to t
 - Cache hit-rate display for logs and leaderboards.
 - Compact recent-request rows on the dashboard, with adaptive truncation for long provider and model names.
 - Provider group filters, provider group assignment, enable/disable, probe, and circuit reset controls.
+- Instant provider-name search within the selected group. Clicking outside the search field ends text input, while focus uses a blue glow that respects Reduce Motion.
 - Provider rows use a subtle green background when they are handling running requests.
 - Provider rows can be pinned so frequently used providers stay at the top across launches.
 - Provider model tests show first-byte timing and total latency when CCH returns timing data.
@@ -39,8 +40,11 @@ Private configuration should be entered locally and should not be committed to t
 - Groups upstream providers by official website and matches local providers by key suffix.
 - Upstream rate rows show provider groups and reuse the provider Mini Probe controls, status, and history.
 - Chrome-based upstream login capture, with credentials stored locally for rate and balance refreshes. The shared login window preserves session state across upstream sites.
+- Automatic renewal for Sub2API cookie-only sessions, including persistence of cookies rotated by the server.
 - Manual and scheduled upstream rate refreshes, with automatic multiplier sync for selected providers.
+- Automatic upstream session, rate, and balance refresh after the Mac wakes and network connectivity returns.
 - Upstream balance tracking with an independent background refresh cadence. Cookie-only new-api sessions use a browser User-Agent fallback and support profile-based balance endpoints.
+- Site-scoped upstream key inventory scanning, matching, and refresh to reduce repeated parsing and network requests.
 - Provider drawers reuse the existing endpoint and model test controls for upstream checks.
 - Model branding now includes GLM and avoids broad OpenAI model-name false positives.
 - Launch at login support.

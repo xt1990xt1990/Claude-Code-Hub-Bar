@@ -227,4 +227,3 @@ Expected: only the intended source and test files are changed, with no whitespac
 git add CCHBar/MenuBarView.swift CCHBar/CCHProviderSearchFocusPolicy.swift tools/provider-search-focus-glow.test.swift
 git commit -m "Add provider search focus glow"
 ```
-
