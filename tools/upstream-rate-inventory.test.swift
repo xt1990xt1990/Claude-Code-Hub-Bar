@@ -6,6 +6,8 @@ private struct UpstreamRateInventoryTests {
     static func main() async {
         testInventoryMatchPriority()
         await testSub2Inventory()
+        await testSub2MissingUserRateEndpointUsesPublicRate()
+        await testSub2UserRateFailurePreservesSnapshot()
         await testNewAPIInventory()
         await testNewAPIRevealFailureFallsBackToVariantInventory()
     }
@@ -47,8 +49,67 @@ private struct UpstreamRateInventoryTests {
             let outcome = try await service.fetchSnapshot(credential: credential, targets: targets)
             expect(outcome.snapshot.entries.count == 2, "one inventory should match every target on the host")
             expect(InventoryProtocol.keyRequestCount == 1, "all targets on one host should share one key pagination scan")
+            expect(
+                outcome.snapshot.entries.allSatisfy { abs($0.rate - 0.05) < 0.0001 },
+                "Sub2API user-specific rate should override the struck-through public group rate"
+            )
         } catch {
             fail("expected one host inventory refresh to succeed, got \(error)")
+        }
+    }
+
+    private static func testSub2UserRateFailurePreservesSnapshot() async {
+        InventoryProtocol.groupRatesStatusCode = 503
+        defer { InventoryProtocol.groupRatesStatusCode = 200 }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [InventoryProtocol.self]
+        let service = UpstreamRateService(session: URLSession(configuration: configuration))
+
+        var credential = UpstreamRateCredential.empty(host: "sub.inventory.test", sourceType: .sub2API)
+        credential.baseURL = "https://sub.inventory.test"
+        credential.sub2AuthToken = "access-token"
+        credential.sub2TokenExpiresAt = Date().addingTimeInterval(3_600)
+
+        do {
+            _ = try await service.fetchSnapshot(
+                credential: credential,
+                targets: [UpstreamRateTarget(providerId: 1, providerName: "First", apiKey: "sk-first-1234")]
+            )
+            fail("a failed user-rate request must not produce a default-rate snapshot")
+        } catch let error as UpstreamRateServiceError {
+            guard case .http(503, _) = error else {
+                fail("expected the user-rate HTTP error to propagate, got \(error)")
+            }
+        } catch {
+            fail("expected an upstream rate service error, got \(error)")
+        }
+    }
+
+    private static func testSub2MissingUserRateEndpointUsesPublicRate() async {
+        InventoryProtocol.groupRatesStatusCode = 404
+        defer { InventoryProtocol.groupRatesStatusCode = 200 }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [InventoryProtocol.self]
+        let service = UpstreamRateService(session: URLSession(configuration: configuration))
+
+        var credential = UpstreamRateCredential.empty(host: "sub.inventory.test", sourceType: .sub2API)
+        credential.baseURL = "https://sub.inventory.test"
+        credential.sub2AuthToken = "access-token"
+        credential.sub2TokenExpiresAt = Date().addingTimeInterval(3_600)
+
+        do {
+            let outcome = try await service.fetchSnapshot(
+                credential: credential,
+                targets: [UpstreamRateTarget(providerId: 1, providerName: "First", apiKey: "sk-first-1234")]
+            )
+            expect(
+                abs((outcome.snapshot.entries.first?.rate ?? -1) - 0.1) < 0.0001,
+                "an older Sub2API without groups/rates should keep using its public group rate"
+            )
+        } catch {
+            fail("a missing legacy user-rate endpoint should remain compatible, got \(error)")
         }
     }
 
@@ -121,6 +182,7 @@ private struct UpstreamRateInventoryTests {
 private final class InventoryProtocol: URLProtocol {
     static var keyRequestCount = 0
     static var tokenRequestCount = 0
+    static var groupRatesStatusCode = 200
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -139,7 +201,7 @@ private final class InventoryProtocol: URLProtocol {
         case "/api/v1/auth/me":
             payload = ["code": 0, "data": ["balance": 10.0]]
         case "/api/v1/groups/rates":
-            payload = ["code": 0, "data": ["1": 0.7]]
+            payload = ["code": 0, "data": ["1": 0.05]]
         case "/api/v1/keys":
             payload = [
                 "code": 0,
@@ -150,14 +212,14 @@ private final class InventoryProtocol: URLProtocol {
                             "key": "sk-first-1234",
                             "name": "First",
                             "group_id": 1,
-                            "group": ["id": 1, "name": "standard", "balance_charge_rate": 0.5]
+                            "group": ["id": 1, "name": "standard", "rate_multiplier": 0.1]
                         ],
                         [
                             "id": 2,
                             "key": "sk-second-5678",
                             "name": "Second",
                             "group_id": 1,
-                            "group": ["id": 1, "name": "standard", "balance_charge_rate": 0.5]
+                            "group": ["id": 1, "name": "standard", "rate_multiplier": 0.1]
                         ]
                     ],
                     "total": 2,
@@ -191,7 +253,7 @@ private final class InventoryProtocol: URLProtocol {
         let data = try! JSONSerialization.data(withJSONObject: payload)
         let response = HTTPURLResponse(
             url: request.url!,
-            statusCode: 200,
+            statusCode: path == "/api/v1/groups/rates" ? Self.groupRatesStatusCode : 200,
             httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": "application/json"]
         )!

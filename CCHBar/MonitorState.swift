@@ -2904,6 +2904,8 @@ private extension MonitorState {
 
     func pruneProviderMiniProbeData() {
         let providerIds = Set(providers.map(\.id))
+        guard shouldPrunePersistedProviderState(providerIds: providerIds) else { return }
+
         let nextPinned = pinnedProviderIds.intersection(providerIds)
         if nextPinned != pinnedProviderIds {
             pinnedProviderIds = nextPinned
@@ -3026,6 +3028,8 @@ private extension MonitorState {
 
     func pruneUpstreamRateSelections() {
         let providerIds = Set(providers.map(\.id))
+        guard shouldPrunePersistedProviderState(providerIds: providerIds) else { return }
+
         let nextSelected = upstreamRateSelectedProviderIds.intersection(providerIds)
         if nextSelected != upstreamRateSelectedProviderIds {
             upstreamRateSelectedProviderIds = nextSelected

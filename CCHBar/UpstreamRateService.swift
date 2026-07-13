@@ -220,7 +220,19 @@ actor UpstreamRateService {
             )
         }
 
-        let userGroupRates = (try? await listSub2UserGroupRates(nextCredential)) ?? [:]
+        // A transient user-rate failure must not silently fall back to the
+        // group's public rate. Older Sub2API versions without this endpoint can
+        // still use the public rate, but an existing endpoint must succeed.
+        let userGroupRates: [Int: Double]
+        do {
+            userGroupRates = try await listSub2UserGroupRates(nextCredential)
+        } catch let error as UpstreamRateServiceError {
+            if case .http(404, _) = error {
+                userGroupRates = [:]
+            } else {
+                throw error
+            }
+        }
         let keys = try await listSub2Keys(nextCredential)
         let keyInventory = UpstreamRateKeyInventory(
             values: keys,

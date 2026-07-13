@@ -71,6 +71,14 @@ private struct UpstreamRateStaleSnapshotTests {
             shouldRecordUpstreamBalanceRefreshSuccess(totalHostCount: 1, completedHostCount: 0),
             "a failed balance batch should remain retryable"
         )
+        expectFalse(
+            shouldPrunePersistedProviderState(providerIds: []),
+            "an empty startup provider response must preserve saved selections and provider-scoped settings"
+        )
+        expectTrue(
+            shouldPrunePersistedProviderState(providerIds: [1, 2]),
+            "a non-empty authoritative provider response may prune stale provider-scoped settings"
+        )
         expectTrue(
             shouldRefreshUpstreamRateSnapshots(providers: providers, snapshots: [staleSnapshot]),
             "missing provider id in an available snapshot should trigger refresh"
