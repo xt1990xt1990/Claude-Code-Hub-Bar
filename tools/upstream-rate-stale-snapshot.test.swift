@@ -128,6 +128,18 @@ private struct UpstreamRateStaleSnapshotTests {
             ) == [1: 0.05],
             "previous upstream rate map should include only changed provider entries"
         )
+        let rateRefreshMerged = UpstreamRateSnapshot.mergeLatest(
+            cached: [freshSnapshot],
+            refreshed: [changedSnapshot]
+        )
+        expectTrue(
+            rateRefreshMerged.first?.balance == freshSnapshot.balance,
+            "a successful rate refresh without a balance payload should preserve the cached balance"
+        )
+        expectTrue(
+            rateRefreshMerged.first?.entries == changedSnapshot.entries,
+            "preserving the cached balance should not prevent refreshed rate entries from replacing stale entries"
+        )
         let selectedChangedSites = UpstreamRateMatcher.buildSites(
             providers: providers,
             snapshots: [changedSnapshot],
@@ -285,6 +297,38 @@ private struct UpstreamRateStaleSnapshotTests {
         expectTrue(
             authExpiredMerged.first?.balance == freshSnapshot.balance,
             "auth-expired snapshot should preserve previous balance"
+        )
+        let recoveredBalance = UpstreamBalanceSnapshot(displayAmount: 166.19)
+        let recoveredBalanceMerged = UpstreamRateSnapshot.mergeBalances(
+            cached: [
+                UpstreamRateSnapshot(
+                    host: freshSnapshot.host,
+                    sourceType: freshSnapshot.sourceType,
+                    status: .authExpired,
+                    entries: freshSnapshot.entries,
+                    balance: freshSnapshot.balance
+                )
+            ],
+            balances: [
+                UpstreamRateSnapshot(
+                    host: freshSnapshot.host,
+                    sourceType: freshSnapshot.sourceType,
+                    status: .available,
+                    balance: recoveredBalance
+                )
+            ]
+        )
+        expectTrue(
+            recoveredBalanceMerged.first?.status == .available,
+            "a successful balance refresh should clear a stale auth-expired status"
+        )
+        expectTrue(
+            recoveredBalanceMerged.first?.entries == freshSnapshot.entries,
+            "a balance refresh should preserve cached rate entries"
+        )
+        expectTrue(
+            recoveredBalanceMerged.first?.balance == recoveredBalance,
+            "a balance refresh should replace the cached balance"
         )
         let authExpiredSite = UpstreamRateMatcher.buildSites(
             providers: providers,

@@ -122,7 +122,17 @@ struct UpstreamRateSnapshot: Codable, Equatable {
                 snapshot.entries.isEmpty {
                 continue
             }
-            merged[snapshot.host] = snapshot
+            if let previous = merged[snapshot.host], snapshot.balance == nil {
+                merged[snapshot.host] = UpstreamRateSnapshot(
+                    host: snapshot.host,
+                    sourceType: snapshot.sourceType,
+                    status: snapshot.status,
+                    entries: snapshot.entries,
+                    balance: previous.balance
+                )
+            } else {
+                merged[snapshot.host] = snapshot
+            }
         }
         return merged.values.sorted { $0.host.localizedCaseInsensitiveCompare($1.host) == .orderedAscending }
     }
@@ -134,7 +144,7 @@ struct UpstreamRateSnapshot: Codable, Equatable {
                 merged[snapshot.host] = UpstreamRateSnapshot(
                     host: previous.host,
                     sourceType: previous.sourceType,
-                    status: previous.status,
+                    status: snapshot.status,
                     entries: previous.entries,
                     balance: snapshot.balance
                 )

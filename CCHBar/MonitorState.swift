@@ -580,7 +580,11 @@ final class MonitorState: ObservableObject {
         startUpstreamRateAutoSyncTimer()
         startUpstreamBalanceRefreshTimer()
         observeSystemWake()
-        refreshTask = Task { await refresh() }
+        refreshTask = Task { [weak self] in
+            guard let self else { return }
+            await refresh()
+            await refreshUpstreamBalances(silent: true)
+        }
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             await self?.checkForUpdates(force: false)
