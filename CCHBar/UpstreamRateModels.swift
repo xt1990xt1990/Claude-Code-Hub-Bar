@@ -423,6 +423,22 @@ func shouldPrunePersistedProviderState(providerIds: Set<Int>) -> Bool {
     !providerIds.isEmpty
 }
 
+func pendingSelectedUpstreamRateRows(in sites: [UpstreamRateSite]) -> [UpstreamRateProviderRow] {
+    sites.flatMap(\.syncableRows).filter(\.hasRateChange)
+}
+
+func shouldSchedulePendingUpstreamRateSync(
+    pendingSyncCount: Int,
+    isRefreshingRates: Bool,
+    isSyncingRates: Bool,
+    hasScheduledTask: Bool
+) -> Bool {
+    pendingSyncCount > 0
+        && !isRefreshingRates
+        && !isSyncingRates
+        && !hasScheduledTask
+}
+
 func changedPreviousUpstreamRatesByProviderId(
     previousSnapshots: [UpstreamRateSnapshot],
     currentSnapshots: [UpstreamRateSnapshot]

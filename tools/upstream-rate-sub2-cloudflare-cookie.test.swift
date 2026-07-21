@@ -8,10 +8,12 @@ private struct UpstreamRateSub2CloudflareCookieTests {
         try testSub2BrowserImportStoresCookieHeader()
         try testSub2BrowserImportAcceptsCookieOnlyRefreshToken()
         try await testSub2CookieOnlyLoginUsesValidator()
+        try await testSub2LoginValidationFallsBackToBodyTokens()
         try await testSub2MalformedRefreshResponseIsRejected()
         try testSub2HeadersIncludeBrowserCookie()
         try testNewAPIHeadersIncludeBrowserCookieAndUserAgent()
         try testNewAPICookieOnlyHeadersUseBrowserUserAgentFallback()
+        try await testNekoProfileLoginValidation()
         try testChromeAuthUsesSharedProfile()
     }
 
@@ -98,6 +100,44 @@ private struct UpstreamRateSub2CloudflareCookieTests {
         }
     }
 
+    private static func testSub2LoginValidationFallsBackToBodyTokens() async throws {
+        BodyRequiredSub2ValidationProtocol.refreshBodies = []
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [BodyRequiredSub2ValidationProtocol.self]
+        var credential = UpstreamRateCredential.empty(host: "ageteam.online", sourceType: .sub2API)
+        credential.sub2CookieHeader = "cf_clearance=ok; sub2api_refresh_token=cookie-refresh"
+        credential.sub2RefreshToken = "field-refresh"
+
+        let validated = await UpstreamChromeAuthImporter.validateSub2APILogin(
+            credential,
+            session: URLSession(configuration: config)
+        )
+
+        try expect(validated != nil, "Sub2API browser validation should fall back to body refresh tokens")
+        try expect(
+            BodyRequiredSub2ValidationProtocol.refreshBodies.count == 3,
+            "browser validation should try every distinct Sub2API refresh credential"
+        )
+        try expect(
+            BodyRequiredSub2ValidationProtocol.refreshBodies[0] == #"{}"#,
+            "browser validation should preserve the Cookie-only first attempt"
+        )
+        try expect(
+            BodyRequiredSub2ValidationProtocol.refreshBodies[1].contains(#""refresh_token":"cookie-refresh""#),
+            "browser validation should retry with the Cookie token in the body"
+        )
+        try expect(
+            BodyRequiredSub2ValidationProtocol.refreshBodies[2].contains(#""refresh_token":"field-refresh""#),
+            "browser validation should retry with a distinct stored token"
+        )
+        try expect(validated?.sub2AuthToken == "body-access", "body fallback should hydrate the access token")
+        try expect(validated?.sub2RefreshToken == "rotated-body", "body fallback should persist the rotated token")
+        try expect(
+            validated?.sub2CookieHeader.contains("sub2api_refresh_token=rotated-body") == true,
+            "body fallback should replace the stale refresh Cookie"
+        )
+    }
+
     private static func testSub2HeadersIncludeBrowserCookie() throws {
         var credential = UpstreamRateCredential.empty(host: "sub.kedaya.xyz", sourceType: .sub2API)
         credential.sub2AuthToken = "access-token"
@@ -137,6 +177,30 @@ private struct UpstreamRateSub2CloudflareCookieTests {
             headers["User-Agent"]?.contains("Chrome/") == true,
             "cookie-session new-api requests should use a browser User-Agent fallback when none was captured"
         )
+    }
+
+    private static func testNekoProfileLoginValidation() async throws {
+        NekoProfileLoginValidationProtocol.requests = []
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [NekoProfileLoginValidationProtocol.self]
+        let session = URLSession(configuration: config)
+        var credential = UpstreamRateCredential.empty(host: "nekocode.ai", sourceType: .newAPI)
+        credential.newAPICookieHeader = "session=browser"
+        credential.userAgent = "Mozilla/5.0 Chrome/149.0"
+
+        let validated = await UpstreamChromeAuthImporter.validateNewAPILogin(
+            credential,
+            session: session
+        )
+
+        try expect(validated, "Neko cookie login should validate through /api/user/profile")
+        let request = NekoProfileLoginValidationProtocol.requests.first
+        try expect(request?.url?.path == "/api/user/profile", "Neko login validation should use the current profile endpoint first")
+        try expect(request?.value(forHTTPHeaderField: "Cookie") == "session=browser", "Neko login validation should send the browser Cookie")
+        try expect(request?.value(forHTTPHeaderField: "User-Agent") == "Mozilla/5.0 Chrome/149.0", "Neko login validation should send the browser User-Agent")
+        try expect(request?.value(forHTTPHeaderField: "X-Timestamp")?.isEmpty == false, "Neko profile validation should include a timestamp")
+        try expect(request?.value(forHTTPHeaderField: "X-Nonce")?.count == 8, "Neko profile validation should include an eight-character nonce")
+        try expect(request?.value(forHTTPHeaderField: "X-Sign")?.count == 16, "Neko profile validation should include a 16-character signature")
     }
 
     @MainActor
@@ -183,4 +247,82 @@ private final class MalformedSub2RefreshProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private final class NekoProfileLoginValidationProtocol: URLProtocol {
+    static var requests: [URLRequest] = []
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.requests.append(request)
+        let isProfileRequest = request.url?.path == "/api/user/profile"
+        let status = isProfileRequest ? 200 : 404
+        let body = isProfileRequest
+            ? #"{"success":true,"data":{"id":3911}}"#
+            : #"{"success":false,"message":"not found"}"#
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class BodyRequiredSub2ValidationProtocol: URLProtocol {
+    static var refreshBodies: [String] = []
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let requestBody = String(decoding: requestBodyData(request), as: UTF8.self)
+        Self.refreshBodies.append(requestBody)
+        let body: String
+        if requestBody.contains(#""refresh_token":"field-refresh""#) {
+            body = #"{"code":0,"data":{"access_token":"body-access","refresh_token":"rotated-body","expires_in":3600}}"#
+        } else if requestBody == #"{}"# {
+            body = #"{"code":"REFRESH_TOKEN_REQUIRED","message":"Refresh token required","data":null}"#
+        } else {
+            body = #"{"code":"INVALID_REFRESH_TOKEN","message":"Invalid refresh token","data":null}"#
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private func requestBodyData(_ request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1_024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
 }

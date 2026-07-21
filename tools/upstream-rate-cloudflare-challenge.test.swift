@@ -20,7 +20,9 @@ private struct UpstreamRateCloudflareChallengeTests {
         await testCloudflareChallengeClassification()
         await testHTTPStatusIsCheckedBeforeJSONParsing()
         await testSub2CookieOnlyRefreshUsesBrowserCookie()
+        await testSub2CookieRefreshFallsBackToBodyTokens()
         await testSub2BodyTokenRefreshKeepsRequestBody()
+        await testSub2StringErrorCodeIsRejected()
         await testCrossOriginRefreshCookieIsRejected()
         await testNewAPIBalanceFallsBackToUserProfile()
         testNekocodeHostIsDetectedAsNewAPI()
@@ -165,6 +167,62 @@ private struct UpstreamRateCloudflareChallengeTests {
             )
         } catch {
             fail("expected body-token Sub2API refresh to succeed, got \(error)")
+        }
+    }
+
+    private static func testSub2CookieRefreshFallsBackToBodyTokens() async {
+        Sub2BodyRequiredRefreshProtocol.refreshBodies = []
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Sub2BodyRequiredRefreshProtocol.self]
+        let service = UpstreamRateService(session: URLSession(configuration: config))
+        var credential = UpstreamRateCredential.empty(host: "ageteam.online", sourceType: .sub2API)
+        credential.sub2CookieHeader = "cf_clearance=ok; sub2api_refresh_token=cookie-refresh"
+        credential.sub2RefreshToken = "field-refresh"
+
+        do {
+            let outcome = try await service.fetchBalance(credential: credential)
+            expectTrue(
+                Sub2BodyRequiredRefreshProtocol.refreshBodies.count == 3,
+                "Sub2API refresh should try Cookie-only, Cookie token body, then stored token body"
+            )
+            expectTrue(
+                Sub2BodyRequiredRefreshProtocol.refreshBodies[0] == #"{}"#,
+                "Cookie-only refresh should remain the first compatibility attempt"
+            )
+            expectTrue(
+                Sub2BodyRequiredRefreshProtocol.refreshBodies[1].contains(#""refresh_token":"cookie-refresh""#),
+                "the first body fallback should use the browser Cookie token"
+            )
+            expectTrue(
+                Sub2BodyRequiredRefreshProtocol.refreshBodies[2].contains(#""refresh_token":"field-refresh""#),
+                "a different stored token should remain available as the final fallback"
+            )
+            expectTrue(outcome.snapshot.balance?.displayAmount == 7.25, "body fallback should continue to balance lookup")
+            expectTrue(outcome.credential.sub2RefreshToken == "rotated-body", "response body token should be persisted")
+            expectTrue(
+                outcome.credential.sub2CookieHeader.contains("sub2api_refresh_token=rotated-body"),
+                "response body token should replace the stale refresh Cookie"
+            )
+        } catch {
+            fail("expected Sub2API body fallback to succeed, got \(error)")
+        }
+    }
+
+    private static func testSub2StringErrorCodeIsRejected() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Sub2StringErrorProtocol.self]
+        let service = UpstreamRateService(session: URLSession(configuration: config))
+        var credential = UpstreamRateCredential.empty(host: "ageteam.online", sourceType: .sub2API)
+        credential.sub2AuthToken = "expired-access"
+        credential.sub2TokenExpiresAt = Date().addingTimeInterval(3_600)
+
+        do {
+            _ = try await service.fetchBalance(credential: credential)
+            fail("a Sub2API string error code must not be treated as a successful empty balance")
+        } catch let error as UpstreamRateServiceError {
+            expectTrue(error.isAuthenticationExpired, "TOKEN_EXPIRED should be classified as expired authentication")
+        } catch {
+            fail("expected a Sub2API service error, got \(error)")
         }
     }
 
@@ -361,6 +419,88 @@ private final class Sub2CookieOnlyRefreshProtocol: URLProtocol {
         }
         return data
     }
+}
+
+private final class Sub2BodyRequiredRefreshProtocol: URLProtocol {
+    static var refreshBodies: [String] = []
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        let requestBody = String(decoding: requestBodyData(request), as: UTF8.self)
+        let status: Int
+        let body: String
+        if path == "/api/v1/auth/refresh" {
+            Self.refreshBodies.append(requestBody)
+            status = 200
+            if requestBody.contains(#""refresh_token":"field-refresh""#) {
+                body = #"{"code":0,"data":{"access_token":"body-access","refresh_token":"rotated-body","expires_in":3600}}"#
+            } else if requestBody == #"{}"# {
+                body = #"{"code":"REFRESH_TOKEN_REQUIRED","message":"Refresh token required","data":null}"#
+            } else {
+                body = #"{"code":"INVALID_REFRESH_TOKEN","message":"Invalid refresh token","data":null}"#
+            }
+        } else if path == "/api/v1/auth/me", request.value(forHTTPHeaderField: "Authorization") == "Bearer body-access" {
+            status = 200
+            body = #"{"code":0,"data":{"balance":7.25,"total_recharged":30}}"#
+        } else {
+            status = 401
+            body = #"{"code":"TOKEN_EXPIRED","message":"Token has expired","data":null}"#
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private func requestBodyData(_ request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1_024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+}
+
+private final class Sub2StringErrorProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        let body = #"{"code":"TOKEN_EXPIRED","message":"Token has expired","data":null}"#
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class CrossOriginRefreshProtocol: URLProtocol {

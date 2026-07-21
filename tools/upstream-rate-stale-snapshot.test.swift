@@ -128,6 +128,52 @@ private struct UpstreamRateStaleSnapshotTests {
             ) == [1: 0.05],
             "previous upstream rate map should include only changed provider entries"
         )
+        let selectedChangedSites = UpstreamRateMatcher.buildSites(
+            providers: providers,
+            snapshots: [changedSnapshot],
+            selectedProviderIds: [1],
+            ignoredHosts: []
+        )
+        expectTrue(
+            pendingSelectedUpstreamRateRows(in: selectedChangedSites).map(\.providerId) == [1],
+            "a selected rate difference should remain eligible for automatic application"
+        )
+        expectTrue(
+            shouldSchedulePendingUpstreamRateSync(
+                pendingSyncCount: 1,
+                isRefreshingRates: false,
+                isSyncingRates: false,
+                hasScheduledTask: false
+            ),
+            "a provider reload that reveals a pending selected rate should schedule automatic application"
+        )
+        expectFalse(
+            shouldSchedulePendingUpstreamRateSync(
+                pendingSyncCount: 1,
+                isRefreshingRates: true,
+                isSyncingRates: false,
+                hasScheduledTask: false
+            ),
+            "an upstream refresh should own synchronization until it finishes"
+        )
+        expectFalse(
+            shouldSchedulePendingUpstreamRateSync(
+                pendingSyncCount: 1,
+                isRefreshingRates: false,
+                isSyncingRates: true,
+                hasScheduledTask: false
+            ),
+            "an active synchronization should not enqueue a duplicate"
+        )
+        expectFalse(
+            shouldSchedulePendingUpstreamRateSync(
+                pendingSyncCount: 1,
+                isRefreshingRates: false,
+                isSyncingRates: false,
+                hasScheduledTask: true
+            ),
+            "an existing retry task should coalesce duplicate provider reloads"
+        )
         expectTrue(
             formatMultiplierDelta(0.2) == "+0.20x",
             "positive upstream rate deltas should use signed suffix notation"

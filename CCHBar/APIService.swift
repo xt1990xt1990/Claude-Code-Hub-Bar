@@ -322,12 +322,14 @@ actor APIService {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
+        config.cchDisableURLCaching()
         self.session = URLSession(configuration: config)
 
         let directConfig = URLSessionConfiguration.default
         directConfig.timeoutIntervalForRequest = 15
         directConfig.timeoutIntervalForResource = 30
         directConfig.connectionProxyDictionary = [:]
+        directConfig.cchDisableURLCaching()
         self.directSession = URLSession(configuration: directConfig)
     }
 

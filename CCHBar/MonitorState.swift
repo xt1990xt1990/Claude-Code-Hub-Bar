@@ -158,6 +158,7 @@ private enum CCHUpstreamRateStorage {
     static let snapshotsKey = "upstream_rate_snapshots_v1"
     static let balanceRefreshInterval: TimeInterval = 60 * 60
     static let balanceStaleInterval: TimeInterval = 60 * 60
+    static let pendingSyncRetryInterval: TimeInterval = 30
     static let minAutoSyncIntervalHours = 1.0
     static let maxAutoSyncIntervalHours = 72.0
 }
@@ -308,6 +309,7 @@ final class MonitorState: ObservableObject {
     private var upstreamWakeRefreshCoordinator = CCHUpstreamWakeRefreshCoordinator()
     private var upstreamWakeRefreshTask: Task<Void, Never>?
     private var providerMiniProbeIntervalRestartTask: Task<Void, Never>?
+    private var pendingUpstreamRateSyncTask: Task<Void, Never>?
     private var providerMiniProbeTasks: [Int: Task<Void, Never>] = [:]
     private var providerMiniProbeTaskTokens: [Int: UUID] = [:]
     private var providerMiniProbeRunTokens: [Int: UUID] = [:]
@@ -336,6 +338,7 @@ final class MonitorState: ObservableObject {
     private var providerById: [Int: CCHProvider] = [:]
     private var providerMultiplierByName: [String: Double] = [:]
     private var providerMultiplierByProviderId: [Int: Double] = [:]
+    private var providerMultiplierMutationGeneration = 0
     private var upstreamProviderInputs: [UpstreamRateProviderInput] = []
     private var upstreamRateSitesCacheInput: CCHUpstreamRateSitesSnapshotInput?
     private var upstreamRateSitesCache: CCHUpstreamRateSitesSnapshot?
@@ -355,6 +358,8 @@ final class MonitorState: ObservableObject {
     private var lastStatusBarOverviewRefresh: Date?
     private var lastStatusBarRunningSeenAt: Date?
     private var officialProviderGroups: [CCHProviderGroup] = []
+    private var isSyncingSelectedUpstreamRates = false
+    private var pendingUpstreamRateSyncRetryNotBefore = Date.distantPast
 
     var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
@@ -591,6 +596,7 @@ final class MonitorState: ObservableObject {
         providerMiniProbeResumeTask?.cancel()
         upstreamWakeRefreshTask?.cancel()
         providerMiniProbeIntervalRestartTask?.cancel()
+        pendingUpstreamRateSyncTask?.cancel()
         providerMiniProbeTasks.values.forEach { $0.cancel() }
         providerMiniProbeNetworkMonitor.cancel()
         upstreamRateAutoSyncTimer?.cancel()
@@ -1441,7 +1447,10 @@ final class MonitorState: ObservableObject {
     func refreshUpstreamRates(silent: Bool = false) async -> Bool {
         if isRefreshingUpstreamRates || isRefreshingUpstreamBalances { return false }
         isRefreshingUpstreamRates = true
-        defer { isRefreshingUpstreamRates = false }
+        defer {
+            isRefreshingUpstreamRates = false
+            schedulePendingUpstreamRateSyncIfNeeded()
+        }
 
         if providers.isEmpty {
             _ = await loadProviders(includeUsage: true)
@@ -1453,33 +1462,35 @@ final class MonitorState: ObservableObject {
         }
         let sortedGroups = grouped.sorted { $0.key < $1.key }
         let currentConfig = config
+        let currentAPI = api
+        let currentUpstreamRateService = upstreamRateService
+        let refreshGroups = sortedGroups.map { group in
+            (
+                host: group.key,
+                values: group.value,
+                credential: credentialsByHost[group.key],
+                localType: localDetectedSourceType(host: group.key)
+            )
+        }
 
         upstreamRateFetchingHosts = Set(sortedGroups.map(\.key))
         defer { upstreamRateFetchingHosts.removeAll() }
 
-        let results = await withTaskGroup(of: UpstreamRateHostRefreshResult.self) { group in
-            for (host, values) in sortedGroups {
-                let credential = credentialsByHost[host]
-                let localType = localDetectedSourceType(host: host)
-                group.addTask { [api, upstreamRateService] in
-                    await Self.refreshUpstreamRateHost(
-                        host: host,
-                        values: values,
-                        credential: credential,
-                        localType: localType,
-                        config: currentConfig,
-                        api: api,
-                        upstreamRateService: upstreamRateService
-                    )
-                }
-            }
-
-            var values: [UpstreamRateHostRefreshResult] = []
-            for await result in group {
-                values.append(result)
-            }
-            return values.sorted { $0.host < $1.host }
-        }
+        let results = await cchBoundedConcurrentMap(
+            refreshGroups,
+            maxConcurrentTasks: CCHUpstreamRequestLimits.maxConcurrentTasks
+        ) { hostGroup in
+            let host = hostGroup.host
+            return await Self.refreshUpstreamRateHost(
+                host: host,
+                values: hostGroup.values,
+                credential: hostGroup.credential,
+                localType: hostGroup.localType,
+                config: currentConfig,
+                api: currentAPI,
+                upstreamRateService: currentUpstreamRateService
+            )
+        }.sorted { $0.host < $1.host }
 
         var nextSnapshots: [UpstreamRateSnapshot] = []
         var nextCredentials = upstreamRateCredentials
@@ -1525,7 +1536,7 @@ final class MonitorState: ObservableObject {
         upstreamRateLastCheckedAt = Date()
 
         let preSyncMultipliers = providerMultiplierByProviderId
-        await syncSelectedUpstreamRates(showEmptyMessage: false)
+        let syncCompleted = await syncSelectedUpstreamRates(showEmptyMessage: false)
         let nextAdjustedProviderIds = Set<Int>(
             providers.compactMap { provider in
                 guard let previous = preSyncMultipliers[provider.id] else { return nil }
@@ -1536,7 +1547,13 @@ final class MonitorState: ObservableObject {
             upstreamRateLastSyncAdjustedProviderIds = nextAdjustedProviderIds
         }
 
-        if !silent {
+        if !silent, !syncCompleted, upstreamRatePendingSyncCount > 0 {
+            flashActionMessage(
+                "检测完成，\(upstreamRatePendingSyncCount) 个倍率待自动重试",
+                duration: 5,
+                isWarning: true
+            )
+        } else if !silent {
             flashActionMessage("上游倍率已检测")
         }
         return true
@@ -1556,42 +1573,36 @@ final class MonitorState: ObservableObject {
 
         isRefreshingUpstreamBalances = true
         defer { isRefreshingUpstreamBalances = false }
+        let currentUpstreamRateService = upstreamRateService
 
-        let results = await withTaskGroup(of: UpstreamRateHostRefreshResult.self) { group in
-            for credential in credentials {
-                group.addTask { [upstreamRateService] in
-                    do {
-                        let outcome = try await upstreamRateService.fetchBalance(credential: credential)
-                        return UpstreamRateHostRefreshResult(
-                            host: credential.host,
-                            snapshot: outcome.snapshot,
-                            credential: outcome.credential,
-                            errorMessage: nil
-                        )
-                    } catch let error as UpstreamRateServiceError where error.isAuthenticationExpired {
-                        return UpstreamRateHostRefreshResult(
-                            host: credential.host,
-                            snapshot: UpstreamRateSnapshot(host: credential.host, sourceType: credential.sourceType, status: .authExpired),
-                            credential: nil,
-                            errorMessage: error.localizedDescription
-                        )
-                    } catch {
-                        return UpstreamRateHostRefreshResult(
-                            host: credential.host,
-                            snapshot: nil,
-                            credential: nil,
-                            errorMessage: error.localizedDescription
-                        )
-                    }
-                }
+        let results = await cchBoundedConcurrentMap(
+            credentials,
+            maxConcurrentTasks: CCHUpstreamRequestLimits.maxConcurrentTasks
+        ) { credential in
+            do {
+                let outcome = try await currentUpstreamRateService.fetchBalance(credential: credential)
+                return UpstreamRateHostRefreshResult(
+                    host: credential.host,
+                    snapshot: outcome.snapshot,
+                    credential: outcome.credential,
+                    errorMessage: nil
+                )
+            } catch let error as UpstreamRateServiceError where error.isAuthenticationExpired {
+                return UpstreamRateHostRefreshResult(
+                    host: credential.host,
+                    snapshot: UpstreamRateSnapshot(host: credential.host, sourceType: credential.sourceType, status: .authExpired),
+                    credential: nil,
+                    errorMessage: error.localizedDescription
+                )
+            } catch {
+                return UpstreamRateHostRefreshResult(
+                    host: credential.host,
+                    snapshot: nil,
+                    credential: nil,
+                    errorMessage: error.localizedDescription
+                )
             }
-
-            var values: [UpstreamRateHostRefreshResult] = []
-            for await result in group {
-                values.append(result)
-            }
-            return values.sorted { $0.host < $1.host }
-        }
+        }.sorted { $0.host < $1.host }
 
         var balanceSnapshots: [UpstreamRateSnapshot] = []
         var nextCredentials = upstreamRateCredentials
@@ -1697,26 +1708,18 @@ final class MonitorState: ObservableObject {
         config: CCHConfig,
         api: APIService
     ) async -> [UpstreamRateTarget] {
-        await withTaskGroup(of: UpstreamRateTarget?.self) { group in
-            for provider in providers {
-                group.addTask {
-                    do {
-                        let key = try await api.revealProviderKey(config: config, providerId: provider.id)
-                        return UpstreamRateTarget(providerId: provider.id, providerName: provider.name, apiKey: key)
-                    } catch {
-                        return nil
-                    }
-                }
+        let targets: [UpstreamRateTarget?] = await cchBoundedConcurrentMap(
+            providers,
+            maxConcurrentTasks: CCHUpstreamRequestLimits.maxConcurrentTasks
+        ) { provider -> UpstreamRateTarget? in
+            do {
+                let key = try await api.revealProviderKey(config: config, providerId: provider.id)
+                return UpstreamRateTarget(providerId: provider.id, providerName: provider.name, apiKey: key)
+            } catch {
+                return nil
             }
-
-            var targets: [UpstreamRateTarget] = []
-            for await target in group {
-                if let target {
-                    targets.append(target)
-                }
-            }
-            return targets.sorted { $0.providerId < $1.providerId }
         }
+        return targets.compactMap { $0 }.sorted { $0.providerId < $1.providerId }
     }
 
     @discardableResult
@@ -1776,18 +1779,61 @@ final class MonitorState: ObservableObject {
         flashActionMessage("已从上游倍率移除 \(site.displayName)")
     }
 
-    func syncSelectedUpstreamRates(showEmptyMessage: Bool = true) async {
-        let rows = upstreamRateSites.flatMap(\.syncableRows).filter(\.hasRateChange)
+    @discardableResult
+    func syncSelectedUpstreamRates(showEmptyMessage: Bool = true) async -> Bool {
+        guard !isSyncingSelectedUpstreamRates else { return false }
+
+        let rows = pendingSelectedUpstreamRateRows(in: upstreamRateSites)
         guard !rows.isEmpty else {
             if showEmptyMessage {
                 flashActionMessage("没有需要应用的上游倍率")
             }
-            return
+            return true
         }
 
+        isSyncingSelectedUpstreamRates = true
+        var appliedCount = 0
+        var failures: [String] = []
         for row in rows {
-            await syncUpstreamRate(row, showNoopMessage: showEmptyMessage)
+            guard upstreamRateSelectedProviderIds.contains(row.providerId) else { continue }
+            guard let provider = providerById[row.providerId], let upstreamRate = row.upstreamRate else {
+                failures.append("\(row.providerName): 未找到渠道或上游倍率")
+                continue
+            }
+            if let errorMessage = await applyProviderMultiplier(
+                provider,
+                multiplier: upstreamRate,
+                announcesChanges: false
+            ) {
+                failures.append("\(provider.name): \(errorMessage)")
+            } else {
+                appliedCount += 1
+            }
         }
+
+        let reloadError = appliedCount > 0
+            ? await loadProviders(includeUsage: false, schedulePendingRateSync: false)
+            : nil
+        let pendingCount = upstreamRatePendingSyncCount
+        let completed = failures.isEmpty && reloadError == nil && pendingCount == 0
+        isSyncingSelectedUpstreamRates = false
+
+        if completed {
+            pendingUpstreamRateSyncRetryNotBefore = .distantPast
+            if showEmptyMessage, appliedCount > 0 {
+                flashActionMessage("已应用 \(appliedCount) 个上游倍率")
+            }
+        } else {
+            pendingUpstreamRateSyncRetryNotBefore = Date().addingTimeInterval(
+                CCHUpstreamRateStorage.pendingSyncRetryInterval
+            )
+            schedulePendingUpstreamRateSyncIfNeeded()
+            if showEmptyMessage {
+                let message = reloadError ?? failures.first ?? "仍有 \(pendingCount) 个倍率待应用"
+                flashActionMessage(message, duration: 5, isWarning: true)
+            }
+        }
+        return completed
     }
 
     func syncUpstreamRate(_ row: UpstreamRateProviderRow, showNoopMessage: Bool = true) async {
@@ -1804,6 +1850,33 @@ final class MonitorState: ObservableObject {
             return
         }
         await updateProviderMultiplier(provider, multiplier: upstreamRate)
+    }
+
+    private func schedulePendingUpstreamRateSyncIfNeeded() {
+        guard shouldSchedulePendingUpstreamRateSync(
+            pendingSyncCount: upstreamRatePendingSyncCount,
+            isRefreshingRates: isRefreshingUpstreamRates,
+            isSyncingRates: isSyncingSelectedUpstreamRates,
+            hasScheduledTask: pendingUpstreamRateSyncTask != nil
+        ) else { return }
+
+        let delay = max(pendingUpstreamRateSyncRetryNotBefore.timeIntervalSinceNow, 0.25)
+        pendingUpstreamRateSyncTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.pendingUpstreamRateSyncTask = nil
+            guard shouldSchedulePendingUpstreamRateSync(
+                pendingSyncCount: self.upstreamRatePendingSyncCount,
+                isRefreshingRates: self.isRefreshingUpstreamRates,
+                isSyncingRates: self.isSyncingSelectedUpstreamRates,
+                hasScheduledTask: false
+            ) else { return }
+            await self.syncSelectedUpstreamRates(showEmptyMessage: false)
+        }
     }
 
     func startUpstreamRateAutoSyncTimer(resetSchedule: Bool = false) {
@@ -1873,18 +1946,32 @@ final class MonitorState: ObservableObject {
     }
 
     func updateProviderMultiplier(_ provider: CCHProvider, multiplier: Double) async {
+        guard await applyProviderMultiplier(provider, multiplier: multiplier, announcesChanges: true) == nil else { return }
+        _ = await loadProviders()
+    }
+
+    private func applyProviderMultiplier(
+        _ provider: CCHProvider,
+        multiplier: Double,
+        announcesChanges: Bool
+    ) async -> String? {
         guard multiplier >= 0 else {
-            flashActionMessage("倍率不能为负数", duration: 4, isWarning: true)
-            return
+            let message = "倍率不能为负数"
+            if announcesChanges {
+                flashActionMessage(message, duration: 4, isWarning: true)
+            }
+            return message
         }
-        if providerMultiplierUpdatingIds.contains(provider.id) {
-            return
+        guard !providerMultiplierUpdatingIds.contains(provider.id) else {
+            return "倍率正在更新"
         }
 
         let normalized = (multiplier * 10_000).rounded() / 10_000
-        actionMessageDismissTask?.cancel()
-        actionMessage = "更新倍率 \(provider.name): \(formatMultiplier(normalized))..."
-        actionMessageIsWarning = false
+        if announcesChanges {
+            actionMessageDismissTask?.cancel()
+            actionMessage = "更新倍率 \(provider.name): \(formatMultiplier(normalized))..."
+            actionMessageIsWarning = false
+        }
         providerMultiplierUpdatingIds.insert(provider.id)
         defer {
             providerMultiplierUpdatingIds.remove(provider.id)
@@ -1892,10 +1979,17 @@ final class MonitorState: ObservableObject {
 
         do {
             try await api.setProviderMultiplier(config: config, providerId: provider.id, multiplier: normalized)
-            flashActionMessage("倍率已更新 \(provider.name): \(formatMultiplier(normalized))")
-            _ = await loadProviders()
+            providerMultiplierMutationGeneration &+= 1
+            if announcesChanges {
+                flashActionMessage("倍率已更新 \(provider.name): \(formatMultiplier(normalized))")
+            }
+            return nil
         } catch {
-            flashActionMessage(error.localizedDescription, duration: 5, isWarning: true)
+            let message = error.localizedDescription
+            if announcesChanges {
+                flashActionMessage(message, duration: 5, isWarning: true)
+            }
+            return message
         }
     }
 
@@ -2291,10 +2385,16 @@ final class MonitorState: ObservableObject {
 
     private func loadProviders(
         includeUsage: Bool = true,
-        sortMode: CCHProviderSortMode = .preserveCurrentOrder
+        sortMode: CCHProviderSortMode = .preserveCurrentOrder,
+        schedulePendingRateSync: Bool = true
     ) async -> String? {
+        let multiplierMutationGeneration = providerMultiplierMutationGeneration
         do {
-            providers = try await api.fetchProviders(config: config, includeUsage: includeUsage)
+            let fetchedProviders = try await api.fetchProviders(config: config, includeUsage: includeUsage)
+            guard multiplierMutationGeneration == providerMultiplierMutationGeneration else {
+                return nil
+            }
+            providers = fetchedProviders
             if shouldRefreshProviderGroups() {
                 if let groups = try? await api.fetchProviderGroups(config: config) {
                     officialProviderGroups = groups
@@ -2316,6 +2416,9 @@ final class MonitorState: ObservableObject {
             updateStatusBarSnapshot()
             if panelVisible, selectedTab == .upstreamRates {
                 Task { await refreshUpstreamRatesIfSnapshotIsStale() }
+            }
+            if schedulePendingRateSync {
+                schedulePendingUpstreamRateSyncIfNeeded()
             }
             return nil
         } catch {

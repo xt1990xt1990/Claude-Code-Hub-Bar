@@ -616,6 +616,13 @@ final class UpstreamChromeAuthImporter: ObservableObject {
     }
 
     static func defaultValidateNewAPILogin(_ credential: UpstreamRateCredential) async -> Bool {
+        await validateNewAPILogin(credential, session: .shared)
+    }
+
+    static func validateNewAPILogin(
+        _ credential: UpstreamRateCredential,
+        session: URLSession
+    ) async -> Bool {
         let accessToken = credential.newAPIAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
         let cookieHeader = credential.newAPICookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !accessToken.isEmpty || !cookieHeader.isEmpty else {
@@ -659,7 +666,7 @@ final class UpstreamChromeAuthImporter: ObservableObject {
             }
 
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
+                let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                     let status = (response as? HTTPURLResponse)?.statusCode ?? -1
                     print("UpstreamChromeAuthImporter newAPI validation host=\(credential.host) path=\(probe.apiPath) status=\(status) success=false userIdSet=\(!userId.isEmpty) tokenLen=\(accessToken.count) cookieLen=\(cookieHeader.count)")
@@ -706,64 +713,61 @@ final class UpstreamChromeAuthImporter: ObservableObject {
                 print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) result=invalid-url")
                 return nil
             }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Accept")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue(
+            var baseRequest = URLRequest(url: url)
+            baseRequest.httpMethod = "POST"
+            baseRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+            baseRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            baseRequest.setValue(
                 upstreamRateUserAgentHeader(credential.userAgent, cookieHeader: credential.sub2CookieHeader),
                 forHTTPHeaderField: "User-Agent"
             )
             if !credential.sub2CookieHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                request.setValue(credential.sub2CookieHeader, forHTTPHeaderField: "Cookie")
+                baseRequest.setValue(credential.sub2CookieHeader, forHTTPHeaderField: "Cookie")
             }
-            let body = hasCookieRefreshToken ? [:] : ["refresh_token": refreshToken]
-            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            let requestBodies = upstreamRateSub2RefreshRequestBodies(credential)
+            for (index, body) in requestBodies.enumerated() {
+                var request = baseRequest
+                request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-            do {
-                let (data, response) = try await session.data(for: request)
-                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                    print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh status=\(status) success=false refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
-                    return nil
-                }
-                guard
-                    let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                    let code = upstreamRateBrowserAuthDouble(object["code"])
-                else {
-                    print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh status=2xx success=unknown refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
-                    return nil
-                }
-                let nested = object["data"] as? [String: Any] ?? [:]
-                let token = upstreamRateBrowserAuthString(nested["access_token"])
-                let success = code == 0 && !token.isEmpty
-                let message = upstreamRateBrowserAuthString(object["message"]).prefix(80)
-                print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh status=2xx success=\(success) message=\(message) refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
-                if success {
-                    next.sub2AuthToken = token
-                    let mergedCookieHeader = upstreamRateMergingResponseCookies(
-                        credential.sub2CookieHeader,
-                        response: http,
-                        expectedHost: normalizedUpstreamHost(credential.baseURL) ?? credential.host
-                    )
-                    next.sub2CookieHeader = mergedCookieHeader
-                    let nextRefreshToken = upstreamRateBrowserAuthString(nested["refresh_token"])
-                    let responseCookieRefreshToken = upstreamRateSub2RefreshTokenCookieValue(mergedCookieHeader)
-                    if !responseCookieRefreshToken.isEmpty {
-                        next.sub2RefreshToken = responseCookieRefreshToken
-                    } else if !nextRefreshToken.isEmpty {
-                        next.sub2RefreshToken = nextRefreshToken
+                do {
+                    let (data, response) = try await session.data(for: request)
+                    guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                        print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh attempt=\(index + 1)/\(requestBodies.count) status=\(status) success=false refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
+                        continue
                     }
+                    guard
+                        let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                        let code = upstreamRateBrowserAuthDouble(object["code"])
+                    else {
+                        print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh attempt=\(index + 1)/\(requestBodies.count) status=2xx success=unknown refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
+                        continue
+                    }
+                    let nested = object["data"] as? [String: Any] ?? [:]
+                    let token = upstreamRateBrowserAuthString(nested["access_token"])
+                    let success = code == 0 && !token.isEmpty
+                    let message = upstreamRateBrowserAuthString(object["message"]).prefix(80)
+                    print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh attempt=\(index + 1)/\(requestBodies.count) status=2xx success=\(success) message=\(message) refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
+                    guard success else { continue }
+
+                    next.sub2AuthToken = token
+                    let nextRefreshToken = upstreamRateBrowserAuthString(nested["refresh_token"])
+                    let refreshState = upstreamRateUpdatedSub2RefreshState(
+                        credential: credential,
+                        response: http,
+                        responseBodyToken: nextRefreshToken
+                    )
+                    next.sub2CookieHeader = refreshState.cookieHeader
+                    next.sub2RefreshToken = refreshState.refreshToken
                     if let expiresIn = upstreamRateBrowserAuthDouble(nested["expires_in"]), expiresIn > 0 {
                         next.sub2TokenExpiresAt = Date().addingTimeInterval(expiresIn)
                     }
                     return next
+                } catch {
+                    print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh attempt=\(index + 1)/\(requestBodies.count) error=\(error.localizedDescription) refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
                 }
-                return nil
-            } catch {
-                print("UpstreamChromeAuthImporter Sub2API validation host=\(credential.host) path=/api/v1/auth/refresh error=\(error.localizedDescription) refreshTokenSet=\(!refreshToken.isEmpty) cookieLen=\(credential.sub2CookieHeader.count)")
-                return nil
             }
+            return nil
         }
         return credential
     }
@@ -967,6 +971,7 @@ private struct NewAPILoginValidationProbe {
     let signedPath: String?
 
     static let defaultProbes = [
+        NewAPILoginValidationProbe(apiPath: "/api/user/profile", signedPath: "/user/profile"),
         NewAPILoginValidationProbe(apiPath: "/api/user/self/groups", signedPath: nil),
         NewAPILoginValidationProbe(apiPath: "/api/user/self", signedPath: "/user/self")
     ]

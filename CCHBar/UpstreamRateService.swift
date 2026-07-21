@@ -102,6 +102,7 @@ actor UpstreamRateService {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
+        config.cchDisableURLCaching()
         self.session = session ?? URLSession(configuration: config)
         self.dateProvider = dateProvider
         self.nonceProvider = nonceProvider
@@ -109,6 +110,7 @@ actor UpstreamRateService {
         let detectionConfig = URLSessionConfiguration.ephemeral
         detectionConfig.timeoutIntervalForRequest = 2
         detectionConfig.timeoutIntervalForResource = 3
+        detectionConfig.cchDisableURLCaching()
         self.detectionSession = detectionSession ?? URLSession(configuration: detectionConfig)
     }
 
@@ -403,38 +405,65 @@ actor UpstreamRateService {
             throw UpstreamRateServiceError.missingCredential("缺少 Sub2API refresh token")
         }
 
-        let result = try await requestJSONResponse(
-            baseURL: credential.baseURL,
-            path: "/api/v1/auth/refresh",
-            method: "POST",
-            headers: upstreamRateSub2RefreshHeaders(credential),
-            body: hasCookieRefreshToken ? [:] : ["refresh_token": refreshToken],
-            unwrap: .sub2
-        )
+        let requestBodies = upstreamRateSub2RefreshRequestBodies(credential)
+        var result: JSONResponse?
+        for (index, body) in requestBodies.enumerated() {
+            do {
+                let candidate = try await requestJSONResponse(
+                    baseURL: credential.baseURL,
+                    path: "/api/v1/auth/refresh",
+                    method: "POST",
+                    headers: upstreamRateSub2RefreshHeaders(credential),
+                    body: body,
+                    unwrap: .sub2
+                )
+                let candidateData = candidate.value as? [String: Any] ?? [:]
+                guard !serviceString(candidateData["access_token"]).isEmpty else {
+                    throw UpstreamRateServiceError.invalidResponse("Sub2API refresh 响应缺少 token")
+                }
+                result = candidate
+                break
+            } catch {
+                let hasFallback = index + 1 < requestBodies.count
+                guard hasFallback, shouldTryNextSub2RefreshBody(after: error) else {
+                    throw error
+                }
+            }
+        }
+        guard let result else {
+            throw UpstreamRateServiceError.invalidResponse("Sub2API refresh 响应缺少 token")
+        }
         let dict = result.value as? [String: Any] ?? [:]
         let accessToken = serviceString(dict["access_token"])
         let nextRefreshToken = serviceString(dict["refresh_token"])
-        let mergedCookieHeader = upstreamRateMergingResponseCookies(
-            credential.sub2CookieHeader,
+        let refreshState = upstreamRateUpdatedSub2RefreshState(
+            credential: credential,
             response: result.response,
-            expectedHost: normalizedUpstreamHost(credential.baseURL) ?? credential.host
+            responseBodyToken: nextRefreshToken
         )
-        let responseCookieRefreshToken = upstreamRateSub2RefreshTokenCookieValue(mergedCookieHeader)
-        guard !accessToken.isEmpty, !nextRefreshToken.isEmpty || !responseCookieRefreshToken.isEmpty else {
+        guard !accessToken.isEmpty, !refreshState.refreshToken.isEmpty else {
             throw UpstreamRateServiceError.invalidResponse("Sub2API refresh 响应缺少 token")
         }
 
         let expiresIn = serviceDouble(dict["expires_in"], fallback: 0)
         var next = credential
         next.sub2AuthToken = accessToken
-        next.sub2CookieHeader = mergedCookieHeader
-        if !responseCookieRefreshToken.isEmpty {
-            next.sub2RefreshToken = responseCookieRefreshToken
-        } else if !nextRefreshToken.isEmpty {
-            next.sub2RefreshToken = nextRefreshToken
-        }
+        next.sub2CookieHeader = refreshState.cookieHeader
+        next.sub2RefreshToken = refreshState.refreshToken
         next.sub2TokenExpiresAt = Date().addingTimeInterval(expiresIn)
         return next
+    }
+
+    private func shouldTryNextSub2RefreshBody(after error: Error) -> Bool {
+        guard let serviceError = error as? UpstreamRateServiceError else { return false }
+        switch serviceError {
+        case .invalidResponse:
+            return true
+        case .http(let status, _):
+            return (400...499).contains(status) && !serviceError.isCloudflareChallenge
+        case .invalidURL, .missingCredential:
+            return false
+        }
     }
 
     private func fetchSub2UserBalance(_ credential: UpstreamRateCredential) async throws -> UpstreamBalanceSnapshot? {
@@ -867,13 +896,18 @@ actor UpstreamRateService {
         case .none:
             return value
         case .sub2:
-            if dict["code"] != nil, dict["data"] != nil {
-                if serviceDouble(dict["code"]) != 0 {
+            guard let code = dict["code"] else { return value }
+            if let numericCode = serviceOptionalDouble(code) {
+                if numericCode != 0 {
                     throw UpstreamRateServiceError.invalidResponse(serviceString(dict["message"], fallback: "Sub2API 返回错误"))
                 }
-                return dict["data"] ?? NSNull()
+            } else {
+                let stringCode = serviceString(code)
+                if !stringCode.isEmpty {
+                    throw UpstreamRateServiceError.invalidResponse(serviceString(dict["message"], fallback: stringCode))
+                }
             }
-            return value
+            return dict["data"] ?? value
         case .newAPI:
             if let success = dict["success"] as? Bool {
                 if !success {
@@ -972,6 +1006,71 @@ func upstreamRateSub2RefreshTokenCookieValue(_ cookieHeader: String) -> String {
             return pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
         }
         .first ?? ""
+}
+
+func upstreamRateSub2RefreshRequestBodies(_ credential: UpstreamRateCredential) -> [[String: Any]] {
+    let cookieToken = upstreamRateSub2RefreshTokenCookieValue(credential.sub2CookieHeader)
+    let storedToken = credential.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+    var bodies: [[String: Any]] = []
+    var bodyTokens: [String] = []
+
+    if !cookieToken.isEmpty {
+        bodies.append([:])
+        bodyTokens.append(cookieToken)
+    }
+    if !storedToken.isEmpty, !bodyTokens.contains(storedToken) {
+        bodyTokens.append(storedToken)
+    }
+    bodies.append(contentsOf: bodyTokens.map { ["refresh_token": $0] })
+    return bodies
+}
+
+func upstreamRateReplacingSub2RefreshTokenCookie(_ cookieHeader: String, with token: String) -> String {
+    let refreshToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !refreshToken.isEmpty else { return cookieHeader }
+    var replaced = false
+    let parts = cookieHeader.split(separator: ";").compactMap { part -> String? in
+        let pieces = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count == 2 else { return nil }
+        let name = pieces[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        if name.caseInsensitiveCompare("sub2api_refresh_token") == .orderedSame {
+            replaced = true
+            return "\(name)=\(refreshToken)"
+        }
+        return "\(name)=\(pieces[1].trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+    return replaced ? parts.joined(separator: "; ") : cookieHeader
+}
+
+func upstreamRateUpdatedSub2RefreshState(
+    credential: UpstreamRateCredential,
+    response: HTTPURLResponse,
+    responseBodyToken: String
+) -> (cookieHeader: String, refreshToken: String) {
+    let originalCookieToken = upstreamRateSub2RefreshTokenCookieValue(credential.sub2CookieHeader)
+    var mergedCookieHeader = upstreamRateMergingResponseCookies(
+        credential.sub2CookieHeader,
+        response: response,
+        expectedHost: normalizedUpstreamHost(credential.baseURL) ?? credential.host
+    )
+    let mergedCookieToken = upstreamRateSub2RefreshTokenCookieValue(mergedCookieHeader)
+    let bodyToken = responseBodyToken.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if !mergedCookieToken.isEmpty, mergedCookieToken != originalCookieToken {
+        return (mergedCookieHeader, mergedCookieToken)
+    }
+    if !bodyToken.isEmpty {
+        mergedCookieHeader = upstreamRateReplacingSub2RefreshTokenCookie(mergedCookieHeader, with: bodyToken)
+        return (mergedCookieHeader, bodyToken)
+    }
+    if !mergedCookieToken.isEmpty {
+        return (mergedCookieHeader, mergedCookieToken)
+    }
+    return (
+        mergedCookieHeader,
+        credential.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+    )
 }
 
 func upstreamRateMergingResponseCookies(
@@ -1073,6 +1172,8 @@ enum UpstreamRateServiceError: LocalizedError {
             return normalized.contains("invalid refresh token")
                 || normalized.contains("invalid token")
                 || normalized.contains("token expired")
+                || normalized.contains("token has expired")
+                || normalized.contains("token_expired")
                 || normalized.contains("unauthorized")
                 || normalized.contains("forbidden")
                 || normalized.contains("登录")
