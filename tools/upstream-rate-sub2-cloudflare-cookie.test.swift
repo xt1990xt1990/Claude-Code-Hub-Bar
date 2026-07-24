@@ -5,6 +5,7 @@ import Foundation
 private struct UpstreamRateSub2CloudflareCookieTests {
     @MainActor
     static func main() async throws {
+        try testSub2TokenRefreshLeeway()
         try testSub2BrowserImportStoresCookieHeader()
         try testSub2BrowserImportAcceptsCookieOnlyRefreshToken()
         try await testSub2CookieOnlyLoginUsesValidator()
@@ -15,6 +16,46 @@ private struct UpstreamRateSub2CloudflareCookieTests {
         try testNewAPICookieOnlyHeadersUseBrowserUserAgentFallback()
         try await testNekoProfileLoginValidation()
         try testChromeAuthUsesSharedProfile()
+    }
+
+    private static func testSub2TokenRefreshLeeway() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        try expect(
+            shouldRefreshSub2AccessToken(
+                authToken: "access-token",
+                expiresAt: now.addingTimeInterval(90 * 60),
+                hasRefreshCredential: true,
+                now: now
+            ),
+            "Sub2API token should refresh before the hourly balance timer can miss its expiry window"
+        )
+        try expect(
+            !shouldRefreshSub2AccessToken(
+                authToken: "access-token",
+                expiresAt: now.addingTimeInterval(3 * 60 * 60),
+                hasRefreshCredential: true,
+                now: now
+            ),
+            "Sub2API token with more than the refresh leeway remaining should stay in use"
+        )
+        try expect(
+            shouldRefreshSub2AccessToken(
+                authToken: "",
+                expiresAt: now.addingTimeInterval(24 * 60 * 60),
+                hasRefreshCredential: true,
+                now: now
+            ),
+            "missing Sub2API access token should always trigger refresh"
+        )
+        try expect(
+            !shouldRefreshSub2AccessToken(
+                authToken: "access-token",
+                expiresAt: now.addingTimeInterval(90 * 60),
+                hasRefreshCredential: false,
+                now: now
+            ),
+            "a still-valid access token should remain usable when no refresh credential exists"
+        )
     }
 
     @MainActor

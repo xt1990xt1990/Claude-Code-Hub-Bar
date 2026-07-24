@@ -41,10 +41,13 @@ Private configuration should be entered locally and should not be committed to t
 - Upstream rate rows show provider groups and reuse the provider Mini Probe controls, status, and history.
 - Chrome-based upstream login capture, with credentials stored locally for rate and balance refreshes. The shared login window preserves session state across upstream sites.
 - Automatic renewal for Sub2API cookie-only sessions, including persistence of cookies rotated by the server.
+- Early renewal for Sub2API access tokens so hourly refreshes do not miss the token-expiry window.
 - Manual and scheduled upstream rate refreshes, with automatic multiplier sync for selected providers.
+- Automatic retries for selected multiplier updates that fail or overlap with another refresh, preventing rows from remaining stuck as pending.
 - Automatic upstream session, rate, and balance refresh after the Mac wakes and network connectivity returns.
 - Upstream balance tracking with an independent background refresh cadence. Cookie-only new-api sessions use a browser User-Agent fallback and support profile-based balance endpoints.
 - Site-scoped upstream key inventory scanning, matching, and refresh to reduce repeated parsing and network requests.
+- Preservation of the last valid balance and key matches when an upstream or CCH key read is temporarily incomplete.
 - Provider drawers reuse the existing endpoint and model test controls for upstream checks.
 - Model branding now includes GLM and avoids broad OpenAI model-name false positives.
 - Launch at login support.

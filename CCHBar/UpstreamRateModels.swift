@@ -429,6 +429,10 @@ func shouldRecordUpstreamBalanceRefreshSuccess(
     totalHostCount > 0 && completedHostCount == totalHostCount
 }
 
+func isCompleteUpstreamRateTargetLoad(providerCount: Int, loadedTargetCount: Int) -> Bool {
+    providerCount > 0 && loadedTargetCount == providerCount
+}
+
 func shouldPrunePersistedProviderState(providerIds: Set<Int>) -> Bool {
     !providerIds.isEmpty
 }

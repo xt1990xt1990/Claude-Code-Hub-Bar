@@ -1,6 +1,27 @@
 import CryptoKit
 import Foundation
 
+enum CCHSub2TokenRefreshPolicy {
+    static let leeway: TimeInterval = 2 * 60 * 60
+}
+
+func shouldRefreshSub2AccessToken(
+    authToken: String,
+    expiresAt: Date?,
+    hasRefreshCredential: Bool,
+    now: Date = Date()
+) -> Bool {
+    if authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return true
+    }
+    guard let expiresAt else { return hasRefreshCredential }
+    let remaining = expiresAt.timeIntervalSince(now)
+    if remaining <= 0 {
+        return true
+    }
+    return hasRefreshCredential && remaining <= CCHSub2TokenRefreshPolicy.leeway
+}
+
 struct UpstreamRateTarget {
     let providerId: Int
     let providerName: String
@@ -391,11 +412,13 @@ actor UpstreamRateService {
     }
 
     private func shouldRefreshSub2Token(_ credential: UpstreamRateCredential) -> Bool {
-        if credential.sub2AuthToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return true
-        }
-        guard let expiresAt = credential.sub2TokenExpiresAt else { return true }
-        return expiresAt.timeIntervalSinceNow <= 5 * 60
+        shouldRefreshSub2AccessToken(
+            authToken: credential.sub2AuthToken,
+            expiresAt: credential.sub2TokenExpiresAt,
+            hasRefreshCredential: !credential.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || upstreamRateSub2CookieContainsRefreshToken(credential.sub2CookieHeader),
+            now: dateProvider()
+        )
     }
 
     private func refreshSub2Token(_ credential: UpstreamRateCredential) async throws -> UpstreamRateCredential {
@@ -450,7 +473,7 @@ actor UpstreamRateService {
         next.sub2AuthToken = accessToken
         next.sub2CookieHeader = refreshState.cookieHeader
         next.sub2RefreshToken = refreshState.refreshToken
-        next.sub2TokenExpiresAt = Date().addingTimeInterval(expiresIn)
+        next.sub2TokenExpiresAt = dateProvider().addingTimeInterval(expiresIn)
         return next
     }
 

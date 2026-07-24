@@ -700,8 +700,12 @@ final class UpstreamChromeAuthImporter: ObservableObject {
         session: URLSession
     ) async -> UpstreamRateCredential? {
         var next = credential
-        let shouldRefresh = next.sub2AuthToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || (next.sub2TokenExpiresAt?.timeIntervalSinceNow ?? 0) <= 5 * 60
+        let shouldRefresh = shouldRefreshSub2AccessToken(
+            authToken: next.sub2AuthToken,
+            expiresAt: next.sub2TokenExpiresAt,
+            hasRefreshCredential: !next.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || upstreamRateSub2CookieContainsRefreshToken(next.sub2CookieHeader)
+        )
         if shouldRefresh {
             let refreshToken = next.sub2RefreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
             let hasCookieRefreshToken = upstreamRateSub2CookieContainsRefreshToken(next.sub2CookieHeader)

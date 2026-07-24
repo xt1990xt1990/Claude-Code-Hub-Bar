@@ -71,6 +71,18 @@ private struct UpstreamRateStaleSnapshotTests {
             shouldRecordUpstreamBalanceRefreshSuccess(totalHostCount: 1, completedHostCount: 0),
             "a failed balance batch should remain retryable"
         )
+        expectTrue(
+            isCompleteUpstreamRateTargetLoad(providerCount: 2, loadedTargetCount: 2),
+            "a host refresh may proceed when every provider key was loaded"
+        )
+        expectFalse(
+            isCompleteUpstreamRateTargetLoad(providerCount: 2, loadedTargetCount: 1),
+            "a partial provider-key load must not overwrite the previous host snapshot"
+        )
+        expectFalse(
+            isCompleteUpstreamRateTargetLoad(providerCount: 2, loadedTargetCount: 0),
+            "a failed provider-key load must not be treated as a successful empty snapshot"
+        )
         expectFalse(
             shouldPrunePersistedProviderState(providerIds: []),
             "an empty startup provider response must preserve saved selections and provider-scoped settings"

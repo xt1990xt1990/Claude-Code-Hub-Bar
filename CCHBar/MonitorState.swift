@@ -1674,6 +1674,17 @@ final class MonitorState: ObservableObject {
         if let credential {
             do {
                 let targets = await upstreamRateTargets(for: values, config: config, api: api)
+                guard isCompleteUpstreamRateTargetLoad(
+                    providerCount: values.count,
+                    loadedTargetCount: targets.count
+                ) else {
+                    return UpstreamRateHostRefreshResult(
+                        host: host,
+                        snapshot: nil,
+                        credential: nil,
+                        errorMessage: "CCH 渠道 Key 读取不完整，已保留上次匹配"
+                    )
+                }
                 let outcome = try await upstreamRateService.fetchSnapshot(credential: credential, targets: targets)
                 return UpstreamRateHostRefreshResult(host: host, snapshot: outcome.snapshot, credential: outcome.credential, errorMessage: nil)
             } catch let error as UpstreamRateServiceError where error.isAuthenticationExpired {
@@ -1712,24 +1723,33 @@ final class MonitorState: ObservableObject {
         config: CCHConfig,
         api: APIService
     ) async -> [UpstreamRateTarget] {
-        let targets: [UpstreamRateTarget?] = await cchBoundedConcurrentMap(
-            providers,
-            maxConcurrentTasks: CCHUpstreamRequestLimits.maxConcurrentTasks
-        ) { provider -> UpstreamRateTarget? in
+        var targets: [UpstreamRateTarget] = []
+        for provider in providers.sorted(by: { $0.id < $1.id }) {
             do {
                 let key = try await api.revealProviderKey(config: config, providerId: provider.id)
-                return UpstreamRateTarget(providerId: provider.id, providerName: provider.name, apiKey: key)
+                targets.append(UpstreamRateTarget(providerId: provider.id, providerName: provider.name, apiKey: key))
             } catch {
-                return nil
+                continue
             }
         }
-        return targets.compactMap { $0 }.sorted { $0.providerId < $1.providerId }
+        return targets
     }
 
     @discardableResult
     func saveUpstreamCredential(_ credential: UpstreamRateCredential) -> Bool {
         if upsertUpstreamCredential(credential, persist: true) {
-            Task { await refreshUpstreamRates() }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                for _ in 0..<40 {
+                    guard !Task.isCancelled else { return }
+                    if !self.isRefreshingUpstreamRates, !self.isRefreshingUpstreamBalances {
+                        if await self.refreshUpstreamRates(silent: true) {
+                            return
+                        }
+                    }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+            }
             return true
         }
         return false
